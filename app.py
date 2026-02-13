@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""🚀 全中文智能交易监控中心 · 快速手动版"""
+"""🚀 全中文智能交易监控中心 · 快速版（已修复）"""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -196,6 +196,10 @@ with st.sidebar:
     entry = st.number_input("入场价", value=0.0)
     stop = st.number_input("止损价", value=0.0)
     qty = st.number_input("数量", value=0.01)
+
+# 初始化变量，防止未定义错误
+fusion_dir = 0
+fusion_conf = 0
 
 data_dict = fetch_all_data()
 if data_dict:
