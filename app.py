@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""🚀 全中文智能交易监控中心 · 快速版（已修复）"""
+"""🚀 全中文智能交易监控中心 · 最终稳定版（带模拟数据回退）"""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,29 +7,74 @@ import ta
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import aiohttp
 import os
 from streamlit_autorefresh import st_autorefresh
+import random
 
 # -------------------- 密钥读取（从 Streamlit Secrets）--------------------
 BINANCE_API_KEY = st.secrets.get("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY = st.secrets.get("BINANCE_SECRET_KEY", "")
 PUSHPLUS_TOKEN = st.secrets.get("PUSHPLUS_TOKEN", "")
 
-# -------------------- 数据获取 --------------------
-class AsyncDataFetcher:
+# -------------------- 数据获取（带模拟数据回退）--------------------
+class DataManager:
     def __init__(self):
         self.base_url = "https://api.binance.com/api/v3/klines"
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
+        self.use_mock = False  # 标记是否使用模拟数据
+
+    def generate_mock_data(self, period, limit=200):
+        """生成模拟K线数据"""
+        np.random.seed(42)  # 固定种子，使数据可重复
+        end = datetime.now()
+        if period == '1m':
+            freq = '1min'
+        elif period == '5m':
+            freq = '5min'
+        elif period == '15m':
+            freq = '15min'
+        elif period == '1h':
+            freq = '1H'
+        elif period == '4h':
+            freq = '4H'
+        else:  # '1d'
+            freq = '1D'
+        
+        dates = pd.date_range(end=end, periods=limit, freq=freq)
+        # 生成随机价格走势
+        base = 2000 + random.randint(-100, 100)
+        changes = np.random.randn(limit) * 10
+        prices = base + np.cumsum(changes)
+        opens = prices + np.random.randn(limit) * 2
+        highs = np.maximum(prices, opens) + np.abs(np.random.randn(limit) * 5)
+        lows = np.minimum(prices, opens) - np.abs(np.random.randn(limit) * 5)
+        volumes = np.random.randint(1000, 5000, limit)
+        
+        df = pd.DataFrame({
+            'timestamp': dates,
+            'open': opens,
+            'high': highs,
+            'low': lows,
+            'close': prices,
+            'volume': volumes
+        })
+        return df
 
     async def fetch_period(self, session, period):
+        if self.use_mock:
+            # 如果已经决定使用模拟数据，直接返回模拟数据
+            return period, self.generate_mock_data(period, self.limit)
+        
         params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
         try:
-            async with session.get(self.base_url, params=params, timeout=10) as resp:
+            async with session.get(self.base_url, params=params, timeout=5) as resp:
+                if resp.status != 200:
+                    return period, None
                 data = await resp.json()
                 if isinstance(data, list):
                     df = pd.DataFrame(data, columns=[
@@ -43,14 +88,25 @@ class AsyncDataFetcher:
                     return period, df
                 else:
                     return period, None
-        except Exception:
+        except Exception as e:
+            print(f"获取 {period} 数据失败: {e}")
             return period, None
 
     async def fetch_all(self):
         async with aiohttp.ClientSession() as session:
             tasks = [self.fetch_period(session, p) for p in self.periods]
             results = await asyncio.gather(*tasks)
-            return {p: df for p, df in results if df is not None}
+            data_dict = {p: df for p, df in results if df is not None}
+            
+            # 如果任何一个周期数据获取失败，启用模拟数据模式
+            if len(data_dict) < len(self.periods):
+                self.use_mock = True
+                # 重新获取所有周期（这次直接使用模拟数据）
+                mock_dict = {}
+                for p in self.periods:
+                    mock_dict[p] = self.generate_mock_data(p, self.limit)
+                return mock_dict
+            return data_dict
 
 # -------------------- 指标计算 --------------------
 def add_indicators(df):
@@ -166,13 +222,13 @@ def send_signal_alert(direction, confidence, price):
 # -------------------- 缓存数据 --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
+    manager = DataManager()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    fetcher = AsyncDataFetcher()
-    data_dict = loop.run_until_complete(fetcher.fetch_all())
+    data_dict = loop.run_until_complete(manager.fetch_all())
     for p in data_dict:
         data_dict[p] = add_indicators(data_dict[p])
-    return data_dict
+    return data_dict, manager.use_mock
 
 # -------------------- Streamlit 界面 --------------------
 st.set_page_config(page_title="全中文交易监控中心", layout="wide")
@@ -180,10 +236,11 @@ st.markdown("""
 <style>
     .stApp { background-color: #0B0E14; color: white; }
     .ai-box { background: #1A1D27; border-radius: 10px; padding: 20px; border-left: 6px solid #00F5A0; }
+    .mock-warning { color: #FFAA00; font-size: 0.9em; margin-top: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 全中文智能交易监控中心 · 快速版")
+st.title("🧠 全中文智能交易监控中心 · 最终稳定版")
 st.caption("数据60秒更新 | 多周期切换 | AI信号 | 模拟盈亏 | 微信提醒")
 
 with st.sidebar:
@@ -193,15 +250,21 @@ with st.sidebar:
     if auto:
         st_autorefresh(interval=10*1000, key="auto")
     st.subheader("💰 模拟交易")
-    entry = st.number_input("入场价", value=0.0)
-    stop = st.number_input("止损价", value=0.0)
-    qty = st.number_input("数量", value=0.01)
+    entry = st.number_input("入场价", value=0.0, format="%.2f")
+    stop = st.number_input("止损价", value=0.0, format="%.2f")
+    qty = st.number_input("数量", value=0.01, format="%.4f")
 
-# 初始化变量，防止未定义错误
+# 初始化变量
 fusion_dir = 0
 fusion_conf = 0
 
-data_dict = fetch_all_data()
+# 获取数据
+data_dict, use_mock = fetch_all_data()
+
+# 如果使用模拟数据，显示提示
+if use_mock:
+    st.sidebar.markdown('<p class="mock-warning">⚠️ 当前使用模拟数据（无法获取实时行情）</p>', unsafe_allow_html=True)
+
 if data_dict:
     ai = AIPredictor()
     fusion = MultiPeriodFusion()
@@ -217,7 +280,8 @@ with col1:
     if period in data_dict:
         df = data_dict[period].tail(100).copy()
         df['时间'] = df['timestamp']
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3])
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3],
+                            subplot_titles=(f"ETH/USDT {period}", "RSI (14)"))
         fig.add_trace(go.Candlestick(x=df['时间'], open=df['open'], high=df['high'],
                                       low=df['low'], close=df['close'], name="K线"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['时间'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
@@ -225,28 +289,42 @@ with col1:
         if fusion_dir != 0:
             last = df.iloc[-1]
             y_pos = last['close'] * 1.02 if fusion_dir == 1 else last['close'] * 0.98
-            fig.add_annotation(x=last['时间'], y=y_pos, text="▲ 多" if fusion_dir==1 else "▼ 空", showarrow=True)
+            fig.add_annotation(x=last['时间'], y=y_pos, text="▲ 多" if fusion_dir==1 else "▼ 空", showarrow=True,
+                               arrowhead=2, arrowsize=1, arrowcolor="green" if fusion_dir==1 else "red")
         fig.add_trace(go.Scatter(x=df['时间'], y=df['rsi'], name="RSI", line=dict(color="purple")), row=2, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
         fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("等待数据...")
 
 with col2:
     st.subheader("🧠 信号")
     dir_map = {1:"🔴 做多", -1:"🔵 做空", 0:"⚪ 观望"}
     st.markdown(f'<div class="ai-box">{dir_map[fusion_dir]}<br>置信度: {fusion_conf:.1%}</div>', unsafe_allow_html=True)
+    
     if entry > 0 and qty > 0 and period in data_dict:
         cur = data_dict[period]['close'].iloc[-1]
         pnl = (cur - entry) * qty
         pnl_pct = (cur - entry) / entry * 100
-        st.metric("浮动盈亏", f"${pnl:.2f} ({pnl_pct:.2f}%)")
-        if stop > 0 and ((entry < cur <= stop) or (entry > cur >= stop)):
-            st.warning("⚠️ 接近止损")
+        if pnl >= 0:
+            st.markdown(f'**浮动盈亏**: <span style="color:#00F5A0">+${pnl:.2f} ({pnl_pct:.2f}%)</span>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'**浮动盈亏**: <span style="color:#FF5555">-${abs(pnl):.2f} ({pnl_pct:.2f}%)</span>', unsafe_allow_html=True)
+        if stop > 0:
+            if (entry < cur <= stop) or (entry > cur >= stop):
+                st.warning("⚠️ 接近止损")
+    else:
+        st.info("输入入场价以计算盈亏")
+    
     st.markdown("---")
-    st.markdown("**📈 各周期**")
-    for p in ['1m','5m','15m','1h','4h','1d']:
-        if p in data_dict:
-            last = data_dict[p].iloc[-1]
-            trend = "↑" if last['ma20'] > last['ma60'] else "↓" if last['ma20'] < last['ma60'] else "→"
-            st.caption(f"{p}: {trend} RSI {last['rsi']:.1f}")
+    st.markdown("**📈 各周期快照**")
+    if data_dict:
+        for p in ['1m','5m','15m','1h','4h','1d']:
+            if p in data_dict:
+                last = data_dict[p].iloc[-1]
+                trend = "↑" if last['ma20'] > last['ma60'] else "↓" if last['ma20'] < last['ma60'] else "→"
+                st.caption(f"{p}: {trend}  RSI {last['rsi']:.1f}  ${last['close']:.2f}")
+    else:
+        st.caption("暂无数据")
