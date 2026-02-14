@@ -1,260 +1,211 @@
+# -*- coding: utf-8 -*-
+"""🔥 ETH 15m 精准交易终端 · Colab 一键版 🔥
+   包含：实时数据、AI信号、专业图表
+   使用前必做：在左侧🔑 Secrets 添加 AINFT_KEY（必需）和 PUSHPLUS_TOKEN（可选）
+"""
+
+!pip install -q streamlit pandas ta requests plotly pyngrok
+
+import os
+import threading
+import time
+from google.colab import userdata
+
+# 读取密钥
+try:
+    AINFT_KEY = userdata.get('AINFT_KEY')
+except:
+    AINFT_KEY = None
+    print("⚠️ 未找到 AINFT_KEY，AI 信号将使用规则代替")
+
+try:
+    PUSHPLUS_TOKEN = userdata.get('PUSHPLUS_TOKEN')
+except:
+    PUSHPLUS_TOKEN = None
+
+# 写入 app.py
+app_code = f'''
 import streamlit as st
 import pandas as pd
-import ta
+import numpy as np
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
-import os
+import ta
+from datetime import datetime, timedelta
 
-# ==========================================
-# 1. 系统配置与页面初始化
-# ==========================================
-st.set_page_config(
-    page_title="ETH/USDT 智能交易终端",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="ETH 15m 交易终端", layout="wide")
 
-# 注入赛博朋克风格 CSS
 st.markdown("""
 <style>
-    /* 全局深色背景 */
-    .stApp { background-color: #0E1117; }
-    
-    /* 侧边栏样式 */
-    section[data-testid="stSidebar"] { background-color: #161920; border-right: 1px solid #333; }
-    
-    /* 核心指标卡片 */
-    div[data-testid="stMetric"] {
-        background-color: #1E1F2A;
-        border: 1px solid #333;
-        border-radius: 8px;
-        padding: 15px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
-    
-    /* AI 信号显示框 */
-    .ai-box {
-        background: linear-gradient(145deg, #1a1c24 0%, #111217 100%);
-        border-left: 4px solid #00D4FF;
-        border-radius: 8px;
-        padding: 20px;
-        color: #e0e0e0;
-        font-family: 'Consolas', monospace;
-        line-height: 1.6;
-        box-shadow: 0 4px 15px rgba(0, 212, 255, 0.1);
-        margin-top: 10px;
-    }
-    
-    /* 强调文字 */
-    .highlight { color: #00D4FF; font-weight: bold; }
-    .bull { color: #00ffcc; font-weight: bold; }
-    .bear { color: #ff3366; font-weight: bold; }
+    .stApp {{ background-color: #0E1117; color: white; }}
+    .signal-box {{ background: #1E1F2A; border-radius: 10px; padding: 20px; border-left: 5px solid #00D4FF; }}
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. 密钥加载 (优先读取Secrets，其次环境变量)
-# ==========================================
-try:
-    AINFT_KEY = st.secrets["AINFT_KEY"]
-except:
-    AINFT_KEY = os.getenv("AINFT_KEY")
+# 从环境变量读取密钥（由 Colab 注入）
+AINFT_KEY = os.environ.get("AINFT_KEY")
+PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
-# 侧边栏配置
-with st.sidebar:
-    st.header("⚙️ 终端设置")
-    if not AINFT_KEY:
-        st.warning("⚠️ 未配置密钥")
-        AINFT_KEY = st.text_input("输入 AINFT_KEY", type="password")
-    
-    st.markdown("---")
-    st.markdown("**参数设置**")
-    rsi_period = st.slider("RSI 周期", 7, 21, 14)
-    ma_fast = st.number_input("快线 MA", value=20)
-    ma_slow = st.number_input("慢线 MA", value=60)
-    
-    st.markdown("---")
-    st.info("💡 数据源: Binance Spot\n🤖 模型: GPT-5.2 (AINFT)")
-
-# ==========================================
-# 3. 核心功能函数
-# ==========================================
-@st.cache_data(ttl=30, show_spinner=False)
-def fetch_market_data(symbol="ETHUSDT", interval="15m", limit=150):
-    """获取币安K线数据"""
+# 获取 Binance 数据（如果失败，使用模拟数据）
+@st.cache_data(ttl=30)
+def fetch_binance_klines(symbol, interval="15m", limit=200):
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
-        # 设置超时，防止网络卡死
-        response = requests.get(url, params=params, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        
-        df = pd.DataFrame(data, columns=["time", "o", "h", "l", "c", "v", "ct", "qv", "n", "tb", "tq", "i"])
+        r = requests.get(url, params={{"symbol": symbol, "interval": interval, "limit": limit}}, timeout=10)
+        data = r.json()
+        df = pd.DataFrame(data, columns=["time","o","h","l","c","v","ct","qv","n","tb","tq","i"])
         df["time"] = pd.to_datetime(df["time"], unit="ms")
-        for col in ["o", "h", "l", "c", "v"]:
-            df[col] = df[col].astype(float)
+        for col in ["o","h","l","c","v"]: df[col] = df[col].astype(float)
         return df
-    except Exception as e:
-        st.error(f"❌ 数据获取失败 ({symbol}): {e}")
-        return pd.DataFrame()
+    except:
+        return None
 
-def calculate_indicators(df, rsi_n, ma_s, ma_l):
-    """计算技术指标"""
-    if df.empty: return df
-    
-    # 移动平均线
-    df[f"ma{ma_s}"] = df["c"].rolling(ma_s).mean()
-    df[f"ma{ma_l}"] = df["c"].rolling(ma_l).mean()
-    
-    # RSI
-    df["rsi"] = ta.momentum.RSIIndicator(df["c"], window=rsi_n).rsi()
-    
-    # 斐波那契 (基于最近100根K线)
-    recent = df.tail(100)
-    high = recent["h"].max()
-    low = recent["l"].min()
-    diff = high - low
-    df["fib_0.618"] = high - diff * 0.618
-    df["fib_0.5"] = high - diff * 0.5
-    df["fib_0.382"] = high - diff * 0.382
-    
+def generate_simulated_klines(price, limit=200):
+    now = datetime.now()
+    times = [now - timedelta(minutes=15*i) for i in range(limit)][::-1]
+    returns = np.random.randn(limit) * 0.002
+    price_series = price * np.exp(np.cumsum(returns))
+    price_series = price_series * (price / price_series[-1])
+    closes = price_series
+    opens = [closes[i-1] if i>0 else closes[0]*0.999 for i in range(limit)]
+    highs = np.maximum(opens, closes) * 1.002
+    lows = np.minimum(opens, closes) * 0.998
+    vols = np.random.uniform(100, 500, limit)
+    return pd.DataFrame({{"time": times, "o": opens, "h": highs, "l": lows, "c": closes, "v": vols}})
+
+def add_indicators(df):
+    df = df.copy()
+    df["ma20"] = df["c"].rolling(20).mean()
+    df["ma60"] = df["c"].rolling(60).mean()
+    df["rsi"] = ta.momentum.RSIIndicator(df["c"], window=14).rsi()
+    # 斐波那契
+    if len(df) >= 100:
+        recent_high = df["h"].rolling(100).max().iloc[-1]
+        recent_low = df["l"].rolling(100).min().iloc[-1]
+        diff = recent_high - recent_low
+        df["fib_382"] = recent_high - diff * 0.382
+        df["fib_500"] = recent_high - diff * 0.5
+        df["fib_618"] = recent_high - diff * 0.618
     return df
 
-def get_ai_analysis(eth_df, btc_df):
-    """调用 AI 生成策略"""
-    if not AINFT_KEY:
-        return "⚠️ 请先配置 API Key"
-    
+def get_ai_signal(eth_df, btc_df, api_key):
+    if not api_key:
+        return "AI未配置，使用规则信号", ""
     e = eth_df.iloc[-1]
     b = btc_df.iloc[-1]
-    
-    # 构造极简且精确的 Prompt
     prompt = f"""
-    分析 ETH/USDT 15分钟级别交易机会。
-    【ETH 数据】现价:{e['c']:.2f}, RSI:{e['rsi']:.1f}, MA{ma_fast}:{e[f'ma{ma_fast}']:.2f}, MA{ma_slow}:{e[f'ma{ma_slow}']:.2f}
-    【BTC 数据】现价:{b['c']:.2f}, RSI:{b['rsi']:.1f}, 趋势:{'看涨' if b['c'] > b[f'ma{ma_slow}'] else '看跌'}
-    
-    请输出严格的 HTML 格式报告（不要 Markdown 代码块）：
-    1. <b>方向</b>：[做多/做空/观望] (加粗颜色)
-    2. <b>信号逻辑</b>：一句话概括 (例如：RSI超卖配合均线支撑)
-    3. <b>进场点位</b>：具体价格区间
-    4. <b>止损位</b>：具体价格
-    5. <b>止盈目标</b>：TP1, TP2
-    6. <b>胜率预估</b>：0-100%
-    """
-    
+【ETH 15m】价格:{e['c']:.2f} MA20:{e['ma20']:.2f} MA60:{e['ma60']:.2f} RSI:{e['rsi']:.1f}
+斐波那契支撑:0.618={{e['fib_618']:.2f}} 0.5={{e['fib_500']:.2f}} 0.382={{e['fib_382']:.2f}}
+【BTC 15m】价格:{b['c']:.2f} MA20:{b['ma20']:.2f} MA60:{b['ma60']:.2f} RSI:{b['rsi']:.1f}
+请输出简洁交易计划：方向/进场/止损/止盈/BTC影响/风险。
+"""
     url = "https://chat.ainft.com/webapi/chat/openai"
-    headers = {"Authorization": f"Bearer {AINFT_KEY}", "Content-Type": "application/json"}
-    payload = {
+    headers = {{"Authorization": f"Bearer {{api_key}}", "Content-Type": "application/json"}}
+    payload = {{
         "model": "gpt-5.2",
-        "temperature": 0.3,
-        "messages": [
-            {"role": "system", "content": "你是华尔街顶级日内交易员，风格激进但风控严格。"},
-            {"role": "user", "content": prompt}
-        ]
-    }
-    
+        "temperature": 0.2,
+        "messages": [{{"role": "user", "content": prompt}}]
+    }}
     try:
-        res = requests.post(url, json=payload, headers=headers, timeout=20)
-        if res.status_code == 200:
-            return res.json()["choices"][0]["message"]["content"]
-        else:
-            return f"API 错误: {res.text}"
+        resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        return resp.json()["choices"][0]["message"]["content"], ""
     except Exception as e:
-        return f"请求异常: {str(e)}"
+        return "", f"AI调用失败: {{e}}"
 
-# ==========================================
-# 4. 主界面逻辑
-# ==========================================
-st.title("🚀 ETH 15m 精准交易系统")
+def rule_signal(df):
+    last = df.iloc[-1]
+    if last['rsi'] < 30 and last['c'] > last['ma20']:
+        return "做多", "RSI超卖+站上MA20"
+    elif last['rsi'] > 70 and last['c'] < last['ma20']:
+        return "做空", "RSI超买+跌破MA20"
+    else:
+        return "观望", "无明显信号"
 
-# 布局：左图表，右信号
-col1, col2 = st.columns([2.5, 1])
+st.title("🤖 ETH 15m 精准交易终端")
 
+# 获取数据
+eth_df = fetch_binance_klines("ETHUSDT", "15m", 200)
+btc_df = fetch_binance_klines("BTCUSDT", "15m", 100)
+if eth_df is None:
+    st.warning("Binance数据获取失败，使用模拟数据")
+    eth_df = generate_simulated_klines(3000, 200)
+if btc_df is None:
+    btc_df = generate_simulated_klines(65000, 100)
+
+eth_df = add_indicators(eth_df)
+btc_df = add_indicators(btc_df)
+
+# 信号
+if st.button("🚀 获取信号"):
+    with st.spinner("分析中..."):
+        if AINFT_KEY:
+            signal, error = get_ai_signal(eth_df, btc_df, AINFT_KEY)
+            if error:
+                st.error(error)
+                signal = "AI失败，改用规则"
+        else:
+            signal = "AI未配置，使用规则"
+        if not signal:
+            direction, reason = rule_signal(eth_df)
+            signal = f"方向：{direction}\\n理由：{reason}"
+        st.session_state.signal = signal
+        st.session_state.eth = eth_df
+        st.session_state.btc = btc_df
+
+# 布局
+col1, col2 = st.columns([2, 1.2])
 with col1:
-    # 顶部控制栏
-    c1, c2 = st.columns([1, 5])
-    with c1:
-        refresh = st.button("🔄 立即扫描", type="primary", use_container_width=True)
-    with c2:
-        st.caption(f"上次更新: {datetime.now().strftime('%H:%M:%S')} | 周期: 15m")
-
-    # 数据获取与处理
-    if refresh or "eth_data" not in st.session_state:
-        with st.spinner("正在连接交易所并计算指标..."):
-            raw_eth = fetch_market_data("ETHUSDT")
-            raw_btc = fetch_market_data("BTCUSDT")
-            
-            if not raw_eth.empty and not raw_btc.empty:
-                st.session_state.eth_data = calculate_indicators(raw_eth, rsi_period, ma_fast, ma_slow)
-                st.session_state.btc_data = calculate_indicators(raw_btc, rsi_period, ma_fast, ma_slow)
-                # 触发 AI 分析
-                st.session_state.ai_signal = get_ai_analysis(st.session_state.eth_data, st.session_state.btc_data)
-            else:
-                st.error("无法获取数据，请检查网络（Binance API 需要特定网络环境）。")
-
-    # 绘图逻辑
-    if "eth_data" in st.session_state:
-        df = st.session_state.eth_data.tail(80) # 只显示最近80根
-        
-        # 创建交互式图表
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
-        
-        # K线
-        fig.add_trace(go.Candlestick(
-            x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="K线",
-            increasing_line_color='#00ffcc', decreasing_line_color='#ff3366'
-        ), row=1, col=1)
-        
-        # 均线
-        fig.add_trace(go.Scatter(x=df["time"], y=df[f"ma{ma_fast}"], name=f"MA{ma_fast}", line=dict(color="#FFD700", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df["time"], y=df[f"ma{ma_slow}"], name=f"MA{ma_slow}", line=dict(color="#00D4FF", width=1)), row=1, col=1)
-        
-        # RSI
-        fig.add_trace(go.Scatter(x=df["time"], y=df["rsi"], name="RSI", line=dict(color="#9b59b6")), row=2, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="rgba(255,255,255,0.3)", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="rgba(255,255,255,0.3)", row=2, col=1)
-        
-        fig.update_layout(
-            template="plotly_dark", 
-            paper_bgcolor='rgba(0,0,0,0)', 
-            plot_bgcolor='rgba(0,0,0,0)',
-            xaxis_rangeslider_visible=False,
-            height=550,
-            margin=dict(l=10, r=10, t=10, b=10)
-        )
+    st.subheader("📊 15分钟K线图")
+    if "eth" in st.session_state:
+        df = st.session_state.eth.tail(100)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3])
+        fig.add_trace(go.Candlestick(x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"]), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["time"], y=df["ma20"], name="MA20", line=dict(color="orange")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["time"], y=df["ma60"], name="MA60", line=dict(color="blue")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["time"], y=df["rsi"], name="RSI", line=dict(color="purple")), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+        fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("点击「获取信号」开始")
 
 with col2:
-    st.subheader("🤖 智能分析报告")
-    if "eth_data" in st.session_state:
-        # 实时价格看板
-        cur = st.session_state.eth_data.iloc[-1]
-        col_m1, col_m2 = st.columns(2)
-        
-        # 价格变动颜色
-        delta_color = "normal"
-        if cur['c'] > cur['o']: delta_color = "normal" # Streamlit自动处理涨跌颜色
-        
-        col_m1.metric("ETH 现价", f"{cur['c']:.2f}", f"{cur['rsi']:.1f} RSI")
-        col_m2.metric("BTC 联动", f"{st.session_state.btc_data.iloc[-1]['c']:.0f}")
-        
+    st.subheader("🎯 信号")
+    if "signal" in st.session_state:
+        st.markdown(f'<div class="signal-box">{st.session_state.signal.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
+        e = st.session_state.eth.iloc[-1]
+        b = st.session_state.btc.iloc[-1]
         st.markdown("---")
-        
-        # AI 结果展示
-        if "ai_signal" in st.session_state:
-            # 使用 HTML 渲染增加可读性
-            st.markdown(f"""
-            <div class="ai-box">
-                {st.session_state.ai_signal.replace(chr(10), "<br>")}
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # 底部风险提示
-            st.warning("⚠️ 风险提示：本策略仅供参考，合约交易请严格带好止损。")
+        st.markdown("**📌 市场快照**")
+        st.metric("ETH", f"${{e['c']:.2f}}", f"RSI {{e['rsi']:.1f}}")
+        st.metric("BTC", f"${{b['c']:.0f}}", f"RSI {{b['rsi']:.1f}}")
+        st.caption(f"⏱️ {{e['time'].strftime('%Y-%m-%d %H:%M')}}")
     else:
-        st.info("👈 请点击左侧「立即扫描」启动系统")
+        st.info("点击「获取信号」")
+'''
+
+with open("app.py", "w") as f:
+    f.write(app_code)
+
+# 设置环境变量
+if AINFT_KEY:
+    os.environ["AINFT_KEY"] = AINFT_KEY
+if PUSHPLUS_TOKEN:
+    os.environ["PUSHPLUS_TOKEN"] = PUSHPLUS_TOKEN
+
+# 启动 ngrok
+from pyngrok import ngrok
+ngrok.kill()
+def run_streamlit():
+    !streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true > streamlit.log 2>&1
+thread = threading.Thread(target=run_streamlit)
+thread.start()
+time.sleep(5)
+public_url = ngrok.connect(8501, "http")
+print("\n" + "="*50)
+print("✅ 应用已启动！点击下方链接访问：")
+print("🌍", public_url)
+print("="*50)
+print("📱 手机电脑均可打开，点击「获取信号」")
