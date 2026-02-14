@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合約交易監控中心 · 终极核弹版
+🚀 全天候智能合約交易監控中心 · 終極完美修復版
 100倍槓桿 | 11+交易所自動切換 | 分鐘級數據 | AI信號 | 強平分析 | 微信提醒
 數據源：幣安/Bybit/OKX/火幣/Gate/MEXC/KuCoin/CryptoCompare + 模擬回退
 """
@@ -25,9 +25,9 @@ def calculate_liquidation_price(entry_price, side, leverage):
     else:
         return entry_price * (1 + 1/leverage)
 
-# -------------------- 生成模拟K线数据（用于所有API均失败时） --------------------
+# -------------------- 生成模擬K線數據（用於所有API均失敗時） --------------------
 def generate_simulated_data(periods, days=2):
-    """生成模拟ETH/USDT K线数据"""
+    """生成模擬ETH/USDT K線數據"""
     data_dict = {}
     end_time = datetime.now()
     for period in periods:
@@ -58,8 +58,8 @@ def generate_simulated_data(periods, days=2):
         data_dict[period] = df
     return data_dict, 2000.0
 
-# -------------------- 智能數據獲取器（终极版） --------------------
-class NuclearDataFetcher:
+# -------------------- 智能數據獲取器（終極完美版） --------------------
+class UltimateDataFetcher:
     def __init__(self):
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
@@ -68,15 +68,15 @@ class NuclearDataFetcher:
         self.retries = 1
         self.current_source = "未知"
 
-        # ========== 交易所K线源（按优先级排列） ==========
+        # ========== 交易所K線源（按優先級排列） ==========
         self.exchanges = [
-            # 币安合約镜像
-            {'name': '币安合约', 'type': 'binance_fapi',
+            # 幣安合約鏡像
+            {'name': '幣安合約', 'type': 'binance_fapi',
              'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
              'url_path': '/fapi/v1/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
              'parser': self._parse_binance_kline},
-            # 币安现货镜像
-            {'name': '币安现货', 'type': 'binance_spot',
+            # 幣安現貨鏡像
+            {'name': '幣安現貨', 'type': 'binance_spot',
              'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
              'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
              'parser': self._parse_binance_kline},
@@ -90,8 +90,8 @@ class NuclearDataFetcher:
              'hosts': ['www.okx.com'],
              'url_path': '/api/v5/market/candles', 'params': {'instId': self.symbol + '-SWAP', 'bar': None, 'limit': self.limit},
              'parser': self._parse_okx_kline},
-            # 火币 HTX
-            {'name': '火币 HTX', 'type': 'huobi',
+            # 火幣 HTX
+            {'name': '火幣 HTX', 'type': 'huobi',
              'hosts': ['api.huobi.pro'],
              'url_path': '/linear-swap-ex/market/history/kline', 'params': {'contract_code': self.symbol + '-USDT', 'period': None, 'size': self.limit},
              'parser': self._parse_huobi_kline},
@@ -100,31 +100,31 @@ class NuclearDataFetcher:
              'hosts': ['api.gateio.ws'],
              'url_path': '/api/v4/futures/usdt/candlesticks', 'params': {'contract': self.symbol, 'interval': None, 'limit': self.limit},
              'parser': self._parse_gate_kline},
-            # MEXC
+            # MEXC（修正解析）
             {'name': 'MEXC', 'type': 'mexc',
              'hosts': ['api.mexc.com'],
              'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
-             'parser': self._parse_binance_kline},  # MEXC 使用与币安相同的格式
+             'parser': self._parse_mexc_kline},
             # KuCoin
             {'name': 'KuCoin', 'type': 'kucoin',
              'hosts': ['api.kucoin.com'],
              'url_path': '/api/v1/market/candles', 'params': {'type': None, 'symbol': self.symbol + '-USDT', 'limit': self.limit},
              'parser': self._parse_kucoin_kline},
-            # CryptoCompare（新增分钟级支持）
+            # CryptoCompare（分鐘級支持）
             {'name': 'CryptoCompare', 'type': 'cryptocompare',
              'hosts': ['min-api.cryptocompare.com'],
-             'url_path': None,  # 动态选择
+             'url_path': None,  # 動態選擇
              'params': {'fsym': 'ETH', 'tsym': 'USD', 'limit': self.limit},
              'parser': self._parse_cryptocompare_kline},
         ]
 
-        # ========== 价格源 ==========
+        # ========== 價格源 ==========
         self.price_sources = [
-            {'name': '币安合約標記價', 'type': 'binance_fapi',
+            {'name': '幣安合約標記價', 'type': 'binance_fapi',
              'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
              'url_path': '/fapi/v1/premiumIndex', 'params': {'symbol': self.symbol},
              'parser': lambda data: float(data['markPrice'])},
-            {'name': '币安現貨最新價', 'type': 'binance_spot',
+            {'name': '幣安現貨最新價', 'type': 'binance_spot',
              'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
              'url_path': '/api/v3/ticker/price', 'params': {'symbol': self.symbol},
              'parser': lambda data: float(data['price'])},
@@ -158,7 +158,7 @@ class NuclearDataFetcher:
              'parser': lambda data: float(data['USD'])},
         ]
 
-    # ---------- 解析函数 ----------
+    # ---------- 解析函數 ----------
     def _parse_binance_kline(self, data):
         df = pd.DataFrame(data, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -211,8 +211,24 @@ class NuclearDataFetcher:
             df[col] = df[col].astype(float)
         return df
 
+    def _parse_mexc_kline(self, data):
+        """
+        MEXC K線返回格式：
+        [
+            [1591256400000, "8530.01", "8615", "8530", "8615", "100"],
+            ...
+        ]
+        列順序：時間戳、開盤、最高、最低、收盤、成交量
+        """
+        if not isinstance(data, list):
+            return None
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
     def _parse_kucoin_kline(self, data):
-        # KuCoin 返回 {"code":"200000","data":[[time,open,close,high,low,volume,turnover]]}
         if data.get('code') != '200000':
             return None
         items = data['data']
@@ -224,7 +240,6 @@ class NuclearDataFetcher:
         return df
 
     def _parse_cryptocompare_kline(self, data, period):
-        # 根据period选择合适的历史端点
         if data.get('Response') != 'Success':
             return None
         items = data['Data']['Data']
@@ -236,16 +251,15 @@ class NuclearDataFetcher:
             df[col] = df[col].astype(float)
         return df
 
-    # ---------- 请求核心 ----------
+    # ---------- 請求核心 ----------
     def _fetch_kline_from_exchange(self, exch, period):
         for host in exch['hosts']:
-            # 构建URL和参数
+            # 構建URL和參數
             if exch['type'] == 'cryptocompare':
-                # 动态选择端点：分钟级使用 histominute
+                # 動態選擇端點：分鐘級使用 histominute
                 if period in ['1m', '5m', '15m']:
                     url = f"https://{host}/data/v2/histominute"
                     params = exch['params'].copy()
-                    # aggregate 参数：1m=1, 5m=5, 15m=15
                     aggregate = {'1m':1, '5m':5, '15m':15}[period]
                     params['aggregate'] = aggregate
                 elif period in ['1h', '4h']:
@@ -258,11 +272,11 @@ class NuclearDataFetcher:
                     params = exch['params'].copy()
                     params.pop('aggregate', None)
                 else:
-                    return None, f"{exch['name']} 不支持周期 {period}"
+                    return None, f"{exch['name']} 不支持週期 {period}"
             else:
                 url = f"https://{host}{exch['url_path']}"
                 params = exch['params'].copy()
-                # 设置周期参数
+                # 設置週期參數
                 if exch['type'] in ('binance_fapi', 'binance_spot', 'bybit', 'mexc'):
                     params['interval'] = period
                 elif exch['type'] == 'okx':
@@ -282,18 +296,18 @@ class NuclearDataFetcher:
                     if df is not None and not df.empty:
                         return df, None
                     else:
-                        return None, f"{exch['name']} 返回空数据"
+                        return None, f"{exch['name']} 返回空數據"
                 elif resp.status_code == 451:
                     return None, f"{exch['name']} HTTP 451 (被封鎖)"
                 else:
                     return None, f"{exch['name']} HTTP {resp.status_code}"
             except requests.exceptions.Timeout:
-                return None, f"{exch['name']} 超时"
+                return None, f"{exch['name']} 超時"
             except requests.exceptions.ConnectionError:
-                return None, f"{exch['name']} 连接错误"
+                return None, f"{exch['name']} 連接錯誤"
             except Exception as e:
-                return None, f"{exch['name']} 异常: {str(e)}"
-        return None, f"{exch['name']} 所有主机失败"
+                return None, f"{exch['name']} 異常: {str(e)}"
+        return None, f"{exch['name']} 所有主機失敗"
 
     def _fetch_price_from_source(self, src):
         for host in src['hosts']:
@@ -307,23 +321,23 @@ class NuclearDataFetcher:
                         price = src['parser'](data)
                         return price, None
                     except Exception as e:
-                        return None, f"{src['name']} 解析失败: {e}"
+                        return None, f"{src['name']} 解析失敗: {e}"
                 elif resp.status_code == 451:
                     return None, f"{src['name']} HTTP 451"
                 else:
                     return None, f"{src['name']} HTTP {resp.status_code}"
             except Exception as e:
-                return None, f"{src['name']} 请求异常: {str(e)}"
-        return None, f"{src['name']} 所有主机失败"
+                return None, f"{src['name']} 請求異常: {str(e)}"
+        return None, f"{src['name']} 所有主機失敗"
 
     def fetch_all(self):
         data_dict = {}
         all_errors = []
         price = None
-        price_source = "无"
-        source_display = "无"
+        price_source = "無"
+        source_display = "無"
 
-        # 按优先级依次尝试获取每个周期的K线
+        # 按優先級依次嘗試獲取每個週期的K線
         for period in self.periods:
             period_success = False
             for exch in self.exchanges:
@@ -336,9 +350,9 @@ class NuclearDataFetcher:
                 else:
                     all_errors.append(f"{period} {err}")
             if not period_success:
-                all_errors.append(f"{period} 所有交易所失败")
+                all_errors.append(f"{period} 所有交易所失敗")
 
-        # 获取价格
+        # 獲取價格
         if data_dict:
             for src in self.price_sources:
                 p, err = self._fetch_price_from_source(src)
@@ -347,28 +361,28 @@ class NuclearDataFetcher:
                     price_source = src['name']
                     break
                 else:
-                    all_errors.append(f"价格 {err}")
+                    all_errors.append(f"價格 {err}")
             if price is None:
-                # 使用4h收盘价作为备用
+                # 使用4h收盤價作為備用
                 if '4h' in data_dict:
                     price = data_dict['4h']['close'].iloc[-1]
-                    price_source = "4h收盘价(备用)"
+                    price_source = "4h收盤價(備用)"
                 elif data_dict:
                     first = next(iter(data_dict))
                     price = data_dict[first]['close'].iloc[-1]
-                    price_source = f"{first}收盘价(备用)"
+                    price_source = f"{first}收盤價(備用)"
                 else:
                     price = 2000.0
-                    price_source = "默认价格"
+                    price_source = "默認價格"
         else:
-            all_errors.append("所有外部数据源均失败，启用模拟数据")
+            all_errors.append("所有外部數據源均失敗，啟用模擬數據")
             data_dict, price = generate_simulated_data(self.periods)
-            source_display = "模拟数据(演示模式)"
-            price_source = "模拟价格"
+            source_display = "模擬數據(演示模式)"
+            price_source = "模擬價格"
 
         return data_dict, price, price_source, all_errors, source_display
 
-# -------------------- 指标计算 --------------------
+# -------------------- 指標計算 --------------------
 def add_indicators(df):
     df = df.copy()
     df['ma20'] = df['close'].rolling(20).mean()
@@ -385,7 +399,7 @@ def add_indicators(df):
     df['volume_ratio'] = df['volume'] / df['volume_sma']
     return df
 
-# -------------------- AI预测 --------------------
+# -------------------- AI預測（簡化規則版） --------------------
 class SimpleAIPredictor:
     def predict(self, df_dict):
         signals = {}
@@ -405,7 +419,7 @@ class SimpleAIPredictor:
         direction = 1 if avg_signal > 0.2 else -1 if avg_signal < -0.2 else 0
         return direction, confidence
 
-# -------------------- 多周期融合 --------------------
+# -------------------- 多週期融合 --------------------
 class MultiPeriodFusion:
     def __init__(self):
         self.period_weights = {
@@ -461,7 +475,7 @@ class MultiPeriodFusion:
         confidence = min(abs(avg_score) * 1.2, 1.0)
         return direction, confidence
 
-# -------------------- 微信推送 --------------------
+# -------------------- 微信推送（選用） --------------------
 PUSHPLUS_TOKEN = st.secrets.get("PUSHPLUS_TOKEN", "")
 last_signal_time = None
 last_signal_direction = 0
@@ -490,17 +504,17 @@ def send_signal_alert(direction, confidence, price, reason=""):
     except:
         pass
 
-# -------------------- 缓存数据获取 --------------------
+# -------------------- 緩存數據獲取 --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
-    fetcher = NuclearDataFetcher()
+    fetcher = UltimateDataFetcher()
     data_dict, price, price_source, errors, source_display = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
             data_dict[p] = add_indicators(data_dict[p])
     return data_dict, price, price_source, errors, source_display
 
-# -------------------- Streamlit 界面 --------------------
+# -------------------- Streamlit 介面 --------------------
 st.set_page_config(page_title="合約智能監控·100倍槓桿", layout="wide")
 st.markdown("""
 <style>
@@ -518,8 +532,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合約智能監控中心 · 终极核弹版")
-st.caption("数据源：11+交易所自动切换｜分钟级数据｜AI预测｜强平分析｜微信提醒")
+st.title("🧠 合約智能監控中心 · 終極完美修復版")
+st.caption("數據源：11+交易所自動切換｜分鐘級數據｜AI預測｜強平分析｜微信提醒")
 
 # 初始化
 if 'ai' not in st.session_state:
@@ -527,60 +541,60 @@ if 'ai' not in st.session_state:
 if 'fusion' not in st.session_state:
     st.session_state.fusion = MultiPeriodFusion()
 
-# 侧边栏
+# 側邊欄
 with st.sidebar:
     st.header("⚙️ 控制面板")
     period_options = ['1m', '5m', '15m', '1h', '4h', '1d']
-    selected_period = st.selectbox("选择K线周期", period_options, index=4)
-    auto_refresh = st.checkbox("开启自动刷新", value=True)
-    refresh_interval = st.number_input("刷新间隔(秒)", 5, 60, 10, disabled=not auto_refresh)
+    selected_period = st.selectbox("選擇K線週期", period_options, index=2)  # 預設15m
+    auto_refresh = st.checkbox("開啟自動刷新", value=True)
+    refresh_interval = st.number_input("刷新間隔(秒)", 5, 60, 10, disabled=not auto_refresh)
     if auto_refresh:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
     st.markdown("---")
-    st.subheader("📈 模拟合约")
-    sim_entry = st.number_input("开仓价", value=0.0, format="%.2f")
-    sim_side = st.selectbox("方向", ["多单", "空单"])
-    sim_leverage = st.slider("杠杆倍数", 1, 100, 10)
-    sim_quantity = st.number_input("数量 (ETH)", value=0.01, format="%.4f")
+    st.subheader("📈 模擬合約")
+    sim_entry = st.number_input("開倉價", value=0.0, format="%.2f")
+    sim_side = st.selectbox("方向", ["多單", "空單"])
+    sim_leverage = st.slider("槓桿倍數", 1, 100, 10)
+    sim_quantity = st.number_input("數量 (ETH)", value=0.01, format="%.4f")
 
-# 获取数据
+# 獲取數據
 data_dict, current_price, price_source, errors, source_display = fetch_all_data()
 
-# 显示数据源状态
+# 顯示數據源狀態
 if data_dict:
-    if "模拟" in source_display:
-        st.markdown(f'<div class="demo-box">⚠️ 当前处于演示模式（模拟数据） | 价格源：{price_source}</div>', unsafe_allow_html=True)
+    if "模擬" in source_display:
+        st.markdown(f'<div class="demo-box">⚠️ 當前處於演示模式（模擬數據） | 價格源：{price_source}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="info-box">✅ 当前数据源：{source_display} | 价格源：{price_source}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="info-box">✅ 當前數據源：{source_display} | 價格源：{price_source}</div>', unsafe_allow_html=True)
 
-# 显示错误信息
+# 顯示錯誤訊息
 if errors:
     with st.container():
         st.markdown('<div class="error-box">', unsafe_allow_html=True)
-        st.error("⚠️ 部分数据获取失败，详细错误：")
+        st.error("⚠️ 部分數據獲取失敗，詳細錯誤：")
         for err in errors[:8]:
             st.write(f"- {err}")
         if len(errors) > 8:
-            st.write(f"... 还有 {len(errors)-8} 条错误")
+            st.write(f"... 還有 {len(errors)-8} 條錯誤")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# 计算信号
+# 計算訊號
 if data_dict:
     ai_dir, ai_conf = st.session_state.ai.predict(data_dict)
     fusion_dir, fusion_conf = st.session_state.fusion.fuse_periods(data_dict)
     # 推送
     if fusion_dir != 0 and selected_period in data_dict and PUSHPLUS_TOKEN:
         price_alert = data_dict[selected_period]['close'].iloc[-1]
-        send_signal_alert(fusion_dir, fusion_conf, price_alert, "融合信号")
+        send_signal_alert(fusion_dir, fusion_conf, price_alert, "融合訊號")
 else:
     ai_dir, ai_conf = 0, 0.0
     fusion_dir, fusion_conf = 0, 0
 
-# 主布局
+# 主佈局
 col1, col2 = st.columns([2.2, 1.3])
 
 with col1:
-    st.subheader(f"📊 合约K线 ({selected_period})")
+    st.subheader(f"📊 合約K線 ({selected_period})")
     if data_dict and selected_period in data_dict:
         df = data_dict[selected_period].tail(100).copy()
         df['日期'] = df['timestamp']
@@ -588,7 +602,7 @@ with col1:
                             row_heights=[0.7, 0.3],
                             subplot_titles=(f"ETHUSDT {selected_period}", "RSI"))
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
-                                      low=df['low'], close=df['close'], name="K线"), row=1, col=1)
+                                      low=df['low'], close=df['close'], name="K線"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma60'], name="MA60", line=dict(color="blue")), row=1, col=1)
         if fusion_dir != 0:
@@ -606,20 +620,20 @@ with col1:
         fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("等待数据...")
+        st.info("等待數據...")
 
 with col2:
-    st.subheader("🧠 即时决策")
-    dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 观望"}
+    st.subheader("🧠 即時決策")
+    dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 觀望"}
     st.markdown(f'<div class="ai-box">{dir_map[fusion_dir]}<br>置信度: {fusion_conf:.1%}</div>', unsafe_allow_html=True)
 
     if current_price is not None:
-        st.metric("当前价格", f"${current_price:.2f}", delta_color="off")
+        st.metric("當前價格", f"${current_price:.2f}", delta_color="off")
     else:
-        st.metric("当前价格", "获取中...")
+        st.metric("當前價格", "獲取中...")
 
     if sim_entry > 0 and current_price is not None and selected_period in data_dict:
-        if sim_side == "多单":
+        if sim_side == "多單":
             pnl = (current_price - sim_entry) * sim_quantity
             pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100
             liq_price = calculate_liquidation_price(sim_entry, "long", sim_leverage)
@@ -633,18 +647,18 @@ with col2:
 
         st.markdown(f"""
         <div class="metric">
-            <h4>模拟合约持仓</h4>
-            <p>方向: {sim_side} | 杠杆: {sim_leverage}x</p>
-            <p>开仓: ${sim_entry:.2f}</p>
-            <p class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
-            <p>强平价: <span class="warning">${liq_price:.2f}</span></p>
-            <p>距强平: {distance_to_liq:.2f}%</p>
+            <h4>模擬合約持倉</h4>
+            <p>方向: {sim_side} | 槓桿: {sim_leverage}x</p>
+            <p>開倉: ${sim_entry:.2f}</p>
+            <p class="{color_class}">盈虧: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
+            <p>強平價: <span class="warning">${liq_price:.2f}</span></p>
+            <p>距強平: {distance_to_liq:.2f}%</p>
         </div>
         """, unsafe_allow_html=True)
 
-        if (sim_side == "多单" and current_price <= liq_price) or (sim_side == "空单" and current_price >= liq_price):
-            st.error("🚨 强平风险！当前价格已触及强平线")
+        if (sim_side == "多單" and current_price <= liq_price) or (sim_side == "空單" and current_price >= liq_price):
+            st.error("🚨 強平風險！當前價格已觸及強平線")
         elif distance_to_liq < 5:
-            st.warning(f"⚠️ 距离强平仅 {distance_to_liq:.2f}%，请注意风险")
+            st.warning(f"⚠️ 距離強平僅 {distance_to_liq:.2f}%，請注意風險")
     else:
-        st.info("请输入开仓价以查看模拟盈亏与强平分析")
+        st.info("請輸入開倉價以查看模擬盈虧與強平分析")
