@@ -1,8 +1,7 @@
-streamlit
-pandas
-ta
-requests
-plotly
-aiohttp
-streamlit-autorefresh
-numpy
+streamlit==1.28.1
+pandas==2.0.3
+numpy==1.24.3
+requests==2.31.0
+plotly==5.17.0
+ta==0.10.2
+scikit-learn==1.3.0
