@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极极限实盘版
+🚀 合约智能监控中心 · 终极极限实盘版V2（可调灵敏度）
 数据源：MEXC + CryptoCompare | 多周期融合 | 多指标信号 | 动态止损止盈 | 强平预警 | 100倍杠杆适配
+侧边栏增加“信号灵敏度”滑块，可调节信号触发阈值。
 """
 
 import streamlit as st
@@ -24,9 +25,12 @@ def calculate_liquidation_price(entry_price, side, leverage):
     else:
         return entry_price * (1 + 1/leverage)
 
-# -------------------- 高级信号生成（多指标融合）--------------------
-def generate_signals(df):
-    """基于多个指标生成买卖信号，返回信号DataFrame"""
+# -------------------- 高级信号生成（多指标融合，可调灵敏度）--------------------
+def generate_signals(df, sensitivity=1.0):
+    """
+    基于多个指标生成买卖信号
+    sensitivity: 灵敏度系数（0.5~2.0），值越大信号越容易触发
+    """
     df = df.copy()
     # 基础指标
     df['ma20'] = df['close'].rolling(20).mean()
@@ -44,18 +48,23 @@ def generate_signals(df):
     df['volume_sma'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_sma']
 
+    # 根据灵敏度调整阈值
+    rsi_oversold = 30 / sensitivity  # 灵敏度越高，超卖阈值越低（更容易触发买入）
+    rsi_overbought = 70 * sensitivity  # 灵敏度越高，超买阈值越高（更容易触发卖出）
+    volume_threshold = 1.2 / sensitivity  # 灵敏度越高，放量要求越低
+
     # 多头信号条件
-    buy_cond1 = (df['rsi'] < 30) & (df['close'] > df['ma20'])  # 超卖反弹
-    buy_cond2 = (df['macd_diff'] > 0) & (df['macd_diff'].shift(1) <= 0)  # MACD金叉
-    buy_cond3 = (df['close'] > df['ma20']) & (df['ma20'] > df['ma60']) & (df['volume_ratio'] > 1.2)  # 多头趋势放量
-    buy_cond4 = (df['close'] < df['bb_low']) & (df['rsi'] < 40)  # 布林下轨反弹
+    buy_cond1 = (df['rsi'] < rsi_oversold) & (df['close'] > df['ma20'])
+    buy_cond2 = (df['macd_diff'] > 0) & (df['macd_diff'].shift(1) <= 0)
+    buy_cond3 = (df['close'] > df['ma20']) & (df['ma20'] > df['ma60']) & (df['volume_ratio'] > volume_threshold)
+    buy_cond4 = (df['close'] < df['bb_low']) & (df['rsi'] < 50)  # 布林下轨附近
     df['buy_signal'] = buy_cond1 | buy_cond2 | buy_cond3 | buy_cond4
 
     # 空头信号条件
-    sell_cond1 = (df['rsi'] > 70) & (df['close'] < df['ma60'])  # 超买回调
-    sell_cond2 = (df['macd_diff'] < 0) & (df['macd_diff'].shift(1) >= 0)  # MACD死叉
-    sell_cond3 = (df['close'] < df['ma20']) & (df['ma20'] < df['ma60']) & (df['volume_ratio'] > 1.2)  # 空头趋势放量
-    sell_cond4 = (df['close'] > df['bb_high']) & (df['rsi'] > 60)  # 布林上轨受压
+    sell_cond1 = (df['rsi'] > rsi_overbought) & (df['close'] < df['ma60'])
+    sell_cond2 = (df['macd_diff'] < 0) & (df['macd_diff'].shift(1) >= 0)
+    sell_cond3 = (df['close'] < df['ma20']) & (df['ma20'] < df['ma60']) & (df['volume_ratio'] > volume_threshold)
+    sell_cond4 = (df['close'] > df['bb_high']) & (df['rsi'] > 50)  # 布林上轨附近
     df['sell_signal'] = sell_cond1 | sell_cond2 | sell_cond3 | sell_cond4
 
     return df
@@ -254,16 +263,16 @@ def dynamic_stops(entry_price, side, atr, leverage, risk_reward=2.0):
 
 # -------------------- 缓存数据获取 --------------------
 @st.cache_data(ttl=60)
-def fetch_all_data():
+def fetch_all_data(sensitivity):
     fetcher = SimpleDataFetcher()
     data_dict, price, price_source, errors, source_display = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
-            data_dict[p] = generate_signals(data_dict[p])
+            data_dict[p] = generate_signals(data_dict[p], sensitivity)
     return data_dict, price, price_source, errors, source_display
 
 # -------------------- Streamlit 界面 --------------------
-st.set_page_config(page_title="合约智能监控·终极实盘版", layout="wide")
+st.set_page_config(page_title="合约智能监控·终极实盘版V2", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -280,7 +289,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极极限实盘版")
+st.title("🧠 合约智能监控中心 · 终极极限实盘版V2（可调灵敏度）")
 st.caption("数据源：MEXC + CryptoCompare｜多周期融合｜多指标信号｜动态止损止盈｜强平预警｜100倍杠杆适配")
 
 # 初始化
@@ -292,6 +301,11 @@ with st.sidebar:
     st.header("⚙️ 控制面板")
     period_options = ['1m', '5m', '15m', '1h', '4h', '1d']
     selected_period = st.selectbox("选择K线周期", period_options, index=2)
+    
+    # 新增信号灵敏度滑块
+    sensitivity = st.slider("信号灵敏度", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
+                            help="值越大，信号越容易触发（但假信号可能增多）。建议1.0为标准值。")
+    
     auto_refresh = st.checkbox("开启自动刷新", value=True)
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 60, 10, disabled=not auto_refresh)
     if auto_refresh:
@@ -303,12 +317,12 @@ with st.sidebar:
     sim_leverage = st.slider("杠杆倍数", 1, 100, 10)
     sim_quantity = st.number_input("数量 (ETH)", value=0.01, format="%.4f")
 
-# 获取数据
-data_dict, current_price, price_source, errors, source_display = fetch_all_data()
+# 获取数据（传入灵敏度）
+data_dict, current_price, price_source, errors, source_display = fetch_all_data(sensitivity)
 
 # 显示数据源状态
 if data_dict:
-    st.markdown(f'<div class="info-box">✅ 当前数据源：{source_display} | 价格源：{price_source}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="info-box">✅ 当前数据源：{source_display} | 价格源：{price_source} | 灵敏度：{sensitivity}</div>', unsafe_allow_html=True)
 
 # 简单显示错误（仅当严重时）
 if errors and len(errors) > 3:
