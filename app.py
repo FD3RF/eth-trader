@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极职业版 V5（完全免费·Bybit数据源·AI特征修正）
+🚀 合约智能监控中心 · 终极神级版（MEXC数据源）
 五层共振 | 动态概率评分 | 双模式切换 | 全免费数据源 | 半自动交易
-数据源：Bybit + Alternative.me + 模拟链上
+数据源：MEXC + Alternative.me + 模拟链上
 """
 
 import streamlit as st
@@ -23,26 +23,26 @@ import os
 
 # ==================== 配置 ====================
 SYMBOLS = {
-    "ETH/USDT": {"base": "ETH", "bybit": "ETHUSDT"},
-    "BTC/USDT": {"base": "BTC", "bybit": "BTCUSDT"},
-    "SOL/USDT": {"base": "SOL", "bybit": "SOLUSDT"},
-    "BNB/USDT": {"base": "BNB", "bybit": "BNBUSDT"}
+    "ETH/USDT": {"base": "ETH", "mexc": "ETHUSDT"},
+    "BTC/USDT": {"base": "BTC", "mexc": "BTCUSDT"},
+    "SOL/USDT": {"base": "SOL", "mexc": "SOLUSDT"},
+    "BNB/USDT": {"base": "BNB", "mexc": "BNBUSDT"}
 }
 
-# ==================== 免费数据源获取（仅Bybit）====================
+# ==================== 免费数据源获取（MEXC）====================
 class FreeDataFetcherV5:
-    """完全免费的数据获取器，仅使用Bybit（避免Binance封锁）"""
+    """完全免费的数据获取器，使用MEXC（在中国大陆可用）"""
     
     def __init__(self, symbol="ETH/USDT"):
         self.symbol = symbol
         self.base = SYMBOLS[symbol]["base"]
-        self.bybit_symbol = SYMBOLS[symbol]["bybit"]
+        self.mexc_symbol = SYMBOLS[symbol]["mexc"]
         self.periods = ['15m', '1h', '4h', '1d']
         self.limit = 500
         self.timeout = 10
         
-        # Bybit交易所实例
-        self.exchange = ccxt.bybit({
+        # MEXC交易所实例
+        self.exchange = ccxt.mexc({
             'enableRateLimit': True,
             'timeout': 30000,
         })
@@ -55,24 +55,17 @@ class FreeDataFetcherV5:
         self.chain_whale = 128
         
     def fetch_kline(self, timeframe):
-        """从Bybit获取K线"""
+        """从MEXC获取K线"""
         try:
-            # Bybit的K线接口需要转换周期格式
-            tf_map = {
-                '15m': '15',
-                '1h': '60',
-                '4h': '240',
-                '1d': 'D'
-            }
-            bybit_tf = tf_map.get(timeframe, timeframe)
-            ohlcv = self.exchange.fetch_ohlcv(self.bybit_symbol, bybit_tf, limit=self.limit)
+            # MEXC的K线接口支持标准周期格式
+            ohlcv = self.exchange.fetch_ohlcv(self.mexc_symbol, timeframe, limit=self.limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = df[col].astype(float)
-            return df, "Bybit"
+            return df, "MEXC"
         except Exception as e:
-            st.warning(f"Bybit {timeframe} 获取失败: {e}")
+            st.warning(f"MEXC {timeframe} 获取失败: {e}")
             return None, None
 
     def fetch_fear_greed(self):
@@ -99,6 +92,18 @@ class FreeDataFetcherV5:
                 price_sources.append(src)
             else:
                 errors.append(f"{period} 获取失败")
+
+        # 如果没有任何数据，返回空字典
+        if not data_dict:
+            return {
+                "data_dict": {},
+                "current_price": None,
+                "source_display": "无",
+                "errors": errors,
+                "fear_greed": 50,
+                "chain_netflow": self.chain_netflow,
+                "chain_whale": self.chain_whale
+            }
 
         # 当前价格（取15m最新）
         current_price = data_dict['15m']['close'].iloc[-1] if '15m' in data_dict else None
@@ -240,7 +245,6 @@ def ai_predict(model, features):
     if model is None:
         return np.random.randint(40, 60)
     try:
-        # 确保features是二维数组
         prob = model.predict_proba([features])[0][1] * 100
         return prob
     except Exception as e:
@@ -296,6 +300,8 @@ def detect_market_mode(df_dict):
 
 # ==================== 实时热力图 ====================
 def create_heatmap_data(layer_scores, direction):
+    if not layer_scores:
+        return pd.DataFrame()
     layers = list(layer_scores.keys())
     scores = list(layer_scores.values())
     dir_icons = []
@@ -369,7 +375,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极神级版（Bybit数据源）")
+st.title("🧠 合约智能监控中心 · 终极神级版（MEXC数据源）")
 st.caption("五层共振 + AI决策 + 全免费数据源 + 动态风控")
 
 # 初始化
@@ -420,19 +426,21 @@ if source_display != "无":
         <br>⚠️ 链上数据为模拟值（可替换为Dune免费API）
     </div>
     """, unsafe_allow_html=True)
+else:
+    st.error("无法获取任何数据，请检查网络或稍后重试")
 
 if errors:
     with st.expander("查看数据获取错误"):
         for e in errors:
             st.write(e)
 
-# 计算五层共振
+# 计算五层共振（如果数据为空，则返回默认值）
 final_dir, total_score, layer_scores = five_layer_score(
     data_dict, fear_greed, chain_netflow, chain_whale
 )
 
 # 检测市场模式
-market_mode = detect_market_mode(data_dict)
+market_mode = detect_market_mode(data_dict) if data_dict else "未知"
 
 # 计算ATR%和ADX
 atr_pct = 0
@@ -448,7 +456,6 @@ win_prob = calculate_win_probability(total_score, layer_scores, atr_pct, adx)
 ai_prob = 50
 if ai_model and '15m' in data_dict:
     try:
-        # 提取最新特征：必须与训练时的顺序一致：['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
         last = data_dict['15m'].iloc[-1]
         features = [
             last['rsi'],
@@ -464,7 +471,7 @@ if ai_model and '15m' in data_dict:
         st.error(f"AI特征提取失败: {e}")
         ai_prob = 50
 
-# 综合信号方向：如果五层有方向且AI概率支持，则使用五层方向，否则观望
+# 综合信号方向
 if final_dir != 0 and ai_prob > 60:
     signal_dir = final_dir
     combined_win = (win_prob * 0.6 + ai_prob * 0.4)
@@ -489,26 +496,29 @@ col_left, col_right = st.columns([2.2, 1.3])
 
 with col_left:
     # 市场状态
-    if data_dict:
+    if data_dict and market_mode != "未知":
         state_color = "green" if market_mode == "趋势" else "orange"
         st.markdown(f"<h5>市场状态: <span style='color:{state_color};'>{market_mode}</span></h5>", unsafe_allow_html=True)
 
     # 五层共振热力图
     st.subheader("🔥 五层共振热力图")
-    cols = st.columns(5)
-    layer_names = list(layer_scores.keys())
-    layer_values = list(layer_scores.values())
-    colors = ['#00F5A0', '#00F5A0', '#FFAA00', '#FF5555', '#FFAA00']
-    for i, col in enumerate(cols):
-        with col:
-            val = layer_values[i]
-            bg_color = colors[i] if val > 10 else '#555'
-            st.markdown(f"""
-            <div style="background:{bg_color}22; border-left:4px solid {bg_color}; padding:10px; border-radius:5px; text-align:center;">
-                <h4>{layer_names[i]}</h4>
-                <h2>{val}</h2>
-            </div>
-            """, unsafe_allow_html=True)
+    if not heatmap_df.empty:
+        cols = st.columns(5)
+        layer_names = list(layer_scores.keys())
+        layer_values = list(layer_scores.values())
+        colors = ['#00F5A0', '#00F5A0', '#FFAA00', '#FF5555', '#FFAA00']
+        for i, col in enumerate(cols):
+            with col:
+                val = layer_values[i]
+                bg_color = colors[i] if val > 10 else '#555'
+                st.markdown(f"""
+                <div style="background:{bg_color}22; border-left:4px solid {bg_color}; padding:10px; border-radius:5px; text-align:center;">
+                    <h4>{layer_names[i]}</h4>
+                    <h2>{val}</h2>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.info("暂无共振数据")
 
     # K线图
     st.subheader(f"📊 {symbol} K线 ({main_period})")
@@ -555,7 +565,10 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
 
-    st.metric("当前价格", f"${current_price:.2f}" if current_price else "N/A")
+    if current_price:
+        st.metric("当前价格", f"${current_price:.2f}")
+    else:
+        st.metric("当前价格", "N/A")
 
     # 风险仪表盘
     with st.container():
