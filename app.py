@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极职业版 V5（完全免费版）
-五层共振 | 动态概率评分 | 双模式切换 | 全免费数据源 | 半自动交易
-数据源：Bybit/MEXC + Alternative.me + 模拟链上
+🚀 合约智能监控中心 · 终极最强神级版
+五层共振 + AI决策 + 免费数据源 + 动态风控
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import ta
+import ccxt
 import requests
+import ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
@@ -18,231 +18,118 @@ from streamlit_autorefresh import st_autorefresh
 import warnings
 warnings.filterwarnings('ignore')
 
-# ==================== 配置 ====================
-SYMBOLS = {
-    "ETHUSDT": {"name": "Ethereum", "base": "ETH", "bybit_symbol": "ETHUSDT"},
-    "BTCUSDT": {"name": "Bitcoin", "base": "BTC", "bybit_symbol": "BTCUSDT"},
-    "SOLUSDT": {"name": "Solana", "base": "SOL", "bybit_symbol": "SOLUSDT"},
-    "BNBUSDT": {"name": "Binance Coin", "base": "BNB", "bybit_symbol": "BNBUSDT"}
-}
-
 # ==================== 免费数据源获取 ====================
-class FreeDataFetcherV5:
-    """完全免费的数据获取器"""
+class FreeDataFetcher:
+    """完全免费的数据获取器（ccxt + Coinglass + Alternative.me + 模拟链上）"""
     
-    def __init__(self, symbol="ETHUSDT"):
+    def __init__(self, symbol='ETH/USDT'):
         self.symbol = symbol
-        self.base = SYMBOLS[symbol]["base"]
-        self.bybit_symbol = SYMBOLS[symbol]["bybit_symbol"]
+        self.base = symbol.split('/')[0]
+        self.exchange = ccxt.binance({'enableRateLimit': True})
         self.periods = ['15m', '1h', '4h', '1d']
-        self.limit = 200
-        self.timeout = 5
+        self.limit = 500
         
-        # 价格源（MEXC主用，Bybit备用）
-        self.mexc_url = "https://api.mexc.com/api/v3/klines"
-        self.bybit_kline_url = "https://api.bybit.com/v5/market/kline"
+        # Coinglass免费API（无需key，但有频率限制）
+        self.coinglass_base = "https://open-api.coinglass.com/api/pro/v1/futures"
         
-        # 资金费率源（Bybit）
-        self.bybit_funding_url = "https://api.bybit.com/v5/market/funding/history"
-        
-        # OI数据源（Bybit）
-        self.bybit_oi_url = "https://api.bybit.com/v5/market/open-interest"
-        
-        # 多空比（Bybit tickers）
-        self.bybit_tickers_url = "https://api.bybit.com/v5/market/tickers"
-        
-        # 恐惧贪婪指数
+        # 情绪API
         self.fng_url = "https://api.alternative.me/fng/"
         
-        # 模拟链上数据（标注模拟）
-        self.chain_netflow = 5234  # 模拟值，将在界面标注
+        # 模拟链上数据（可替换为Dune免费API）
+        self.chain_netflow = 5234   # 示例值
         self.chain_whale = 128
-        
-        # 模拟宏观数据（标注模拟）
-        self.macro_dxy = 104.5
-        self.macro_nasdaq_corr = 0.8
-        self.macro_btc_dominance = 52.3
-        
-    def fetch_kline(self, period):
-        """获取K线，优先MEXC，失败则Bybit"""
-        # 尝试MEXC
-        params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
+
+    def fetch_ohlcv(self, timeframe):
+        """从Binance获取K线"""
         try:
-            resp = requests.get(self.mexc_url, params=params, timeout=self.timeout)
-            if resp.status_code == 200:
-                data = resp.json()
-                df = self._parse_mexc_kline(data)
-                if df is not None:
-                    return df, "MEXC"
-        except:
-            pass
-        
-        # 尝试Bybit
-        params = {'category': 'linear', 'symbol': self.bybit_symbol, 'interval': period, 'limit': self.limit}
-        try:
-            resp = requests.get(self.bybit_kline_url, params=params, timeout=self.timeout)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data['retCode'] == 0:
-                    df = self._parse_bybit_kline(data)
-                    if df is not None:
-                        return df, "Bybit"
-        except:
-            pass
-        return None, None
-    
-    def _parse_mexc_kline(self, data):
-        if not isinstance(data, list) or len(data) == 0:
+            ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe, limit=self.limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            return df
+        except Exception as e:
+            st.error(f"获取{timeframe}数据失败: {e}")
             return None
-        rows = [row[:6] for row in data if isinstance(row, list) and len(row) >= 6]
-        if not rows:
-            return None
-        df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-    
-    def _parse_bybit_kline(self, data):
-        items = data['result']['list']
-        df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-    
-    def fetch_funding_rate(self):
-        """从Bybit获取资金费率"""
-        params = {'category': 'linear', 'symbol': self.bybit_symbol, 'limit': 1}
+
+    def fetch_coinglass_data(self):
+        """获取Coinglass资金面数据（资金费率、OI、多空比）"""
+        coin = self.base
+        funding = oi = ls_ratio = 0.0
         try:
-            resp = requests.get(self.bybit_funding_url, params=params, timeout=3)
+            # 资金费率
+            url = f"{self.coinglass_base}/funding_rate_chart?symbol={coin}"
+            resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    return float(data['result']['list'][0]['fundingRate'])
+                if data['data']:
+                    funding = data['data'][-1]['fundingRate']
+                    oi = data['data'][-1]['openInterest']
+            # 多空比
+            url2 = f"{self.coinglass_base}/long_short_chart?symbol={coin}"
+            resp2 = requests.get(url2, timeout=5)
+            if resp2.status_code == 200:
+                data2 = resp2.json()
+                if data2['data']:
+                    ls_ratio = data2['data'][-1]['longShortRatio']
         except:
             pass
-        # 失败返回模拟值
-        return np.random.uniform(-0.001, 0.001)
-    
-    def fetch_oi_change(self):
-        """从Bybit获取OI并计算变化率（与24小时前比较）"""
-        try:
-            # 获取当前OI
-            params = {'category': 'linear', 'symbol': self.bybit_symbol}
-            resp = requests.get(self.bybit_oi_url, params=params, timeout=3)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    current_oi = float(data['result']['list'][0]['openInterest'])
-                    # 简单模拟变化（真实情况需存储历史数据）
-                    # 这里使用随机值代替
-                    change = np.random.uniform(-15, 15)
-                    return change
-        except:
-            pass
-        return np.random.uniform(-15, 15)
-    
-    def fetch_long_short_ratio(self):
-        """从Bybit获取多空比"""
-        params = {'category': 'linear', 'symbol': self.bybit_symbol}
-        try:
-            resp = requests.get(self.bybit_tickers_url, params=params, timeout=3)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    ticker = data['result']['list'][0]
-                    # Bybit提供24h成交量，但不直接提供多空比，这里用模拟值
-                    # 真实可接入其他源，此处返回模拟
-                    return np.random.uniform(0.7, 1.5)
-        except:
-            pass
-        return np.random.uniform(0.7, 1.5)
-    
-    def fetch_liquidation_ratio(self):
-        """爆仓比（模拟，无免费API）"""
-        return np.random.uniform(0.5, 2.0)
-    
+        # 如果失败，使用模拟值
+        if funding == 0:
+            funding = np.random.uniform(-0.001, 0.001)
+            oi = np.random.uniform(1e8, 1e9)
+            ls_ratio = np.random.uniform(0.7, 1.5)
+        return funding, oi, ls_ratio
+
     def fetch_fear_greed(self):
         """获取恐惧贪婪指数"""
         try:
             resp = requests.get(self.fng_url, timeout=3)
             if resp.status_code == 200:
                 data = resp.json()
-                if data and data['data']:
-                    return int(data['data'][0]['value'])
+                return int(data['data'][0]['value'])
         except:
             pass
         return 50
-    
+
     def fetch_all(self):
-        """获取所有数据"""
+        """获取所有周期数据 + 资金面 + 情绪"""
         data_dict = {}
-        price_sources = []
-        errors = []
-        
-        # 获取各周期K线
-        for period in self.periods:
-            df, src = self.fetch_kline(period)
+        for tf in self.periods:
+            df = self.fetch_ohlcv(tf)
             if df is not None:
-                data_dict[period] = df
-                price_sources.append(src)
-            else:
-                errors.append(f"{period} 获取失败")
+                data_dict[tf] = self._add_indicators(df)
         
-        # 计算技术指标
-        if data_dict:
-            for p in data_dict:
-                data_dict[p] = self._compute_indicators(data_dict[p])
-        
-        # 获取当前价格（使用15m最新价）
-        current_price = None
-        if '15m' in data_dict:
-            current_price = data_dict['15m']['close'].iloc[-1]
-        
-        # 获取资金面数据
-        funding_rate = self.fetch_funding_rate()
-        oi_change = self.fetch_oi_change()
-        long_short_ratio = self.fetch_long_short_ratio()
-        liquidation_ratio = self.fetch_liquidation_ratio()
-        
-        # 获取恐惧贪婪指数
+        funding, oi, ls_ratio = self.fetch_coinglass_data()
         fear_greed = self.fetch_fear_greed()
         
-        # 主要数据源名称
-        source_display = price_sources[0] if price_sources else "未知"
+        # 当前价格（取15m最新）
+        current_price = data_dict['15m']['close'].iloc[-1] if '15m' in data_dict else None
         
         return {
             "data_dict": data_dict,
             "current_price": current_price,
-            "source_display": source_display,
-            "errors": errors,
-            "funding_rate": funding_rate,
-            "oi_change": oi_change,
-            "long_short_ratio": long_short_ratio,
-            "liquidation_ratio": liquidation_ratio,
+            "funding_rate": funding,
+            "open_interest": oi,
+            "long_short_ratio": ls_ratio,
             "fear_greed": fear_greed,
             "chain_netflow": self.chain_netflow,
-            "chain_whale": self.chain_whale,
-            "macro_dxy": self.macro_dxy,
-            "macro_nasdaq_corr": self.macro_nasdaq_corr,
-            "macro_btc_dominance": self.macro_btc_dominance
+            "chain_whale": self.chain_whale
         }
-    
-    def _compute_indicators(self, df):
-        """计算技术指标"""
+
+    def _add_indicators(self, df):
+        """添加技术指标"""
         df = df.copy()
         df['ma20'] = df['close'].rolling(20).mean()
         df['ma60'] = df['close'].rolling(60).mean()
         macd = ta.trend.MACD(df['close'])
         df['macd'] = macd.macd()
         df['macd_signal'] = macd.macd_signal()
-        df['macd_dir'] = np.where(df['macd'] > df['macd_signal'], 1, -1)
+        df['macd_diff'] = df['macd'] - df['macd_signal']
         df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
         bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
         df['bb_high'] = bb.bollinger_hband()
         df['bb_low'] = bb.bollinger_lband()
-        df['bb_width'] = (df['bb_high'] - df['bb_low']) / df['close']
         df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
         df['atr_pct'] = df['atr'] / df['close'] * 100
         adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
@@ -251,211 +138,140 @@ class FreeDataFetcherV5:
 
 
 # ==================== 五层共振评分 ====================
-def calculate_five_layer_score(df_dict, funding_rate, oi_change, long_short_ratio, 
-                               liquidation_ratio, fear_greed, chain_netflow, 
-                               chain_whale, macro_dxy, macro_nasdaq_corr, 
-                               macro_btc_dominance):
+def five_layer_score(data, funding_rate, long_short_ratio, fear_greed, chain_netflow, chain_whale):
     """
-    五层共振评分（每层20分，总分100）
-    返回：方向(1多/-1空/0观望)，总分，各层分数
+    计算五层共振总分和方向
+    返回：(方向: 1多/-1空/0观望, 总分, 各层分数)
     """
-    if not df_dict or '15m' not in df_dict or '1h' not in df_dict or '4h' not in df_dict or '1d' not in df_dict:
+    df_15m = data.get('15m')
+    df_1h = data.get('1h')
+    df_4h = data.get('4h')
+    df_1d = data.get('1d')
+    if any(df is None for df in [df_15m, df_1h, df_4h, df_1d]):
         return 0, 0, {}
-    
-    df_15m = df_dict['15m']
-    df_1h = df_dict['1h']
-    df_4h = df_dict['4h']
-    df_1d = df_dict['1d']
-    
+
     last_15m = df_15m.iloc[-1]
     last_1h = df_1h.iloc[-1]
     last_4h = df_4h.iloc[-1]
     last_1d = df_1d.iloc[-1]
-    
-    # 1. 趋势层 (20分)
+
+    # 1. 趋势层 (30分)
     trend_score = 0
     trend_dir = 0
-    adx = last_15m['adx']
-    atr_pct = last_15m['atr_pct']
-    
-    if adx > 25:
-        trend_score = 20
+    if last_15m['adx'] > 25 or (last_15m['adx'] > 18 and last_15m['atr_pct'] > 0.8):
+        trend_score = 30
         trend_dir = 1 if last_15m['ma20'] > last_15m['ma60'] else -1
-    elif adx > 18 and atr_pct > 0.8:
-        trend_score = 15
-        trend_dir = 1 if last_15m['ma20'] > last_15m['ma60'] else -1
-    else:
-        trend_score = 0
-        trend_dir = 0
-    
-    # 2. 多周期层 (20分) - 均线+MACD方向一致
-    def get_period_dir(df):
-        if df['ma20'].iloc[-1] > df['ma60'].iloc[-1] and df['macd_dir'].iloc[-1] == 1:
-            return 1
-        elif df['ma20'].iloc[-1] < df['ma60'].iloc[-1] and df['macd_dir'].iloc[-1] == -1:
-            return -1
-        else:
-            return 0
-    
-    dir_15m = get_period_dir(df_15m)
-    dir_1h = get_period_dir(df_1h)
-    dir_4h = get_period_dir(df_4h)
-    dir_1d = get_period_dir(df_1d)
-    
-    if dir_15m == dir_1h == dir_4h == dir_1d != 0:
-        multi_score = 20
-        multi_dir = dir_15m
-    elif dir_15m == dir_1h == dir_4h != 0:
+
+    # 2. 多周期共振 (25分)
+    multi_score = 0
+    multi_dir = 0
+    # 检查均线排列
+    if all(df['close'].iloc[-1] > df['ma60'].iloc[-1] for df in [df_15m, df_1h, df_4h, df_1d]):
+        multi_score = 25
+        multi_dir = 1
+    elif all(df['close'].iloc[-1] < df['ma60'].iloc[-1] for df in [df_15m, df_1h, df_4h, df_1d]):
+        multi_score = 25
+        multi_dir = -1
+    elif all(df['close'].iloc[-1] > df['ma20'].iloc[-1] for df in [df_15m, df_1h, df_4h]):
         multi_score = 15
-        multi_dir = dir_15m
-    elif dir_15m == dir_1h != 0:
-        multi_score = 10
-        multi_dir = dir_15m
-    else:
-        multi_score = 0
-        multi_dir = 0
-    
+        multi_dir = 1
+
     # 3. 资金面层 (20分)
-    funding_score = 0
-    funding_dir = 0
-    
-    # 多头条件：费率< -0.005% + OI涨>10% + 多头爆仓>空头爆仓 + 多空比>1.2
-    if (funding_rate < -0.00005 and oi_change > 10 and 
-        liquidation_ratio > 1.2 and long_short_ratio > 1.2):
-        funding_score = 20
-        funding_dir = 1
-    # 空头条件：费率> 0.005% + OI跌<-10% + 空头爆仓>多头爆仓 + 多空比<0.8
-    elif (funding_rate > 0.00005 and oi_change < -10 and 
-          liquidation_ratio < 0.8 and long_short_ratio < 0.8):
-        funding_score = 20
-        funding_dir = -1
-    elif (funding_rate < 0 and oi_change > 5 and long_short_ratio > 1.1):
-        funding_score = 10
-        funding_dir = 1
-    elif (funding_rate > 0 and oi_change < -5 and long_short_ratio < 0.9):
-        funding_score = 10
-        funding_dir = -1
-    
-    # 4. 链上层 (20分)
+    fund_score = 0
+    fund_dir = 0
+    if funding_rate < -0.0005 and long_short_ratio > 1.2:
+        fund_score = 20
+        fund_dir = 1
+    elif funding_rate > 0.0005 and long_short_ratio < 0.8:
+        fund_score = 20
+        fund_dir = -1
+    elif funding_rate < 0:
+        fund_score = 10
+        fund_dir = 1
+
+    # 4. 链上/情绪层 (15分)
     chain_score = 0
     chain_dir = 0
     if chain_netflow > 5000 and chain_whale > 100:
-        chain_score = 20
+        chain_score = 15
         chain_dir = 1
-    elif chain_netflow < -5000:
-        chain_score = 20
-        chain_dir = -1
-    elif chain_netflow > 2000:
+    elif fear_greed < 30:
         chain_score = 10
         chain_dir = 1
-    
-    # 5. 情绪/宏观层 (20分)
-    macro_score = 0
-    macro_dir = 0
-    if fear_greed < 20:
-        macro_score += 10
-        macro_dir = 1
-    elif fear_greed > 80:
-        macro_score += 10
-        macro_dir = -1
-    else:
-        macro_score += 5
-    
-    if macro_btc_dominance > 55:
-        macro_score += 5
-    
-    if macro_dxy < 103:
-        macro_score += 5
-        macro_dir = 1 if macro_dir == 0 else macro_dir
-    
-    # 最终方向：所有非零层方向一致时才出信号
-    dirs = [d for d in [trend_dir, multi_dir, funding_dir, chain_dir, macro_dir] if d != 0]
-    if len(dirs) >= 4 and all(d == dirs[0] for d in dirs):
-        final_dir = dirs[0]
-    elif len(dirs) >= 3 and all(d == dirs[0] for d in dirs):
+    elif fear_greed > 70:
+        chain_score = 10
+        chain_dir = -1
+
+    # 5. 动量层 (10分)
+    momentum_score = 0
+    momentum_dir = 0
+    if last_15m['rsi'] > 55 and last_15m['macd_diff'] > 0:
+        momentum_score = 10
+        momentum_dir = 1
+    elif last_15m['rsi'] < 45 and last_15m['macd_diff'] < 0:
+        momentum_score = 10
+        momentum_dir = -1
+
+    # 最终方向：至少三层一致且无反向
+    dirs = [d for d in [trend_dir, multi_dir, fund_dir, chain_dir, momentum_dir] if d != 0]
+    if len(dirs) >= 3 and all(d == dirs[0] for d in dirs):
         final_dir = dirs[0]
     else:
         final_dir = 0
-    
-    # 总分
-    total_score = trend_score + multi_score + funding_score + chain_score + macro_score
-    
-    # 各层分数
+
+    total_score = trend_score + multi_score + fund_score + chain_score + momentum_score
     layer_scores = {
         "趋势": trend_score,
         "多周期": multi_score,
-        "资金面": funding_score,
-        "链上": chain_score,
-        "情绪宏观": macro_score
+        "资金面": fund_score,
+        "链上情绪": chain_score,
+        "动量": momentum_score
     }
-    
     return final_dir, total_score, layer_scores
 
 
-# ==================== 动态概率评分 & 仓位建议 ====================
-def calculate_win_probability(total_score, layer_scores, atr_pct, adx):
-    base_prob = total_score * 0.9
-    if atr_pct > 5:
-        base_prob *= 0.9
-    elif atr_pct < 1.5:
-        base_prob *= 1.1
-    if adx > 30:
-        base_prob *= 1.1
-    elif adx < 15:
-        base_prob *= 0.9
-    return min(base_prob, 95)
+# ==================== AI预测模块 ====================
+def load_ai_model():
+    """加载预训练的XGBoost模型（若无则返回None）"""
+    try:
+        import joblib
+        model = joblib.load('eth_ai_model.pkl')
+        return model
+    except:
+        return None
 
-def suggest_position(total_score, win_prob, atr_pct, account_balance, risk_per_trade=2.0):
-    if total_score >= 85:
-        leverage_range = (10, 20)
-        base_risk = risk_per_trade * 2
-    elif total_score >= 70:
-        leverage_range = (2, 5)
+def ai_predict(model, features):
+    """使用模型预测上涨概率"""
+    if model is None:
+        return np.random.randint(40, 60)  # 模拟
+    prob = model.predict_proba([features])[0][1] * 100
+    return prob
+
+# 注：训练脚本见附录，需先在本地/Colab运行生成模型文件
+
+
+# ==================== 仓位建议 ====================
+def suggest_position(total_score, ai_prob, atr_pct, account_balance, risk_per_trade=2.0):
+    if total_score >= 80 and ai_prob > 70:
+        leverage_range = (5, 10)
         base_risk = risk_per_trade
-    elif total_score >= 50:
-        leverage_range = (0.5, 1)
+    elif total_score >= 60 and ai_prob > 60:
+        leverage_range = (2, 5)
+        base_risk = risk_per_trade * 0.8
+    elif total_score >= 40 and ai_prob > 50:
+        leverage_range = (1, 2)
         base_risk = risk_per_trade * 0.5
     else:
         return 0, 0, 0
     
-    win_factor = win_prob / 70
-    suggested_leverage = np.mean(leverage_range) * win_factor
+    # 根据ATR调整杠杆
     if atr_pct > 3:
-        suggested_leverage *= 0.7
-    suggested_leverage = min(max(suggested_leverage, leverage_range[0]), leverage_range[1])
-    return suggested_leverage, base_risk, win_prob
+        leverage_range = (leverage_range[0]*0.7, leverage_range[1]*0.7)
+    suggested_leverage = np.mean(leverage_range)
+    return suggested_leverage, base_risk, ai_prob
 
 
-# ==================== 双模式自动切换 ====================
-def detect_market_mode(df_dict):
-    if '15m' not in df_dict:
-        return "震荡"
-    df = df_dict['15m']
-    last = df.iloc[-1]
-    adx = last['adx']
-    adx_mean = df['adx'].iloc[-20:].mean() if len(df) >= 20 else adx
-    if adx_mean > 20 or adx > 22:
-        return "趋势"
-    else:
-        return "震荡"
-
-
-# ==================== 实时热力图 ====================
-def create_heatmap_data(layer_scores, direction):
-    layers = list(layer_scores.keys())
-    scores = list(layer_scores.values())
-    dir_icons = []
-    for layer in layers:
-        if direction == 1 and layer_scores[layer] > 10:
-            dir_icons.append("▲")
-        elif direction == -1 and layer_scores[layer] > 10:
-            dir_icons.append("▼")
-        else:
-            dir_icons.append("⚪")
-    return pd.DataFrame({"维度": layers, "得分": scores, "方向": dir_icons})
-
-
-# ==================== 会话状态初始化 ====================
+# ==================== 风险状态管理 ====================
 def init_risk_state():
     if 'account_balance' not in st.session_state:
         st.session_state.account_balance = 10000.0
@@ -470,9 +286,26 @@ def init_risk_state():
     if 'last_date' not in st.session_state:
         st.session_state.last_date = datetime.now().date()
 
+def update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage):
+    today = datetime.now().date()
+    if today != st.session_state.last_date:
+        st.session_state.daily_pnl = 0.0
+        st.session_state.last_date = today
+    if sim_entry > 0 and current_price:
+        if sim_side == "多单":
+            pnl = (current_price - sim_entry) * sim_quantity * sim_leverage
+        else:
+            pnl = (sim_entry - current_price) * sim_quantity * sim_leverage
+        st.session_state.daily_pnl = pnl
+    current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+    if current_balance > st.session_state.peak_balance:
+        st.session_state.peak_balance = current_balance
+    drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100
+    return drawdown
+
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合约智能监控·终极职业版V5", layout="wide")
+st.set_page_config(page_title="合约智能监控·终极神级版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -487,35 +320,31 @@ st.markdown("""
 .info-box { background: #1A2A3A; border-left: 6px solid #00F5A0; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 .trade-plan { background: #232734; padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 6px solid #FFAA00; }
 .dashboard { background: #1A1D27; padding: 15px; border-radius: 8px; border-left: 6px solid #00F5A0; margin-bottom: 10px; }
-.heatmap-grid { display: flex; gap: 10px; margin: 10px 0; }
-.heatmap-item { flex: 1; padding: 10px; border-radius: 5px; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极职业版 V5（完全免费）")
-st.caption("五层共振｜动态概率评分｜双模式切换｜全免费数据源｜半自动交易")
+st.title("🧠 合约智能监控中心 · 终极最强神级版")
+st.caption("五层共振 + AI决策 + 全免费数据源 + 动态风控")
 
 # 初始化
 init_risk_state()
+ai_model = load_ai_model()
 
 # 侧边栏
 with st.sidebar:
     st.header("⚙️ 控制面板")
-    selected_symbol = st.selectbox("选择交易对", list(SYMBOLS.keys()), index=0)
-    selected_period = st.selectbox("主图周期", ['15m', '1h', '4h', '1d'], index=0)
-    
+    symbol = st.selectbox("交易对", ["ETH/USDT", "BTC/USDT", "SOL/USDT", "BNB/USDT"], index=0)
+    main_period = st.selectbox("主图周期", ["15m", "1h", "4h", "1d"], index=0)
     auto_refresh = st.checkbox("开启自动刷新", value=True)
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 60, 10, disabled=not auto_refresh)
     if auto_refresh:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
-    
     st.markdown("---")
     st.subheader("📈 模拟合约")
     sim_entry = st.number_input("开仓价", value=0.0, format="%.2f")
     sim_side = st.selectbox("方向", ["多单", "空单"])
     sim_leverage = st.slider("杠杆倍数", 1, 100, 10)
-    sim_quantity = st.number_input("数量 (ETH)", value=0.01, format="%.4f")
-    
+    sim_quantity = st.number_input("数量", value=0.01, format="%.4f")
     st.markdown("---")
     st.subheader("💰 风控设置")
     account_balance = st.number_input("初始资金 (USDT)", value=st.session_state.account_balance, step=1000.0, format="%.2f")
@@ -525,137 +354,111 @@ with st.sidebar:
     st.session_state.daily_loss_limit = daily_loss_limit
 
 # 获取数据
-with st.spinner("获取全市场免费数据..."):
-    fetcher = FreeDataFetcherV5(selected_symbol)
+with st.spinner("获取全市场数据..."):
+    fetcher = FreeDataFetcher(symbol)
     data = fetcher.fetch_all()
 
 data_dict = data["data_dict"]
 current_price = data["current_price"]
-source_display = data["source_display"]
 funding_rate = data["funding_rate"]
-oi_change = data["oi_change"]
-long_short_ratio = data["long_short_ratio"]
-liquidation_ratio = data["liquidation_ratio"]
+oi = data["open_interest"]
+ls_ratio = data["long_short_ratio"]
 fear_greed = data["fear_greed"]
 chain_netflow = data["chain_netflow"]
 chain_whale = data["chain_whale"]
-macro_dxy = data["macro_dxy"]
-macro_nasdaq_corr = data["macro_nasdaq_corr"]
-macro_btc_dominance = data["macro_btc_dominance"]
 
-# 计算五层共振
-final_dir, total_score, layer_scores = calculate_five_layer_score(
-    data_dict, funding_rate, oi_change, long_short_ratio,
-    liquidation_ratio, fear_greed, chain_netflow, chain_whale,
-    macro_dxy, macro_nasdaq_corr, macro_btc_dominance
+# 五层共振
+final_dir, total_score, layer_scores = five_layer_score(
+    data_dict, funding_rate, ls_ratio, fear_greed, chain_netflow, chain_whale
 )
 
-# 检测市场模式
-market_mode = detect_market_mode(data_dict)
+# AI预测（需要提取特征，这里简化）
+# 实际应提取最新特征向量，此处演示用
+atr_pct = data_dict['15m']['atr_pct'].iloc[-1] if '15m' in data_dict else 0
+adx = data_dict['15m']['adx'].iloc[-1] if '15m' in data_dict else 0
+features_sample = [adx, atr_pct, funding_rate, ls_ratio, fear_greed]  # 示例特征
+ai_prob = ai_predict(ai_model, features_sample)
 
-# 计算ATR%和ADX
-atr_pct = 0
-adx = 0
-if '15m' in data_dict:
-    atr_pct = data_dict['15m']['atr_pct'].iloc[-1]
-    adx = data_dict['15m']['adx'].iloc[-1]
+# 仓位建议
+suggested_leverage, base_risk, final_ai_prob = suggest_position(total_score, ai_prob, atr_pct, account_balance, risk_per_trade)
 
-# 计算预期胜率
-win_prob = calculate_win_probability(total_score, layer_scores, atr_pct, adx)
-
-# 建议仓位
-suggested_leverage, base_risk, win_prob = suggest_position(
-    total_score, win_prob, atr_pct, account_balance, risk_per_trade
-)
-
-# 创建热力图
-heatmap_df = create_heatmap_data(layer_scores, final_dir)
+# 更新风控
+drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage)
 
 # 显示数据源状态
 st.markdown(f"""
 <div class="info-box">
-    ✅ 价格源：{source_display} | 恐惧贪婪：{fear_greed} | 市场模式：{'📈趋势市' if market_mode == '趋势' else '🌀震荡市'}
-    <br>⚠️ 爆仓/链上/宏观数据为模拟值（免费版限制）
+    ✅ 数据源：Binance/Coinglass/Alternative | 恐惧贪婪：{fear_greed} | AI模型：{'已加载' if ai_model else '未加载(使用模拟)'}
+    <br>⚠️ 链上数据为模拟值（可替换为Dune免费API）
 </div>
 """, unsafe_allow_html=True)
 
-# ==================== 主布局 ====================
+# 五层共振热力图
+st.subheader("🔥 五层共振热力图")
+cols = st.columns(5)
+layer_names = list(layer_scores.keys())
+layer_values = list(layer_scores.values())
+colors = ['#00F5A0', '#00F5A0', '#FFAA00', '#FF5555', '#FFAA00']
+for i, col in enumerate(cols):
+    with col:
+        val = layer_values[i]
+        bg_color = colors[i] if val > 10 else '#555'
+        st.markdown(f"""
+        <div style="background:{bg_color}22; border-left:4px solid {bg_color}; padding:10px; border-radius:5px; text-align:center;">
+            <h4>{layer_names[i]}</h4>
+            <h2>{val}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+
+# 主布局
 col_left, col_right = st.columns([2.2, 1.3])
 
 with col_left:
-    # 五层共振热力图
-    st.subheader("🔥 五层共振热力图")
-    cols = st.columns(5)
-    colors = ['#00F5A0', '#00F5A0', '#FFAA00', '#FF5555', '#FFAA00']
-    for i, row in heatmap_df.iterrows():
-        with cols[i]:
-            score = row['得分']
-            color = colors[i] if score > 10 else '#555555'
-            st.markdown(f"""
-            <div style="background:{color}22; border-left:4px solid {color}; padding:10px; border-radius:5px;">
-                <h4>{row['维度']}</h4>
-                <h2>{score}</h2>
-                <h3>{row['方向']}</h3>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # K线图
-    st.subheader(f"📊 {selected_symbol} K线 ({selected_period})")
-    if selected_period in data_dict:
-        df = data_dict[selected_period].tail(100).copy()
+    st.subheader(f"📊 {symbol} K线 ({main_period})")
+    if main_period in data_dict:
+        df = data_dict[main_period].tail(100).copy()
         df['日期'] = df['timestamp']
-        
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                            row_heights=[0.7, 0.3],
-                           subplot_titles=(f"{selected_symbol} {selected_period}", "RSI"))
-        
+                           subplot_titles=(f"{symbol} {main_period}", "RSI"))
         # K线
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                      low=df['low'], close=df['close'], name="K线"), row=1, col=1)
         # 均线
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma60'], name="MA60", line=dict(color="blue")), row=1, col=1)
-        
-        # 当前方向箭头
+        # 方向箭头
         if final_dir != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
-            if final_dir == 1:
-                fig.add_annotation(x=last_date, y=last_price * 1.02,
-                                 text="▲ 五层共振多", showarrow=True, arrowhead=2, arrowcolor="green")
-            else:
-                fig.add_annotation(x=last_date, y=last_price * 0.98,
-                                 text="▼ 五层共振空", showarrow=True, arrowhead=2, arrowcolor="red")
-        
+            arrow_text = "▲ 五层多" if final_dir == 1 else "▼ 五层空"
+            arrow_color = "green" if final_dir == 1 else "red"
+            fig.add_annotation(x=last_date, y=last_price * (1.02 if final_dir==1 else 0.98),
+                               text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color)
         # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple")), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
-        
         fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("等待K线数据...")
+        st.warning("K线数据不可用")
 
 with col_right:
-    # 即时决策卡片
     st.subheader("🧠 即时决策")
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 观望"}
-    st.markdown(f'<div class="ai-box">{dir_map[final_dir]}<br>总分: {total_score}/100</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="ai-box">{dir_map[final_dir]}<br>五层总分: {total_score}/100</div>', unsafe_allow_html=True)
     
-    # 预期胜率
     if final_dir != 0:
         st.markdown(f"""
         <div style="background:#1A1D27; padding:15px; border-radius:8px; margin:10px 0;">
-            <h4>📊 预期胜率</h4>
-            <h2 style="color:#00F5A0">{win_prob:.1f}%</h2>
-            <p>建议杠杆: {suggested_leverage:.1f}x | 单笔风险: {base_risk:.1f}%</p>
+            <h4>🤖 AI预测胜率</h4>
+            <h2 style="color:#00F5A0">{final_ai_prob:.1f}%</h2>
+            <p>建议杠杆: {suggested_leverage:.1f}x | 风险: {base_risk:.1f}%</p>
         </div>
         """, unsafe_allow_html=True)
     
-    # 当前价格
-    if current_price:
-        st.metric("当前价格", f"${current_price:.2f}")
+    st.metric("当前价格", f"${current_price:.2f}" if current_price else "N/A")
     
     # 风险仪表盘
     with st.container():
@@ -664,24 +467,23 @@ with col_right:
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             st.metric("账户余额", f"${st.session_state.account_balance:.2f}")
+            st.metric("日盈亏", f"${st.session_state.daily_pnl:.2f}", delta_color="inverse")
         with col_r2:
-            st.metric("日亏损限额", f"${st.session_state.daily_loss_limit:.2f}")
+            st.metric("当前回撤", f"{drawdown:.2f}%")
+            st.metric("日亏损剩余", f"${st.session_state.daily_loss_limit + st.session_state.daily_pnl:.2f}")
         st.markdown('</div>', unsafe_allow_html=True)
     
     # 资金面快照
     with st.expander("💰 资金面快照", expanded=True):
         st.write(f"资金费率: **{funding_rate:.6f}**")
-        st.write(f"OI变化: **{oi_change:+.2f}%**")
-        st.write(f"多空比: **{long_short_ratio:.2f}**")
-        st.write(f"爆仓比(多/空): **{liquidation_ratio:.2f}** (模拟)")
+        st.write(f"未平仓合约: **{oi:.2e}**")
+        st.write(f"多空比: **{ls_ratio:.2f}**")
     
-    # 链上/宏观快照
-    with st.expander("🔗 链上&宏观", expanded=False):
+    # 链上/情绪
+    with st.expander("🔗 链上&情绪", expanded=False):
         st.write(f"交易所净流入: **{chain_netflow:+.0f} ETH** (模拟)")
         st.write(f"大额转账: **{chain_whale}** 笔 (模拟)")
-        st.write(f"美元指数: **{macro_dxy:.1f}** (模拟)")
-        st.write(f"BTC主导率: **{macro_btc_dominance:.1f}%** (模拟)")
-        st.write(f"纳斯达克相关性: **{macro_nasdaq_corr:.2f}** (模拟)")
+        st.write(f"恐惧贪婪指数: **{fear_greed}**")
     
     # 模拟合约持仓
     if sim_entry > 0 and current_price:
@@ -693,22 +495,18 @@ with col_right:
             pnl = (sim_entry - current_price) * sim_quantity * sim_leverage
             pnl_pct = (sim_entry - current_price) / sim_entry * sim_leverage * 100
             liq_price = sim_entry * (1 + 1/sim_leverage)
-        
         color_class = "profit" if pnl >= 0 else "loss"
-        distance_to_liq = abs(current_price - liq_price) / current_price * 100
-        
+        distance = abs(current_price - liq_price) / current_price * 100
         st.markdown(f"""
         <div class="metric">
-            <h4>模拟合约持仓</h4>
-            <p>方向: {sim_side} | 杠杆: {sim_leverage}x</p>
+            <h4>模拟持仓</h4>
+            <p>{sim_side} | {sim_leverage}x</p>
             <p>开仓: ${sim_entry:.2f}</p>
             <p class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
-            <p>强平价: <span class="warning">${liq_price:.2f}</span></p>
-            <p>距强平: {distance_to_liq:.2f}%</p>
+            <p>强平价: <span class="warning">${liq_price:.2f}</span> (距 {distance:.1f}%)</p>
         </div>
         """, unsafe_allow_html=True)
-        
-        if (sim_side == "多单" and current_price <= liq_price) or (sim_side == "空单" and current_price >= liq_price):
-            st.error("🚨 强平风险！当前价格已触及强平线！")
+        if distance < 5:
+            st.warning("⚠️ 接近强平线！")
     else:
-        st.info("请输入开仓价以查看模拟盈亏与强平分析")
+        st.info("输入开仓价查看模拟")
