@@ -8,28 +8,11 @@ import ta
 import time
 from datetime import datetime, timedelta
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings('ignore')
 
-# ---------- 尝试导入深度学习库（如不存在则禁用相关功能）----------
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, Attention
-    DEEP_LEARNING_AVAILABLE = True
-except:
-    DEEP_LEARNING_AVAILABLE = False
-    print("TensorFlow not installed, deep learning features disabled.")
-
-try:
-    import xgboost as xgb
-    XGB_AVAILABLE = True
-except:
-    XGB_AVAILABLE = False
-
-st.set_page_config(page_title="终极至尊量子版 v5 · 全维度神级融合系统", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="终极至尊AI交易系统 · 量子版", layout="wide", initial_sidebar_state="expanded")
 
 # ---------- 极致视觉CSS ----------
 st.markdown("""
@@ -273,19 +256,8 @@ def detect_candlestick_patterns(df):
             patterns.append("🔴 红三兵 (看涨)")
     return patterns
 
-# ---------- 深度学习模型（如果可用）----------
-def create_lstm_model(input_shape):
-    model = Sequential()
-    model.add(LSTM(64, return_sequences=True, input_shape=input_shape))
-    model.add(Dropout(0.2))
-    model.add(LSTM(32))
-    model.add(Dropout(0.2))
-    model.add(Dense(1, activation='linear'))
-    model.compile(optimizer='adam', loss='mse')
-    return model
-
-# ---------- 机器学习集成模型（含XGBoost如果可用）----------
-def train_ensemble(df):
+# ---------- 机器学习模型（逻辑回归）----------
+def train_ml_model(df):
     if len(df) < 100:
         return None, None
     feature_cols = ['rsi', 'macd', 'adx', 'cci', 'mfi', 'kdj_k', 'kdj_d', 'natr', 'stochrsi_k', 'williams_r', 'cmf']
@@ -298,30 +270,20 @@ def train_ensemble(df):
     y = y[:min_len]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    models = {
-        'lr': LogisticRegression(max_iter=1000),
-        'rf': RandomForestClassifier(n_estimators=50, max_depth=5),
-        'gb': GradientBoostingClassifier(n_estimators=50, max_depth=3),
-    }
-    if XGB_AVAILABLE:
-        models['xgb'] = xgb.XGBClassifier(n_estimators=50, max_depth=3, use_label_encoder=False, eval_metric='logloss')
-    for name, model in models.items():
-        model.fit(X_scaled, y)
-    return models, scaler
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_scaled, y)
+    return model, scaler
 
-def ensemble_predict(df, models, scaler):
-    if models is None:
+def ml_predict(df, model, scaler):
+    if model is None:
         return 0.5
     feature_cols = ['rsi', 'macd', 'adx', 'cci', 'mfi', 'kdj_k', 'kdj_d', 'natr', 'stochrsi_k', 'williams_r', 'cmf']
     last = df[feature_cols].iloc[-1:].dropna()
     if last.empty:
         return 0.5
     X_last = scaler.transform(last)
-    probs = []
-    for name, model in models.items():
-        prob = model.predict_proba(X_last)[0][1]
-        probs.append(prob)
-    return np.mean(probs)
+    prob = model.predict_proba(X_last)[0][1]
+    return prob
 
 # ---------- 蒙特卡洛模拟 ----------
 def monte_carlo_simulation(df, steps=10, n_simulations=100):
@@ -352,21 +314,14 @@ def calculate_var(df, confidence=0.95, horizon=1):
     var = np.percentile(returns, (1-confidence)*100) * np.sqrt(horizon)
     return abs(var)
 
-# ---------- 动态杠杆调整 ----------
-def dynamic_leverage(current_volatility, base_leverage=100, max_leverage=100):
-    normal_vol = 0.02
-    vol_ratio = current_volatility / normal_vol
-    adjusted = base_leverage / max(vol_ratio, 0.5)
-    return int(min(max_leverage, max(1, adjusted)))
-
 # ---------- 多因子评分系统（终极版）----------
-def calculate_signal_score(df, ensemble_prob=0.5, dl_prob=None):
+def calculate_signal_score(df, ml_prob=0.5):
     if df.empty or len(df) < 30:
         return 0, "数据不足"
     last = df.iloc[-1]
     score = 0
     reasons = []
-    # 技术因子 (40)
+    # 技术因子
     if not pd.isna(last['ma20']) and not pd.isna(last['ma60']):
         if last['ma20'] > last['ma60']:
             score += 15
@@ -448,22 +403,14 @@ def calculate_signal_score(df, ensemble_prob=0.5, dl_prob=None):
         elif "看跌" in p or "上吊" in p or "暮星" in p:
             score -= 10
             reasons.append(p)
-    # 机器学习信号 (20)
-    if ensemble_prob > 0.6:
+    # 机器学习信号
+    if ml_prob > 0.6:
         score += 15
         reasons.append("ML看涨")
-    elif ensemble_prob < 0.4:
+    elif ml_prob < 0.4:
         score -= 15
         reasons.append("ML看跌")
-    # 深度学习信号 (10)
-    if dl_prob is not None:
-        if dl_prob > 0.55:
-            score += 10
-            reasons.append("DL看涨")
-        elif dl_prob < 0.45:
-            score -= 10
-            reasons.append("DL看跌")
-    # Ichimoku信号 (10)
+    # Ichimoku信号
     if not pd.isna(last['tenkan']) and not pd.isna(last['kijun']):
         if last['tenkan'] > last['kijun']:
             score += 5
@@ -589,9 +536,8 @@ if "last_refresh" not in st.session_state:
     if "accounts" not in st.session_state:
         st.session_state.accounts = [{"name": "主账户", "capital": 1000, "leverage": 100, "equity_curve": [1000]}]
     st.session_state.current_account = 0
-    st.session_state.ensemble_models = None
-    st.session_state.scaler = None
-    st.session_state.lstm_model = None
+    st.session_state.ml_model = None
+    st.session_state.ml_scaler = None
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
@@ -633,8 +579,8 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- 主界面 ----------
-st.markdown(f'<h1 class="title-glow">📊 {selected_coin} 终极至尊量子版 v5 · 全维度神级融合系统</h1>', unsafe_allow_html=True)
-st.caption(f"⚡ 数据更新: {st.session_state.last_refresh.strftime('%H:%M:%S')} | 数据源: CoinGecko | 机器学习 | 深度学习 | 蒙特卡洛 | VaR | Ichimoku | 斐波那契")
+st.markdown(f'<h1 class="title-glow">📊 {selected_coin} 终极至尊AI交易系统 · 量子版</h1>', unsafe_allow_html=True)
+st.caption(f"⚡ 数据更新: {st.session_state.last_refresh.strftime('%H:%M:%S')} | 数据源: CoinGecko | 机器学习 | 蒙特卡洛 | VaR | Ichimoku | 斐波那契")
 
 price, change = fetch_price(coin_id)
 if price:
@@ -648,22 +594,15 @@ df = add_advanced_indicators(df)
 last = df.iloc[-1]
 prev = df.iloc[-2]
 
-# 训练集成模型
-if st.session_state.ensemble_models is None or len(df) % 100 == 0:
-    models, scaler = train_ensemble(df)
-    if models is not None:
-        st.session_state.ensemble_models = models
-        st.session_state.scaler = scaler
-ensemble_prob = ensemble_predict(df, st.session_state.ensemble_models, st.session_state.scaler) if st.session_state.ensemble_models else 0.5
+# 训练机器学习模型
+if st.session_state.ml_model is None or len(df) % 100 == 0:
+    model, scaler = train_ml_model(df)
+    if model is not None:
+        st.session_state.ml_model = model
+        st.session_state.ml_scaler = scaler
+ml_prob = ml_predict(df, st.session_state.ml_model, st.session_state.ml_scaler) if st.session_state.ml_model else 0.5
 
-# 深度学习预测（如果可用）
-dl_prob = None
-if DEEP_LEARNING_AVAILABLE:
-    # 这里仅为演示，实际需要训练数据
-    # 我们简单用随机数代替，实际中应调用模型
-    dl_prob = np.random.uniform(0.4, 0.6)
-
-score, reason_summary = calculate_signal_score(df, ensemble_prob, dl_prob)
+score, reason_summary = calculate_signal_score(df, ml_prob)
 direction, conf, extra_reason = get_signal_from_score(score)
 
 # 蒙特卡洛模拟
@@ -672,16 +611,12 @@ var_1d = calculate_var(df, confidence=0.95, horizon=1)
 var_5d = calculate_var(df, confidence=0.95, horizon=5)
 sentiment = market_sentiment(df)
 
-# 动态杠杆
-current_vol = last['natr'] / 100 if not pd.isna(last['natr']) else 0.02
-dyn_leverage = dynamic_leverage(current_vol, base_leverage=lev, max_leverage=100)
-
 # 移动止损建议
 trail_stop = moving_stop_loss(entry, last['close'], direction)
 
 # ---------- 顶部指标卡片 ----------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-cols = st.columns(9)
+cols = st.columns(8)
 with cols[0]:
     delta = last['close'] - prev['close']
     st.metric(f"{selected_coin}/USDT", f"${last['close']:.2f}", f"{delta:+.2f}")
@@ -696,17 +631,15 @@ with cols[4]:
 with cols[5]:
     st.metric("情绪", sentiment, delta=None)
 with cols[6]:
-    st.metric("ML概率", f"{ensemble_prob:.0%}")
+    st.metric("ML概率", f"{ml_prob:.0%}")
 with cols[7]:
-    st.metric("DL概率", f"{dl_prob:.0%}" if dl_prob else "N/A")
-with cols[8]:
-    st.metric("动态杠杆", f"{dyn_leverage}x")
+    st.metric("VaR(1d)", f"{var_1d*100:.2f}%")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# 风险提示 + VaR
+# 风险提示
 st.markdown(f"""
 <div class="warning-box">
-    ⚠️ 当前杠杆 {lev}倍 (建议动态 {dyn_leverage}x) | 本金 {capital:.0f} USDT | 可开最大 {capital*lev/price:.3f} {selected_coin} | 单笔风险≤2% | 24h涨跌: {change:+.2f}% 
+    ⚠️ 当前杠杆 {lev}倍 | 本金 {capital:.0f} USDT | 可开最大 {capital*lev/price:.3f} {selected_coin} | 单笔风险≤2% | 24h涨跌: {change:+.2f}% 
     <br>📊 风险价值 (95%): 1日 VaR {var_1d*100:.2f}% | 5日 VaR {var_5d*100:.2f}%
 </div>
 """, unsafe_allow_html=True)
@@ -752,8 +685,7 @@ with colE:
 with colF:
     st.markdown("**AI决策**")
     st.markdown(f"- 综合评分: **{score}**")
-    st.markdown(f"- ML概率: {ensemble_prob:.0%}")
-    st.markdown(f"- DL概率: {dl_prob:.0%}" if dl_prob else "-")
+    st.markdown(f"- ML概率: {ml_prob:.0%}")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- K线图 ----------
@@ -777,9 +709,9 @@ with colL:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("🎯 AI量子信号")
     if "强烈" in direction:
-        st.markdown(f'<div class="strong-signal"><span style="font-size:28px;color:{"#26A69A" if "多" in direction else "#EF5350"};">{direction}</span><br>评分: {score} (强烈信号)<br>{extra_reason}<br>因子: {reason_summary}<br>ML概率: {ensemble_prob:.0%}<br>DL概率: {dl_prob:.0% if dl_prob else "N/A"}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="strong-signal"><span style="font-size:28px;color:{"#26A69A" if "多" in direction else "#EF5350"};">{direction}</span><br>评分: {score} (强烈信号)<br>{extra_reason}<br>因子: {reason_summary}<br>ML概率: {ml_prob:.0%}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="signal-box"><span style="font-size:24px;color:{"#26A69A" if "多" in direction else "#EF5350" if "空" in direction else "#888"};">{"🟢" if "多" in direction else "🔴" if "空" in direction else "⚪"} {direction}</span><br>评分: {score}<br>{extra_reason}<br>因子: {reason_summary}<br>ML概率: {ensemble_prob:.0%}<br>DL概率: {dl_prob:.0% if dl_prob else "N/A"}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="signal-box"><span style="font-size:24px;color:{"#26A69A" if "多" in direction else "#EF5350" if "空" in direction else "#888"};">{"🟢" if "多" in direction else "🔴" if "空" in direction else "⚪"} {direction}</span><br>评分: {score}<br>{extra_reason}<br>因子: {reason_summary}<br>ML概率: {ml_prob:.0%}</div>', unsafe_allow_html=True)
     patterns = detect_candlestick_patterns(df)
     if patterns:
         st.markdown("**📐 形态识别:**")
@@ -897,4 +829,4 @@ if auto and (datetime.now()-st.session_state.last_refresh).seconds > 30:
     st.rerun()
 
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-st.caption("⚠️ 终极至尊量子版 v5 仅供学术研究，不构成投资建议。100倍杠杆高风险，务必设止损。市场有风险，入市需谨慎。历史不会重演，但总会惊人相似。")
+st.caption("⚠️ 终极至尊AI信号仅供学术研究，不构成投资建议。100倍杠杆高风险，务必设止损。市场有风险，入市需谨慎。历史不会重演，但总会惊人相似。")
