@@ -22,16 +22,16 @@ df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
 df['ma20'] = df['close'].rolling(20).mean()
 df['ma60'] = df['close'].rolling(60).mean()
 macd = ta.trend.MACD(df['close'])
-df['macd'] = macd.macd()
-df['macd_signal'] = macd.macd_signal()
+df['macd'] = macd.macd()               # MACD线
+df['macd_signal'] = macd.macd_signal() # 信号线
 df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
 df['atr_pct'] = df['atr'] / df['close'] * 100
 adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
 df['adx'] = adx.adx()
 
-# 3. 定义特征（可自由添加更多）
+# 3. 定义特征
 features = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
-df = df.dropna()
+df = df.dropna(subset=features)
 
 # 4. 标签：未来6小时涨幅 > 2% 为1，否则0
 df['target'] = (df['close'].shift(-6) > df['close'] * 1.02).astype(int)
