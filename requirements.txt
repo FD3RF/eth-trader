@@ -1,7 +1,10 @@
 streamlit
 pandas
 numpy
+ccxt
 ta
 plotly
 requests
 streamlit-autorefresh
+scikit-learn
+joblib
