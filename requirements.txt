@@ -6,5 +6,5 @@ plotly
 requests
 aiohttp
 streamlit-autorefresh
-tensorflow
 joblib
+# tensorflow
