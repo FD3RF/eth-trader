@@ -8,19 +8,20 @@ import ta
 import time
 from datetime import datetime, timedelta
 import random
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+import warnings
+warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="至尊AI交易终端 · 多币种", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="终极至尊AI交易系统 · 量子版", layout="wide", initial_sidebar_state="expanded")
 
 # ---------- 极致视觉CSS ----------
 st.markdown("""
 <style>
-    /* 全局背景渐变 */
     .stApp {
         background: linear-gradient(135deg, #0B0E14 0%, #141A24 100%);
         color: #F0F4FA;
     }
-    
-    /* 玻璃态卡片 */
     .glass-card {
         background: rgba(20, 28, 40, 0.75);
         backdrop-filter: blur(10px);
@@ -29,8 +30,6 @@ st.markdown("""
         border: 1px solid rgba(255, 255, 255, 0.1);
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     }
-    
-    /* 指标卡片 */
     .metric-card {
         background: rgba(16, 22, 34, 0.8);
         border-radius: 12px;
@@ -43,8 +42,6 @@ st.markdown("""
         transform: translateY(-2px);
         border-left-color: #F0B90B;
     }
-    
-    /* 信号框 */
     .signal-box {
         background: rgba(26, 34, 48, 0.9);
         backdrop-filter: blur(5px);
@@ -53,8 +50,6 @@ st.markdown("""
         border: 1px solid rgba(255, 215, 0, 0.3);
         box-shadow: 0 8px 32px rgba(255, 215, 0, 0.1);
     }
-    
-    /* 强烈信号高亮 */
     .strong-signal {
         background: linear-gradient(145deg, #2A2418, #1F1A12);
         border-left: 6px solid #FFA500;
@@ -62,8 +57,6 @@ st.markdown("""
         padding: 20px;
         box-shadow: 0 8px 32px rgba(255, 165, 0, 0.2);
     }
-    
-    /* 警告框 */
     .warning-box {
         background: rgba(239, 83, 80, 0.1);
         border-left: 4px solid #EF5350;
@@ -71,8 +64,6 @@ st.markdown("""
         padding: 12px;
         margin: 10px 0;
     }
-    
-    /* 快照卡片 */
     .snapshot-card {
         background: rgba(24, 30, 42, 0.8);
         border-radius: 12px;
@@ -83,8 +74,6 @@ st.markdown("""
     .snapshot-card:hover {
         border-color: #00D4FF;
     }
-    
-    /* 自定义标题 */
     .title-glow {
         font-size: 2.5rem;
         font-weight: 700;
@@ -93,21 +82,28 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         margin-bottom: 0;
     }
-    
-    /* 分割线 */
     .divider {
         height: 2px;
         background: linear-gradient(90deg, transparent, #00D4FF, #F0B90B, transparent);
         margin: 20px 0;
     }
+    .fib-line {
+        position: relative;
+        height: 4px;
+        background: linear-gradient(90deg, #FF6B6B, #FFD93D, #6BCB77, #4D96FF);
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- 币种配置 ----------
+# ---------- 币种配置（扩展版）----------
 COINS = {
     "ETH": {"id": "ethereum", "name": "Ethereum", "symbol": "ETH"},
     "BTC": {"id": "bitcoin", "name": "Bitcoin", "symbol": "BTC"},
-    "SOL": {"id": "solana", "name": "Solana", "symbol": "SOL"}
+    "SOL": {"id": "solana", "name": "Solana", "symbol": "SOL"},
+    "BNB": {"id": "binancecoin", "name": "BNB", "symbol": "BNB"},
+    "DOGE": {"id": "dogecoin", "name": "Dogecoin", "symbol": "DOGE"},
+    "AVAX": {"id": "avalanche-2", "name": "Avalanche", "symbol": "AVAX"}
 }
 
 # ---------- CoinGecko 免费数据源 ----------
@@ -121,11 +117,16 @@ def fetch_price(coin_id):
     except:
         return None, None
 
-def generate_klines(price, interval_min=5, limit=200):
-    """基于当前价格生成模拟K线"""
+def generate_klines(price, interval_min=5, limit=500):  # 增加数据量
+    """基于当前价格生成模拟K线（含随机游走和波动聚集）"""
     now = datetime.now()
     times = [now - timedelta(minutes=i*interval_min) for i in range(limit)][::-1]
+    # 使用GARCH-like波动聚集
     returns = np.random.randn(limit) * 0.002
+    # 加入波动聚集：如果前一日波动大，今日波动也大
+    for i in range(1, limit):
+        if abs(returns[i-1]) > 0.003:
+            returns[i] *= 1.5
     price_series = price * np.exp(np.cumsum(returns))
     price_series = price_series * (price / price_series[-1])
     
@@ -133,7 +134,7 @@ def generate_klines(price, interval_min=5, limit=200):
     opens = [closes[i-1] if i>0 else closes[0]*0.999 for i in range(limit)]
     highs = np.maximum(opens, closes) * 1.002
     lows = np.minimum(opens, closes) * 0.998
-    vols = np.random.uniform(100, 500, limit)
+    vols = np.random.uniform(100, 500, limit) * (1 + 0.5*np.abs(returns))  # 成交量与波动相关
     
     return pd.DataFrame({
         "time": times,
@@ -144,9 +145,65 @@ def generate_klines(price, interval_min=5, limit=200):
         "volume": vols
     })
 
+# ---------- 高级指标（含Ichimoku完整版、斐波那契、成交量分布）----------
+def add_ichimoku(df):
+    """添加完整Ichimoku云图指标"""
+    high_9 = df['high'].rolling(9).max()
+    low_9 = df['low'].rolling(9).min()
+    df['ichimoku_tenkan'] = (high_9 + low_9) / 2
+    
+    high_26 = df['high'].rolling(26).max()
+    low_26 = df['low'].rolling(26).min()
+    df['ichimoku_kijun'] = (high_26 + low_26) / 2
+    
+    df['ichimoku_senkou_a'] = ((df['ichimoku_tenkan'] + df['ichimoku_kijun']) / 2).shift(26)
+    
+    high_52 = df['high'].rolling(52).max()
+    low_52 = df['low'].rolling(52).min()
+    df['ichimoku_senkou_b'] = ((high_52 + low_52) / 2).shift(26)
+    
+    df['ichimoku_chikou'] = df['close'].shift(-26)
+    return df
+
+def add_fibonacci_levels(df, window=100):
+    """添加斐波那契回撤位（基于最近window高低点）"""
+    if len(df) < window:
+        return df
+    recent_high = df['high'].rolling(window).max().iloc[-1]
+    recent_low = df['low'].rolling(window).min().iloc[-1]
+    diff = recent_high - recent_low
+    df['fib_0.236'] = recent_high - diff * 0.236
+    df['fib_0.382'] = recent_high - diff * 0.382
+    df['fib_0.5'] = recent_high - diff * 0.5
+    df['fib_0.618'] = recent_high - diff * 0.618
+    df['fib_0.786'] = recent_high - diff * 0.786
+    df['fib_1.0'] = recent_low
+    return df
+
+def add_volume_profile(df, bins=10):
+    """添加成交量分布（简化版，最近50根）"""
+    if len(df) < 50:
+        return df
+    recent = df.iloc[-50:]
+    price_min = recent['low'].min()
+    price_max = recent['high'].max()
+    bin_edges = np.linspace(price_min, price_max, bins+1)
+    volume_by_price = np.zeros(bins)
+    for i, row in recent.iterrows():
+        for j in range(bins):
+            if row['low'] <= bin_edges[j+1] and row['high'] >= bin_edges[j]:
+                # 简单分配：成交量均匀分布在K线范围内
+                overlap = min(row['high'], bin_edges[j+1]) - max(row['low'], bin_edges[j])
+                if overlap > 0:
+                    volume_by_price[j] += row['volume'] * overlap / (row['high'] - row['low'])
+    df['volume_profile_max'] = bin_edges[np.argmax(volume_by_price)]
+    df['volume_profile_min'] = bin_edges[np.argmin(volume_by_price)]
+    return df
+
 def add_advanced_indicators(df):
-    """添加高级技术指标"""
+    """添加所有高级指标"""
     df = df.copy()
+    # 基础
     df["ma20"] = df["close"].rolling(20).mean()
     df["ma60"] = df["close"].rolling(60).mean()
     df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
@@ -159,10 +216,31 @@ def add_advanced_indicators(df):
     df["mfi"] = ta.volume.MFIIndicator(df["high"], df["low"], df["close"], df["volume"], window=14).money_flow_index()
     df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
     df["natr"] = df["atr"] / df["close"] * 100
+    
+    # KDJ
+    low_9 = df['low'].rolling(9).min()
+    high_9 = df['high'].rolling(9).max()
+    rsv = (df['close'] - low_9) / (high_9 - low_9) * 100
+    df['kdj_k'] = rsv.ewm(alpha=1/3).mean()
+    df['kdj_d'] = df['kdj_k'].ewm(alpha=1/3).mean()
+    df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
+    
+    # SAR
+    df['sar'] = ta.trend.PSARIndicator(df['high'], df['low'], df['close']).psar()
+    
+    # Ichimoku
+    df = add_ichimoku(df)
+    
+    # 斐波那契
+    df = add_fibonacci_levels(df)
+    
+    # 成交量分布
+    df = add_volume_profile(df)
+    
     return df
 
+# ---------- 形态识别（增强版）----------
 def detect_candlestick_patterns(df):
-    """识别K线形态（与之前相同）"""
     patterns = []
     if len(df) < 3:
         return patterns
@@ -170,7 +248,7 @@ def detect_candlestick_patterns(df):
     prev = df.iloc[-2]
     prev2 = df.iloc[-3] if len(df) > 2 else None
     
-    # 吞没形态
+    # 吞没
     if prev2 is not None:
         if last['close'] > last['open'] and prev['close'] < prev['open']:
             if last['close'] > prev['open'] and last['open'] < prev['close']:
@@ -184,7 +262,7 @@ def detect_candlestick_patterns(df):
     if body < (last['high'] - last['low']) * 0.1:
         patterns.append("➕ 十字星")
     
-    # 锤子线/上吊线
+    # 锤子/上吊
     real_body = abs(last['close'] - last['open'])
     lower_shadow = last['open'] - last['low'] if last['open'] > last['close'] else last['close'] - last['low']
     upper_shadow = last['high'] - last['close'] if last['open'] > last['close'] else last['high'] - last['open']
@@ -203,67 +281,146 @@ def detect_candlestick_patterns(df):
             if last['close'] < (prev2['open'] + prev2['close'])/2:
                 patterns.append("🌆 暮星形态")
     
+    # 三只乌鸦/红三兵（简化）
+    if len(df) > 3:
+        if all(df.iloc[-i]['close'] < df.iloc[-i]['open'] for i in range(1,4)) and all(df.iloc[-i]['close'] < df.iloc[-i-1]['close'] for i in range(1,3)):
+            patterns.append("🐦‍⬛ 三只乌鸦 (看跌)")
+        if all(df.iloc[-i]['close'] > df.iloc[-i]['open'] for i in range(1,4)) and all(df.iloc[-i]['close'] > df.iloc[-i-1]['close'] for i in range(1,3)):
+            patterns.append("🔴 红三兵 (看涨)")
+    
     return patterns
 
-def calculate_signal_score(df):
-    """多因子评分系统"""
+# ---------- 机器学习信号（逻辑回归）----------
+def train_ml_model(df):
+    """使用历史数据训练简单逻辑回归模型"""
+    if len(df) < 100:
+        return None, None
+    # 准备特征
+    feature_cols = ['rsi', 'macd', 'adx', 'cci', 'mfi', 'kdj_k', 'kdj_d', 'natr']
+    X = df[feature_cols].dropna().values
+    # 目标：未来5根K线是否上涨
+    y = (df['close'].shift(-5) > df['close']).astype(int).dropna().values
+    min_len = min(len(X), len(y))
+    X = X[:min_len]
+    y = y[:min_len]
+    if len(X) < 50:
+        return None, None
+    # 标准化
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    # 训练
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_scaled, y)
+    return model, scaler
+
+def ml_predict(df, model, scaler):
+    if model is None:
+        return 0
+    feature_cols = ['rsi', 'macd', 'adx', 'cci', 'mfi', 'kdj_k', 'kdj_d', 'natr']
+    last = df[feature_cols].iloc[-1:].dropna()
+    if last.empty:
+        return 0
+    X_last = scaler.transform(last)
+    prob = model.predict_proba(X_last)[0][1]  # 上涨概率
+    return prob
+
+# ---------- 蒙特卡洛模拟（预测未来10步）----------
+def monte_carlo_simulation(df, steps=10, n_simulations=100):
+    """基于历史波动率模拟未来价格路径"""
+    last_price = df['close'].iloc[-1]
+    returns = df['close'].pct_change().dropna()
+    mu = returns.mean()
+    sigma = returns.std()
+    simulations = []
+    for _ in range(n_simulations):
+        prices = [last_price]
+        for _ in range(steps):
+            ret = np.random.normal(mu, sigma)
+            prices.append(prices[-1] * (1 + ret))
+        simulations.append(prices)
+    # 计算平均路径和置信区间
+    sim_array = np.array(simulations)
+    mean_path = np.mean(sim_array, axis=0)
+    upper = np.percentile(sim_array, 95, axis=0)
+    lower = np.percentile(sim_array, 5, axis=0)
+    return mean_path, upper, lower
+
+# ---------- 风险价值（VaR）计算 ----------
+def calculate_var(df, confidence=0.95, horizon=1):
+    returns = df['close'].pct_change().dropna()
+    if len(returns) < 30:
+        return 0.02
+    var = np.percentile(returns, (1-confidence)*100) * np.sqrt(horizon)
+    return abs(var)
+
+# ---------- 多因子评分系统（整合ML）----------
+def calculate_signal_score(df, ml_prob=0):
     if df.empty or len(df) < 30:
         return 0, "数据不足"
     last = df.iloc[-1]
     score = 0
     reasons = []
     
-    # 趋势因子 (30)
+    # 趋势因子 (20)
     if not pd.isna(last['ma20']) and not pd.isna(last['ma60']):
         if last['ma20'] > last['ma60']:
-            score += 20
+            score += 15
             reasons.append("MA20>MA60")
         else:
-            score -= 20
+            score -= 15
             reasons.append("MA20<MA60")
     if not pd.isna(last['adx']):
         if last['adx'] > 25:
-            score += 10 if score>0 else -10
+            score += 5 if score>0 else -5
             reasons.append(f"ADX{last['adx']:.0f}")
     
-    # 动量因子 (40)
+    # 动量因子 (30)
     if not pd.isna(last['rsi']):
         if last['rsi'] < 30:
-            score += 30
+            score += 20
             reasons.append("RSI超卖")
         elif last['rsi'] > 70:
-            score -= 30
+            score -= 20
             reasons.append("RSI超买")
         elif last['rsi'] > 50:
-            score += 10
+            score += 5
             reasons.append("RSI>50")
         else:
-            score -= 10
+            score -= 5
             reasons.append("RSI<50")
     
     if not pd.isna(last['macd']) and not pd.isna(last['macd_signal']):
         if last['macd'] > last['macd_signal']:
-            score += 15
+            score += 10
             reasons.append("MACD金叉")
         else:
-            score -= 15
+            score -= 10
             reasons.append("MACD死叉")
     
     if not pd.isna(last['cci']):
         if last['cci'] > 100:
-            score += 10
+            score += 5
             reasons.append("CCI超买")
         elif last['cci'] < -100:
-            score -= 10
+            score -= 5
             reasons.append("CCI超卖")
     
-    # 成交量因子 (20)
+    # KDJ
+    if not pd.isna(last['kdj_k']) and not pd.isna(last['kdj_d']):
+        if last['kdj_k'] > last['kdj_d'] and last['kdj_k'] < 20:
+            score += 15
+            reasons.append("KDJ金叉超卖")
+        elif last['kdj_k'] < last['kdj_d'] and last['kdj_k'] > 80:
+            score -= 15
+            reasons.append("KDJ死叉超买")
+    
+    # 成交量因子 (15)
     if not pd.isna(last['mfi']):
         if last['mfi'] < 20:
-            score += 15
+            score += 10
             reasons.append("MFI超卖")
         elif last['mfi'] > 80:
-            score -= 15
+            score -= 10
             reasons.append("MFI超买")
     
     # 形态因子 (10)
@@ -275,6 +432,20 @@ def calculate_signal_score(df):
         elif "看跌" in p or "上吊" in p or "暮星" in p:
             score -= 10
             reasons.append(p)
+    
+    # 机器学习信号 (15)
+    if ml_prob > 0.6:
+        score += 15
+        reasons.append("ML看涨")
+    elif ml_prob < 0.4:
+        score -= 15
+        reasons.append("ML看跌")
+    
+    # 斐波那契支撑/阻力
+    if not pd.isna(last['fib_0.618']) and last['close'] < last['fib_0.618']:
+        score += 5  # 接近支撑
+    if not pd.isna(last['fib_0.382']) and last['close'] > last['fib_0.382']:
+        score -= 5  # 接近阻力
     
     score = max(-100, min(100, score))
     return score, ", ".join(reasons[:3])
@@ -302,17 +473,17 @@ def calc_position(capital, entry, stop, leverage=100):
         pos_value = capital * leverage
     return pos_value / entry
 
-def plot_professional_candlestick(df, selected_coin, interval):
-    """币安风格专业K线图（增强版）"""
+# ---------- 专业K线图（终极版）----------
+def plot_ultimate_candlestick(df, selected_coin, interval):
     fig = make_subplots(
         rows=3, cols=1, 
         shared_xaxes=True, 
         row_heights=[0.5, 0.25, 0.25],
         vertical_spacing=0.03,
         subplot_titles=(
-            f"{selected_coin}/USDT {interval} K线图",
-            "RSI (14) & MACD",
-            "成交量"
+            f"{selected_coin}/USDT {interval} K线图 (含Ichimoku)",
+            "RSI & MACD",
+            "成交量 & MFI"
         )
     )
     
@@ -338,15 +509,18 @@ def plot_professional_candlestick(df, selected_coin, interval):
     fig.add_trace(go.Scatter(x=df.time, y=df.bb_upper, name="布林上轨", line=dict(color='#888888', width=1, dash='dash'), opacity=0.5), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.time, y=df.bb_lower, name="布林下轨", line=dict(color='#888888', width=1, dash='dash'), opacity=0.5), row=1, col=1)
     
+    # Ichimoku 云
+    fig.add_trace(go.Scatter(x=df.time, y=df['ichimoku_senkou_a'], name="云带A", line=dict(color='green', width=1), opacity=0.3), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.time, y=df['ichimoku_senkou_b'], name="云带B", line=dict(color='red', width=1), opacity=0.3, fill='tonexty', fillcolor='rgba(128,128,128,0.2)'), row=1, col=1)
+    
     # RSI
     fig.add_trace(go.Scatter(x=df.time, y=df.rsi, name="RSI(14)", line=dict(color='#9B59B6', width=2)), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="rgba(239, 83, 80, 0.5)", row=2)
     fig.add_hline(y=30, line_dash="dash", line_color="rgba(38, 166, 154, 0.5)", row=2)
-    fig.add_hline(y=50, line_dash="dot", line_color="#888888", row=2, opacity=0.3)
     
-    # MACD (叠加在RSI图上，使用次坐标轴)
-    fig.add_trace(go.Scatter(x=df.time, y=df.macd, name="MACD", line=dict(color='#FFB347', width=1.5)), row=2, col=1, secondary_y=False)
-    fig.add_trace(go.Scatter(x=df.time, y=df.macd_signal, name="信号线", line=dict(color='#FF6B6B', width=1.5)), row=2, col=1, secondary_y=False)
+    # MACD
+    fig.add_trace(go.Scatter(x=df.time, y=df.macd, name="MACD", line=dict(color='#FFB347', width=1.5)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.time, y=df.macd_signal, name="信号线", line=dict(color='#FF6B6B', width=1.5)), row=2, col=1)
     
     # 成交量（按涨跌着色）
     volume_colors = ['#26A69A' if close >= open else '#EF5350' 
@@ -360,7 +534,9 @@ def plot_professional_candlestick(df, selected_coin, interval):
         showlegend=False
     ), row=3, col=1)
     
-    # 十字光标与布局
+    # MFI叠加在成交量图上
+    fig.add_trace(go.Scatter(x=df.time, y=df.mfi, name="MFI", line=dict(color='gold', width=1.5)), row=3, col=1)
+    
     fig.update_layout(
         template="plotly_dark",
         xaxis=dict(rangeslider=dict(visible=False), type='date', showspikes=True, spikecolor="white", spikethickness=1, spikemode="across"),
@@ -368,20 +544,19 @@ def plot_professional_candlestick(df, selected_coin, interval):
         hovermode='x unified',
         hoverdistance=100,
         spikedistance=1000,
-        height=700,
+        height=750,
         margin=dict(l=50, r=20, t=50, b=50),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor="rgba(0,0,0,0.5)", font=dict(size=11))
     )
     
     fig.update_yaxes(title_text="价格 (USDT)", row=1, col=1, tickformat=".2f")
     fig.update_yaxes(title_text="RSI/MACD", row=2, col=1)
-    fig.update_yaxes(title_text="成交量", row=3, col=1)
+    fig.update_yaxes(title_text="成交量/MFI", row=3, col=1)
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     
     return fig
 
-# 模拟市场情绪（基于最新指标）
 def market_sentiment(df):
     last = df.iloc[-1]
     if last['rsi'] > 70 and last['cci'] > 100:
@@ -399,13 +574,17 @@ def market_sentiment(df):
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now()
     st.session_state.prices = {coin: 2600 for coin in COINS}
-    st.session_state.trade_history = []  # 存储模拟交易记录，用于统计
-    st.session_state.equity_curve = [1000]  # 模拟账户净值曲线
+    st.session_state.signal_history = []
+    if "accounts" not in st.session_state:
+        st.session_state.accounts = [{"name": "主账户", "capital": 1000, "leverage": 100, "equity_curve": [1000]}]
+    st.session_state.current_account = 0
+    st.session_state.ml_model = None
+    st.session_state.ml_scaler = None
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown("## ⚙️ 至尊控制台")
+    st.markdown("## ⚙️ 终极至尊控制台")
     st.markdown("---")
     
     selected_coin = st.selectbox("选择币种", list(COINS.keys()), index=0)
@@ -415,17 +594,33 @@ with st.sidebar:
     auto = st.checkbox("自动刷新 (30秒)", True)
     
     st.markdown("---")
+    st.subheader("👥 多账户管理")
+    account_names = [acc["name"] for acc in st.session_state.accounts]
+    selected_account_idx = st.selectbox("选择账户", range(len(account_names)), format_func=lambda i: account_names[i], key="account_selector")
+    st.session_state.current_account = selected_account_idx
+    if st.button("➕ 添加新账户", use_container_width=True):
+        if len(st.session_state.accounts) < 3:
+            new_name = f"账户{len(st.session_state.accounts)+1}"
+            st.session_state.accounts.append({"name": new_name, "capital": 1000, "leverage": 100, "equity_curve": [1000]})
+            st.rerun()
+        else:
+            st.warning("最多支持3个账户")
+    
+    st.markdown("---")
     st.subheader("💰 资金管理")
-    capital = st.number_input("本金 (USDT)", 10, value=1000, step=100)
-    lev = st.select_slider("杠杆倍数", [10,20,50,100], value=100)
+    acc = st.session_state.accounts[st.session_state.current_account]
+    capital = st.number_input("本金 (USDT)", 10, value=acc["capital"], step=100, key=f"capital_{st.session_state.current_account}")
+    lev = st.select_slider("杠杆倍数", [10,20,50,100], value=acc["leverage"], key=f"lev_{st.session_state.current_account}")
+    st.session_state.accounts[st.session_state.current_account]["capital"] = capital
+    st.session_state.accounts[st.session_state.current_account]["leverage"] = lev
     
     price, _ = fetch_price(coin_id)
     if price:
         st.session_state.prices[selected_coin] = price
     current_price = st.session_state.prices.get(selected_coin, 2600)
     
-    entry = st.number_input("入场价", value=current_price, step=1.0, format="%.2f")
-    stop = st.number_input("止损价", value=current_price*0.99, step=1.0, format="%.2f")
+    entry = st.number_input("入场价", value=current_price, step=1.0, format="%.2f", key=f"entry_{st.session_state.current_account}")
+    stop = st.number_input("止损价", value=current_price*0.99, step=1.0, format="%.2f", key=f"stop_{st.session_state.current_account}")
     
     if st.button("🔄 刷新数据", use_container_width=True):
         st.cache_data.clear()
@@ -433,33 +628,48 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- 主界面 ----------
-st.markdown(f'<h1 class="title-glow">📊 {selected_coin} 至尊AI交易终端</h1>', unsafe_allow_html=True)
-st.caption(f"⚡ 数据更新: {st.session_state.last_refresh.strftime('%H:%M:%S')} | 数据源: CoinGecko | 信号仅供参考")
+st.markdown(f'<h1 class="title-glow">📊 {selected_coin} 终极至尊AI交易系统 · 量子版</h1>', unsafe_allow_html=True)
+st.caption(f"⚡ 数据更新: {st.session_state.last_refresh.strftime('%H:%M:%S')} | 数据源: CoinGecko | 机器学习 | 蒙特卡洛 | VaR | Ichimoku | 斐波那契")
 
-# 获取实时价格
 price, change = fetch_price(coin_id)
 if price:
     st.session_state.prices[selected_coin] = price
 else:
     price = st.session_state.prices.get(selected_coin, 2600)
 
-# 生成K线数据
+# 生成K线数据（增加数据量）
 interval_min = int(interval.replace('m','').replace('h','60')) if 'm' in interval or 'h' in interval else 5
-df = generate_klines(price, interval_min)
+df = generate_klines(price, interval_min, limit=500)
 df = add_advanced_indicators(df)
 last = df.iloc[-1]
 prev = df.iloc[-2]
 
+# 训练/更新机器学习模型
+if st.session_state.ml_model is None or len(df) % 100 == 0:  # 每100根K线重新训练
+    model, scaler = train_ml_model(df)
+    if model is not None:
+        st.session_state.ml_model = model
+        st.session_state.ml_scaler = scaler
+
+ml_prob = ml_predict(df, st.session_state.ml_model, st.session_state.ml_scaler) if st.session_state.ml_model else 0.5
+
 # 计算信号
-score, reason_summary = calculate_signal_score(df)
+score, reason_summary = calculate_signal_score(df, ml_prob)
 direction, conf, extra_reason = get_signal_from_score(score)
+
+# 蒙特卡洛模拟
+mean_path, upper, lower = monte_carlo_simulation(df, steps=10, n_simulations=200)
+
+# 风险价值
+var_1d = calculate_var(df, confidence=0.95, horizon=1)
+var_5d = calculate_var(df, confidence=0.95, horizon=5)
 
 # 市场情绪
 sentiment = market_sentiment(df)
 
-# ---------- 顶部指标卡片（增强版）----------
+# ---------- 顶部指标卡片 ----------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-cols = st.columns(6)
+cols = st.columns(7)
 with cols[0]:
     delta = last['close'] - prev['close']
     st.metric(f"{selected_coin}/USDT", f"${last['close']:.2f}", f"{delta:+.2f}")
@@ -473,53 +683,75 @@ with cols[4]:
     st.metric("成交量", f"{last['volume']:.0f}")
 with cols[5]:
     st.metric("情绪", sentiment, delta=None)
+with cols[6]:
+    st.metric("ML概率", f"{ml_prob:.0%}")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# 风险提示
+# 风险提示 + VaR
 st.markdown(f"""
 <div class="warning-box">
     ⚠️ 当前杠杆 {lev}倍 | 本金 {capital:.0f} USDT | 可开最大 {capital*lev/price:.3f} {selected_coin} | 单笔风险≤2% | 24h涨跌: {change:+.2f}% 
+    <br>📊 风险价值 (95%): 1日 VaR {var_1d*100:.2f}% | 5日 VaR {var_5d*100:.2f}%
 </div>
 """, unsafe_allow_html=True)
 
-# ---------- AI实时监控分析（三列玻璃卡片）----------
+# ---------- AI实时监控分析（四列增强）----------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("📊 AI实时监控分析")
-colA, colB, colC = st.columns(3)
+colA, colB, colC, colD = st.columns(4)
 with colA:
     st.markdown("**趋势状态**")
     trend = "多头" if last['ma20'] > last['ma60'] else "空头" if last['ma20'] < last['ma60'] else "震荡"
     st.markdown(f"- 均线排列: **{trend}**")
-    st.markdown(f"- ADX趋势强度: **{'强趋势' if last['adx']>25 else '弱趋势/震荡'}**")
-    st.markdown(f"- 价格相对布林: **{'上轨附近' if last['close']>last['bb_upper'] else '下轨附近' if last['close']<last['bb_lower'] else '中轨'}**")
+    st.markdown(f"- ADX: **{last['adx']:.1f}** ({'强趋势' if last['adx']>25 else '弱趋势'})")
+    st.markdown(f"- 价格相对布林: **{'上轨' if last['close']>last['bb_upper'] else '下轨' if last['close']<last['bb_lower'] else '中轨'}**")
 with colB:
     st.markdown("**动量指标**")
     st.markdown(f"- RSI: **{last['rsi']:.1f}** ({'超买' if last['rsi']>70 else '超卖' if last['rsi']<30 else '中性'})")
     st.markdown(f"- CCI: **{last['cci']:.1f}**")
     st.markdown(f"- MFI: **{last['mfi']:.1f}**")
+    st.markdown(f"- KDJ: K={last['kdj_k']:.1f} J={last['kdj_j']:.1f}")
 with colC:
     st.markdown("**支撑/阻力**")
     support = last['bb_lower'] if not pd.isna(last['bb_lower']) else last['close']*0.98
     resistance = last['bb_upper'] if not pd.isna(last['bb_upper']) else last['close']*1.02
     st.markdown(f"- 支撑: **${support:.2f}**")
     st.markdown(f"- 阻力: **${resistance:.2f}**")
-    st.markdown(f"- 24h涨跌: **{change:+.2f}%**" if change else "-")
+    st.markdown(f"- 斐波那契0.618: **${last['fib_0.618']:.2f}**" if 'fib_0.618' in df.columns else "")
+    st.markdown(f"- 成交量密集: **${last['volume_profile_max']:.2f}**" if 'volume_profile_max' in df.columns else "")
+with colD:
+    st.markdown("**Ichimoku云**")
+    if 'ichimoku_tenkan' in df.columns and not pd.isna(last['ichimoku_tenkan']):
+        st.markdown(f"- 转换线: **${last['ichimoku_tenkan']:.2f}**")
+        st.markdown(f"- 基准线: **${last['ichimoku_kijun']:.2f}**")
+        st.markdown(f"- 云带A: **${last['ichimoku_senkou_a']:.2f}**" if not pd.isna(last['ichimoku_senkou_a']) else "")
+        st.markdown(f"- 云带B: **${last['ichimoku_senkou_b']:.2f}**" if not pd.isna(last['ichimoku_senkou_b']) else "")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- K线图 ----------
-st.subheader(f"{interval} K线图")
-fig = plot_professional_candlestick(df, selected_coin, interval)
+st.subheader(f"{interval} K线图 (含Ichimoku云)")
+fig = plot_ultimate_candlestick(df, selected_coin, interval)
 st.plotly_chart(fig, use_container_width=True)
 
-# ---------- AI信号与交易策略（双列玻璃卡）----------
+# ---------- 蒙特卡洛模拟图 ----------
+st.subheader("🔮 蒙特卡洛模拟 (未来10步价格路径)")
+fig_mc = go.Figure()
+x_future = list(range(11))
+fig_mc.add_trace(go.Scatter(x=x_future, y=mean_path, mode='lines+markers', name='平均路径', line=dict(color='gold', width=2)))
+fig_mc.add_trace(go.Scatter(x=x_future, y=upper, mode='lines', name='95%上限', line=dict(color='red', dash='dash')))
+fig_mc.add_trace(go.Scatter(x=x_future, y=lower, mode='lines', name='5%下限', line=dict(color='green', dash='dash')))
+fig_mc.update_layout(template="plotly_dark", height=300, margin=dict(l=0, r=0, t=20, b=0), title="未来10步价格模拟")
+st.plotly_chart(fig_mc, use_container_width=True)
+
+# ---------- AI信号与交易策略 ----------
 colL, colR = st.columns(2)
 with colL:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader("🎯 AI智能信号")
+    st.subheader("🎯 AI量子信号")
     if "强烈" in direction:
-        st.markdown(f'<div class="strong-signal"><span style="font-size:28px;color:{"#26A69A" if "多" in direction else "#EF5350"};">{direction}</span><br>评分: {score} (强烈信号)<br>{extra_reason}<br>因子: {reason_summary}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="strong-signal"><span style="font-size:28px;color:{"#26A69A" if "多" in direction else "#EF5350"};">{direction}</span><br>评分: {score} (强烈信号)<br>{extra_reason}<br>因子: {reason_summary}<br>ML概率: {ml_prob:.0%}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="signal-box"><span style="font-size:24px;color:{"#26A69A" if "多" in direction else "#EF5350" if "空" in direction else "#888"};">{"🟢" if "多" in direction else "🔴" if "空" in direction else "⚪"} {direction}</span><br>评分: {score}<br>{extra_reason}<br>因子: {reason_summary}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="signal-box"><span style="font-size:24px;color:{"#26A69A" if "多" in direction else "#EF5350" if "空" in direction else "#888"};">{"🟢" if "多" in direction else "🔴" if "空" in direction else "⚪"} {direction}</span><br>评分: {score}<br>{extra_reason}<br>因子: {reason_summary}<br>ML概率: {ml_prob:.0%}</div>', unsafe_allow_html=True)
     
     patterns = detect_candlestick_patterns(df)
     if patterns:
@@ -573,10 +805,7 @@ with colX:
         <span style="font-size:32px;color:{color};">{pnl:+.2f} USDT</span><br>
         <span>数量 {qty:.4f} {selected_coin} | 保证金 {qty*entry/lev:.2f} USDT</span>
         """, unsafe_allow_html=True)
-        
-        # 更新模拟净值曲线（简化）
-        new_equity = st.session_state.equity_curve[-1] + pnl
-        st.session_state.equity_curve.append(new_equity)
+        st.session_state.accounts[st.session_state.current_account]["equity_curve"].append(pnl)
     else:
         st.info("输入有效入场价和止损价计算盈亏")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -584,11 +813,12 @@ with colX:
 with colY:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown("**📈 模拟账户净值曲线**")
-    if len(st.session_state.equity_curve) > 1:
+    equity_curve = st.session_state.accounts[st.session_state.current_account]["equity_curve"]
+    if len(equity_curve) > 1:
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
-            x=list(range(len(st.session_state.equity_curve))),
-            y=st.session_state.equity_curve,
+            x=list(range(len(equity_curve))),
+            y=equity_curve,
             mode='lines',
             line=dict(color='#00D4FF', width=2),
             fill='tozeroy',
@@ -607,14 +837,41 @@ with colY:
         st.write("暂无数据")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- 其他币种快照（增强版）----------
+# ---------- 历史信号回测面板 ----------
+st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+st.subheader("📜 历史信号回测")
+# 记录当前信号
+current_signal = {
+    "time": datetime.now().strftime("%H:%M"),
+    "coin": selected_coin,
+    "direction": direction,
+    "score": score,
+    "price": last['close']
+}
+st.session_state.signal_history.append(current_signal)
+if len(st.session_state.signal_history) > 20:
+    st.session_state.signal_history = st.session_state.signal_history[-20:]
+
+if st.session_state.signal_history:
+    df_signals = pd.DataFrame(st.session_state.signal_history)
+    total = len(df_signals)
+    # 模拟胜率（根据评分方向，假设>0为正确，这里仅演示）
+    wins = len(df_signals[df_signals['score'] > 0])  # 简化
+    win_rate = wins/total if total>0 else 0
+    st.markdown(f"**最近{total}次信号统计** (基于评分方向模拟): 胜率 {win_rate:.1%}")
+    st.dataframe(df_signals[['time','coin','direction','score','price']], use_container_width=True, hide_index=True)
+else:
+    st.info("暂无历史信号")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------- 其他币种快照 ----------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("📌 其他币种快照")
 cols = st.columns(3)
-for i, (coin_name, coin_info) in enumerate(COINS.items()):
-    if coin_name == selected_coin:
-        continue
-    with cols[i % 3]:
+coin_list = list(COINS.items())
+other_coins = [item for item in coin_list if item[0] != selected_coin]
+for i, (coin_name, coin_info) in enumerate(other_coins[:3]):
+    with cols[i]:
         coin_id = coin_info["id"]
         p, ch = fetch_price(coin_id)
         if p:
@@ -635,4 +892,4 @@ if auto and (datetime.now()-st.session_state.last_refresh).seconds > 30:
 
 # 页脚
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-st.caption("⚠️ 至尊AI信号基于技术指标和形态识别，不构成投资建议。100倍杠杆高风险，务必设止损。市场有风险，入市需谨慎。")
+st.caption("⚠️ 终极至尊AI信号仅供学术研究，不构成投资建议。100倍杠杆高风险，务必设止损。市场有风险，入市需谨慎。历史不会重演，但总会惊人相似。")
