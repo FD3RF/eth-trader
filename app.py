@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合约交易监控中心 · 最终完美修复版
-100倍杠杆 | 11+交易所自动切换 | 分钟级数据 | AI信号 | 强平分析 | 微信提醒
-数据源：币安/Bybit/OKX/火币/Gate/MEXC/KuCoin/CryptoCompare + 模拟回退
+🚀 合约智能监控中心 · 极简稳定版
+数据源：MEXC + CryptoCompare (自动切换) | 多周期 | AI预测 | 强平分析
 """
 
 import streamlit as st
@@ -25,226 +24,88 @@ def calculate_liquidation_price(entry_price, side, leverage):
     else:
         return entry_price * (1 + 1/leverage)
 
-# -------------------- 生成模拟K线数据（用于所有API均失败时） --------------------
-def generate_simulated_data(periods, days=2):
-    """生成模拟ETH/USDT K线数据"""
-    data_dict = {}
-    end_time = datetime.now()
-    for period in periods:
-        interval_seconds = {
-            '1m': 60, '5m': 300, '15m': 900,
-            '1h': 3600, '4h': 14400, '1d': 86400
-        }.get(period, 60)
-        num_bars = 200
-        timestamps = [end_time - timedelta(seconds=interval_seconds * (num_bars - i - 1)) for i in range(num_bars)]
-        base_price = 2000
-        price = base_price
-        prices = []
-        for i in range(num_bars):
-            change = np.random.randn() * 10 + (i / num_bars) * 5
-            price += change
-            prices.append(max(price, 10))
-        df = pd.DataFrame({
-            'timestamp': timestamps,
-            'open': prices,
-            'high': [p * (1 + abs(np.random.randn()*0.005)) for p in prices],
-            'low': [p * (1 - abs(np.random.randn()*0.005)) for p in prices],
-            'close': [p * (1 + np.random.randn()*0.002) for p in prices],
-            'volume': np.random.randint(1000, 5000, num_bars)
-        })
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        data_dict[period] = df
-    return data_dict, 2000.0
-
-# -------------------- 智能数据获取器（最终完美版） --------------------
-class UltimateDataFetcher:
+# -------------------- 极简数据获取器（仅 MEXC + CryptoCompare）--------------------
+class SimpleDataFetcher:
     def __init__(self):
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
         self.timeout = 5
-        self.retries = 1
-        self.current_source = "未知"
 
-        # ========== 交易所K线源（按优先级排列） ==========
-        self.exchanges = [
-            # 币安合约镜像
-            {'name': '币安合约', 'type': 'binance_fapi',
-             'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
-             'url_path': '/fapi/v1/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
-             'parser': self._parse_binance_kline},
-            # 币安现货镜像
-            {'name': '币安现货', 'type': 'binance_spot',
-             'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
-             'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
-             'parser': self._parse_binance_kline},
-            # Bybit
-            {'name': 'Bybit', 'type': 'bybit',
-             'hosts': ['api.bybit.com'],
-             'url_path': '/v5/market/kline', 'params': {'category': 'linear', 'symbol': self.symbol, 'interval': None, 'limit': self.limit},
-             'parser': self._parse_bybit_kline},
-            # OKX
-            {'name': 'OKX', 'type': 'okx',
-             'hosts': ['www.okx.com'],
-             'url_path': '/api/v5/market/candles', 'params': {'instId': self.symbol + '-SWAP', 'bar': None, 'limit': self.limit},
-             'parser': self._parse_okx_kline},
-            # 火币 HTX
-            {'name': '火币 HTX', 'type': 'huobi',
-             'hosts': ['api.huobi.pro'],
-             'url_path': '/linear-swap-ex/market/history/kline', 'params': {'contract_code': self.symbol + '-USDT', 'period': None, 'size': self.limit},
-             'parser': self._parse_huobi_kline},
-            # Gate.io
-            {'name': 'Gate.io', 'type': 'gate',
-             'hosts': ['api.gateio.ws'],
-             'url_path': '/api/v4/futures/usdt/candlesticks', 'params': {'contract': self.symbol, 'interval': None, 'limit': self.limit},
-             'parser': self._parse_gate_kline},
-            # MEXC（修复解析，适应可变列数）
-            {'name': 'MEXC', 'type': 'mexc',
-             'hosts': ['api.mexc.com'],
-             'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
-             'parser': self._parse_mexc_kline},
-            # KuCoin
-            {'name': 'KuCoin', 'type': 'kucoin',
-             'hosts': ['api.kucoin.com'],
-             'url_path': '/api/v1/market/candles', 'params': {'type': None, 'symbol': self.symbol + '-USDT', 'limit': self.limit},
-             'parser': self._parse_kucoin_kline},
-            # CryptoCompare（分钟级支持）
-            {'name': 'CryptoCompare', 'type': 'cryptocompare',
-             'hosts': ['min-api.cryptocompare.com'],
-             'url_path': None,  # 动态选择
-             'params': {'fsym': 'ETH', 'tsym': 'USD', 'limit': self.limit},
-             'parser': self._parse_cryptocompare_kline},
-        ]
+        # MEXC 配置
+        self.mexc = {
+            'name': 'MEXC',
+            'url': 'https://api.mexc.com/api/v3/klines',
+            'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit}
+        }
+        # CryptoCompare 配置（支持分钟级）
+        self.cryptocompare = {
+            'name': 'CryptoCompare',
+            'base_url': 'https://min-api.cryptocompare.com/data/v2',
+            'params': {'fsym': 'ETH', 'tsym': 'USD', 'limit': self.limit}
+        }
+        # 价格源（MEXC 最新价）
+        self.price_url = 'https://api.mexc.com/api/v3/ticker/price'
+        self.price_params = {'symbol': self.symbol}
 
-        # ========== 价格源 ==========
-        self.price_sources = [
-            {'name': '币安合约标记价', 'type': 'binance_fapi',
-             'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
-             'url_path': '/fapi/v1/premiumIndex', 'params': {'symbol': self.symbol},
-             'parser': lambda data: float(data['markPrice'])},
-            {'name': '币安现货最新价', 'type': 'binance_spot',
-             'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
-             'url_path': '/api/v3/ticker/price', 'params': {'symbol': self.symbol},
-             'parser': lambda data: float(data['price'])},
-            {'name': 'Bybit最新价', 'type': 'bybit',
-             'hosts': ['api.bybit.com'],
-             'url_path': '/v5/market/tickers', 'params': {'category': 'linear', 'symbol': self.symbol},
-             'parser': lambda data: float(data['result']['list'][0]['markPrice'])},
-            {'name': 'OKX最新价', 'type': 'okx',
-             'hosts': ['www.okx.com'],
-             'url_path': '/api/v5/market/ticker', 'params': {'instId': self.symbol + '-SWAP'},
-             'parser': lambda data: float(data['data'][0]['last'])},
-            {'name': '火币 HTX最新价', 'type': 'huobi',
-             'hosts': ['api.huobi.pro'],
-             'url_path': '/linear-swap-ex/market/detail', 'params': {'contract_code': self.symbol + '-USDT'},
-             'parser': lambda data: float(data['tick']['close'])},
-            {'name': 'Gate.io最新价', 'type': 'gate',
-             'hosts': ['api.gateio.ws'],
-             'url_path': '/api/v4/futures/usdt/tickers', 'params': {'contract': self.symbol},
-             'parser': lambda data: float(data[0]['last'])},
-            {'name': 'MEXC最新价', 'type': 'mexc',
-             'hosts': ['api.mexc.com'],
-             'url_path': '/api/v3/ticker/price', 'params': {'symbol': self.symbol},
-             'parser': lambda data: float(data['price'])},
-            {'name': 'KuCoin最新价', 'type': 'kucoin',
-             'hosts': ['api.kucoin.com'],
-             'url_path': '/api/v1/market/orderbook/level1', 'params': {'symbol': self.symbol + '-USDT'},
-             'parser': lambda data: float(data['data']['price'])},
-            {'name': 'CryptoCompare价格', 'type': 'cryptocompare',
-             'hosts': ['min-api.cryptocompare.com'],
-             'url_path': '/data/price', 'params': {'fsym': 'ETH', 'tsyms': 'USD'},
-             'parser': lambda data: float(data['USD'])},
-        ]
+    def fetch_kline(self, period):
+        """尝试从 MEXC 获取 K线，失败则从 CryptoCompare 获取"""
+        # 1. 尝试 MEXC
+        params = self.mexc['params'].copy()
+        params['interval'] = period
+        try:
+            resp = requests.get(self.mexc['url'], params=params, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                df = self._parse_mexc_kline(data)
+                if df is not None:
+                    return df, self.mexc['name']
+        except:
+            pass
 
-    # ---------- 解析函数 ----------
-    def _parse_binance_kline(self, data):
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'num_trades',
-            'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
+        # 2. 尝试 CryptoCompare
+        try:
+            # 根据周期选择端点
+            if period in ['1m', '5m', '15m']:
+                endpoint = 'histominute'
+                aggregate = {'1m':1, '5m':5, '15m':15}[period]
+            elif period in ['1h', '4h']:
+                endpoint = 'histohour'
+                aggregate = 1 if period == '1h' else 4
+            elif period == '1d':
+                endpoint = 'histoday'
+                aggregate = 1
+            else:
+                return None, None
+            url = f"{self.cryptocompare['base_url']}/{endpoint}"
+            params = self.cryptocompare['params'].copy()
+            params['aggregate'] = aggregate
+            resp = requests.get(url, params=params, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('Response') == 'Success':
+                    df = self._parse_cryptocompare_kline(data)
+                    if df is not None:
+                        return df, self.cryptocompare['name']
+        except:
+            pass
 
-    def _parse_bybit_kline(self, data):
-        if data.get('retCode') != 0:
-            return None
-        items = data['result']['list']
-        df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-
-    def _parse_okx_kline(self, data):
-        if data.get('code') != '0':
-            return None
-        items = data['data']
-        df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'volCcy', 'volCcyQuote', 'confirm'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-
-    def _parse_huobi_kline(self, data):
-        if data.get('status') != 'ok':
-            return None
-        items = data['data']
-        df = pd.DataFrame(items)
-        df['timestamp'] = pd.to_datetime(df['id'], unit='s')
-        df.rename(columns={'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'vol': 'volume'}, inplace=True)
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-
-    def _parse_gate_kline(self, data):
-        # Gate.io 返回列表 [timestamp, volume, close, high, low, open, ...]
-        df = pd.DataFrame(data, columns=['timestamp', 'volume', 'close', 'high', 'low', 'open', 'quote_volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='s')
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
+        return None, None
 
     def _parse_mexc_kline(self, data):
-        """
-        MEXC K线返回格式可能有两种：
-        1. 标准6列：[时间戳, 开盘, 最高, 最低, 收盘, 成交量]
-        2. 可能包含额外列（如8列），我们只取前6列
-        """
+        """解析 MEXC K线数据（取前6列）"""
         if not isinstance(data, list) or len(data) == 0:
             return None
-        rows = []
-        for item in data:
-            if isinstance(item, list) and len(item) >= 6:
-                rows.append(item[:6])  # 只取前6列
-            else:
-                return None
+        rows = [row[:6] for row in data if isinstance(row, list) and len(row) >= 6]
+        if not rows:
+            return None
         df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
-    def _parse_kucoin_kline(self, data):
-        if data.get('code') != '200000':
-            return None
-        items = data['data']
-        df = pd.DataFrame(items, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='s')
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-
-    def _parse_cryptocompare_kline(self, data, period):
-        if data.get('Response') != 'Success':
-            return None
+    def _parse_cryptocompare_kline(self, data):
         items = data['Data']['Data']
         df = pd.DataFrame(items)
         df['timestamp'] = pd.to_datetime(df['time'], unit='s')
@@ -254,136 +115,47 @@ class UltimateDataFetcher:
             df[col] = df[col].astype(float)
         return df
 
-    # ---------- 请求核心 ----------
-    def _fetch_kline_from_exchange(self, exch, period):
-        for host in exch['hosts']:
-            # 构建URL和参数
-            if exch['type'] == 'cryptocompare':
-                # 动态选择端点：分钟级使用 histominute
-                if period in ['1m', '5m', '15m']:
-                    url = f"https://{host}/data/v2/histominute"
-                    params = exch['params'].copy()
-                    aggregate = {'1m':1, '5m':5, '15m':15}[period]
-                    params['aggregate'] = aggregate
-                elif period in ['1h', '4h']:
-                    url = f"https://{host}/data/v2/histohour"
-                    params = exch['params'].copy()
-                    aggregate = 1 if period == '1h' else 4
-                    params['aggregate'] = aggregate
-                elif period == '1d':
-                    url = f"https://{host}/data/v2/histoday"
-                    params = exch['params'].copy()
-                    params.pop('aggregate', None)
-                else:
-                    return None, f"{exch['name']} 不支持周期 {period}"
-            else:
-                url = f"https://{host}{exch['url_path']}"
-                params = exch['params'].copy()
-                # 设置周期参数
-                if exch['type'] in ('binance_fapi', 'binance_spot', 'bybit', 'mexc'):
-                    params['interval'] = period
-                elif exch['type'] == 'okx':
-                    params['bar'] = period
-                elif exch['type'] == 'huobi':
-                    params['period'] = period
-                elif exch['type'] == 'gate':
-                    params['interval'] = period
-                elif exch['type'] == 'kucoin':
-                    params['type'] = period
-
-            try:
-                resp = requests.get(url, params=params, timeout=self.timeout)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    df = exch['parser'](data, period) if exch['type'] == 'cryptocompare' else exch['parser'](data)
-                    if df is not None and not df.empty:
-                        return df, None
-                    else:
-                        return None, f"{exch['name']} 返回空数据"
-                elif resp.status_code == 451:
-                    return None, f"{exch['name']} HTTP 451 (被封锁)"
-                else:
-                    return None, f"{exch['name']} HTTP {resp.status_code}"
-            except requests.exceptions.Timeout:
-                return None, f"{exch['name']} 超时"
-            except requests.exceptions.ConnectionError:
-                return None, f"{exch['name']} 连接错误"
-            except Exception as e:
-                return None, f"{exch['name']} 异常: {str(e)}"
-        return None, f"{exch['name']} 所有主机失败"
-
-    def _fetch_price_from_source(self, src):
-        for host in src['hosts']:
-            url = f"https://{host}{src['url_path']}"
-            params = src['params'].copy()
-            try:
-                resp = requests.get(url, params=params, timeout=self.timeout)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    try:
-                        price = src['parser'](data)
-                        return price, None
-                    except Exception as e:
-                        return None, f"{src['name']} 解析失败: {e}"
-                elif resp.status_code == 451:
-                    return None, f"{src['name']} HTTP 451"
-                else:
-                    return None, f"{src['name']} HTTP {resp.status_code}"
-            except Exception as e:
-                return None, f"{src['name']} 请求异常: {str(e)}"
-        return None, f"{src['name']} 所有主机失败"
+    def fetch_price(self):
+        """获取当前价格（MEXC 最新价）"""
+        try:
+            resp = requests.get(self.price_url, params=self.price_params, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                return float(data['price']), 'MEXC'
+        except:
+            pass
+        return None, None
 
     def fetch_all(self):
+        """获取所有周期数据"""
         data_dict = {}
-        all_errors = []
         price = None
-        price_source = "无"
-        source_display = "无"
+        price_source = None
+        source_display = None
+        errors = []
 
-        # 按优先级依次尝试获取每个周期的K线
         for period in self.periods:
-            period_success = False
-            for exch in self.exchanges:
-                df, err = self._fetch_kline_from_exchange(exch, period)
-                if df is not None:
-                    data_dict[period] = df
-                    source_display = exch['name']
-                    period_success = True
-                    break
-                else:
-                    all_errors.append(f"{period} {err}")
-            if not period_success:
-                all_errors.append(f"{period} 所有交易所失败")
+            df, src = self.fetch_kline(period)
+            if df is not None:
+                data_dict[period] = df
+                if source_display is None:
+                    source_display = src
+            else:
+                errors.append(f"{period} 数据获取失败")
 
         # 获取价格
-        if data_dict:
-            for src in self.price_sources:
-                p, err = self._fetch_price_from_source(src)
-                if p is not None:
-                    price = p
-                    price_source = src['name']
-                    break
-                else:
-                    all_errors.append(f"价格 {err}")
-            if price is None:
-                # 使用4h收盘价作为备用
-                if '4h' in data_dict:
-                    price = data_dict['4h']['close'].iloc[-1]
-                    price_source = "4h收盘价(备用)"
-                elif data_dict:
-                    first = next(iter(data_dict))
-                    price = data_dict[first]['close'].iloc[-1]
-                    price_source = f"{first}收盘价(备用)"
-                else:
-                    price = 2000.0
-                    price_source = "默认价格"
-        else:
-            all_errors.append("所有外部数据源均失败，启用模拟数据")
-            data_dict, price = generate_simulated_data(self.periods)
-            source_display = "模拟数据(演示模式)"
-            price_source = "模拟价格"
+        price, price_source = self.fetch_price()
+        if price is None and data_dict:
+            # 使用4h收盘价作为备用
+            if '4h' in data_dict:
+                price = data_dict['4h']['close'].iloc[-1]
+                price_source = '4h收盘价(备用)'
+            elif data_dict:
+                first = next(iter(data_dict))
+                price = data_dict[first]['close'].iloc[-1]
+                price_source = f'{first}收盘价(备用)'
 
-        return data_dict, price, price_source, all_errors, source_display
+        return data_dict, price, price_source, errors, source_display or '无'
 
 # -------------------- 指标计算 --------------------
 def add_indicators(df):
@@ -478,39 +250,10 @@ class MultiPeriodFusion:
         confidence = min(abs(avg_score) * 1.2, 1.0)
         return direction, confidence
 
-# -------------------- 微信推送（选用） --------------------
-PUSHPLUS_TOKEN = st.secrets.get("PUSHPLUS_TOKEN", "")
-last_signal_time = None
-last_signal_direction = 0
-signal_cooldown_minutes = 5
-
-def send_signal_alert(direction, confidence, price, reason=""):
-    global last_signal_time, last_signal_direction
-    if not PUSHPLUS_TOKEN:
-        return
-    now = datetime.now()
-    if direction == last_signal_direction and last_signal_time and (now - last_signal_time).total_seconds() < signal_cooldown_minutes * 60:
-        return
-    dir_str = "做多" if direction == 1 else "做空"
-    content = f"""【合约信号提醒】
-方向: {dir_str}
-置信度: {confidence:.1%}
-价格: ${price:.2f}
-时间: {now.strftime('%Y-%m-%d %H:%M:%S')}
-{reason}"""
-    url = "http://www.pushplus.plus/send"
-    data = {"token": PUSHPLUS_TOKEN, "title": "🤖 合约信号", "content": content, "template": "txt"}
-    try:
-        requests.post(url, json=data, timeout=5)
-        last_signal_time = now
-        last_signal_direction = direction
-    except:
-        pass
-
 # -------------------- 缓存数据获取 --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
-    fetcher = UltimateDataFetcher()
+    fetcher = SimpleDataFetcher()
     data_dict, price, price_source, errors, source_display = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
@@ -518,7 +261,7 @@ def fetch_all_data():
     return data_dict, price, price_source, errors, source_display
 
 # -------------------- Streamlit 界面 --------------------
-st.set_page_config(page_title="合约智能监控·100倍杠杆", layout="wide")
+st.set_page_config(page_title="合约智能监控·极简版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -529,14 +272,12 @@ st.markdown("""
 .profit { color: #00F5A0; }
 .loss { color: #FF5555; }
 .warning { color: #FFA500; }
-.error-box { background: #3A1F1F; border-left: 6px solid #FF5555; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 .info-box { background: #1A2A3A; border-left: 6px solid #00F5A0; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
-.demo-box { background: #2A2A1A; border-left: 6px solid #FFAA00; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 最终完美修复版")
-st.caption("数据源：11+交易所自动切换｜分钟级数据｜AI预测｜强平分析｜微信提醒")
+st.title("🧠 合约智能监控中心 · 极简稳定版")
+st.caption("数据源：MEXC + CryptoCompare｜多周期｜AI预测｜强平分析")
 
 # 初始化
 if 'ai' not in st.session_state:
@@ -548,7 +289,7 @@ if 'fusion' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 控制面板")
     period_options = ['1m', '5m', '15m', '1h', '4h', '1d']
-    selected_period = st.selectbox("选择K线周期", period_options, index=2)  # 默认15m
+    selected_period = st.selectbox("选择K线周期", period_options, index=2)
     auto_refresh = st.checkbox("开启自动刷新", value=True)
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 60, 10, disabled=not auto_refresh)
     if auto_refresh:
@@ -565,30 +306,16 @@ data_dict, current_price, price_source, errors, source_display = fetch_all_data(
 
 # 显示数据源状态
 if data_dict:
-    if "模拟" in source_display:
-        st.markdown(f'<div class="demo-box">⚠️ 当前处于演示模式（模拟数据） | 价格源：{price_source}</div>', unsafe_allow_html=True)
-    else:
-        st.markdown(f'<div class="info-box">✅ 当前数据源：{source_display} | 价格源：{price_source}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="info-box">✅ 当前数据源：{source_display} | 价格源：{price_source}</div>', unsafe_allow_html=True)
 
-# 显示错误信息（最多10条）
-if errors:
-    with st.container():
-        st.markdown('<div class="error-box">', unsafe_allow_html=True)
-        st.error("⚠️ 部分数据获取失败，详细错误：")
-        for err in errors[:10]:
-            st.write(f"- {err}")
-        if len(errors) > 10:
-            st.write(f"... 还有 {len(errors)-10} 条错误")
-        st.markdown('</div>', unsafe_allow_html=True)
+# 简单显示错误（仅当严重时）
+if errors and len(errors) > 3:
+    st.warning(f"⚠️ 部分周期数据不可用 ({len(errors)}个周期)，将使用可用周期计算信号")
 
 # 计算信号
 if data_dict:
     ai_dir, ai_conf = st.session_state.ai.predict(data_dict)
     fusion_dir, fusion_conf = st.session_state.fusion.fuse_periods(data_dict)
-    # 推送
-    if fusion_dir != 0 and selected_period in data_dict and PUSHPLUS_TOKEN:
-        price_alert = data_dict[selected_period]['close'].iloc[-1]
-        send_signal_alert(fusion_dir, fusion_conf, price_alert, "融合信号")
 else:
     ai_dir, ai_conf = 0, 0.0
     fusion_dir, fusion_conf = 0, 0
