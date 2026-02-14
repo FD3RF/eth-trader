@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合約交易監控中心 · 終極故障轉移版
-多端點自動切換（合約/現貨）｜HTTP 451 智能規避｜AI預測｜強平分析｜微信提醒
-數據源：幣安公開 API（自動選擇可用節點）
+🚀 全天候智能合約交易監控中心 · 終極完美版
+100倍槓桿 | 智能故障轉移 | 多週期融合 | AI信號 | 強平分析 | 微信提醒
+數據源：幣安公開API（自動切換合約/現貨鏡像節點，規避HTTP 451）
 """
 
 import streamlit as st
@@ -20,6 +20,11 @@ warnings.filterwarnings('ignore')
 
 # -------------------- 強平價格計算（逐倉，簡化版） --------------------
 def calculate_liquidation_price(entry_price, side, leverage):
+    """
+    簡化逐倉強平價格計算（不計維持保證金率變化）
+    做多：強平價 = entry_price * (1 - 1/leverage)
+    做空：強平價 = entry_price * (1 + 1/leverage)
+    """
     if side == "long":
         return entry_price * (1 - 1/leverage)
     else:
@@ -61,7 +66,7 @@ class SmartDataFetcher:
                     elif resp.status_code == 451:
                         # 地區封鎖，直接跳過此端點
                         break
-                    # 其他錯誤，重試
+                    # 其他錯誤，短暫等待後重試
                     time.sleep(1)
                 except Exception:
                     time.sleep(1)
@@ -147,12 +152,15 @@ class SmartDataFetcher:
                     price = spot_price
                     price_source = "現貨最新價"
                 else:
-                    # 最後備用：使用所選週期K線最新收盤價
-                    last_period = self.periods[-1]
-                    if last_period in data_dict:
-                        price = data_dict[last_period]['close'].iloc[-1]
-                        price_source = f"{last_period}收盤價"
-                        errors.append(f"價格源使用K線收盤價（{last_period}）")
+                    # 最後備用：使用所選週期K線最新收盤價（此處用4h）
+                    if '4h' in data_dict:
+                        price = data_dict['4h']['close'].iloc[-1]
+                        price_source = "4h收盤價"
+                        errors.append("價格源使用K線收盤價（4h）")
+                    elif self.periods[-1] in data_dict:
+                        price = data_dict[self.periods[-1]]['close'].iloc[-1]
+                        price_source = f"{self.periods[-1]}收盤價"
+                        errors.append(f"價格源使用K線收盤價（{self.periods[-1]}）")
                     else:
                         errors.append("無法獲取任何價格")
 
@@ -207,18 +215,21 @@ class MultiPeriodFusion:
     def get_period_signal(self, df):
         last = df.iloc[-1]
         signals = {}
+        # 趨勢
         if last['ma20'] > last['ma60']:
             signals['trend'] = 1
         elif last['ma20'] < last['ma60']:
             signals['trend'] = -1
         else:
             signals['trend'] = 0
+        # 震盪
         if last['rsi'] < 30:
             signals['oscillator'] = 1
         elif last['rsi'] > 70:
             signals['oscillator'] = -1
         else:
             signals['oscillator'] = 0
+        # 成交量
         if last['volume_ratio'] > 1.2 and last['close'] > last['open']:
             signals['volume'] = 1
         elif last['volume_ratio'] > 1.2 and last['close'] < last['open']:
@@ -307,7 +318,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合約智能監控中心 · 終極故障轉移版")
+st.title("🧠 合約智能監控中心 · 終極完美版")
 st.caption("數據源：智能切換（合約/現貨）｜多週期｜AI預測｜強平分析｜微信提醒")
 
 # 初始化
@@ -373,10 +384,13 @@ with col1:
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.7, 0.3],
                             subplot_titles=(f"ETHUSDT {selected_period}", "RSI"))
+        # K線
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                       low=df['low'], close=df['close'], name="K線"), row=1, col=1)
+        # 均線
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma60'], name="MA60", line=dict(color="blue")), row=1, col=1)
+        # 融合信號箭頭
         if fusion_dir != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -386,6 +400,7 @@ with col1:
             else:
                 fig.add_annotation(x=last_date, y=last_price * 0.98,
                                    text="▼ 融合空", showarrow=True, arrowhead=2, arrowcolor="red")
+        # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple")), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
@@ -430,6 +445,7 @@ with col2:
         </div>
         """, unsafe_allow_html=True)
 
+        # 強平警告
         if (sim_side == "多單" and current_price <= liq_price) or (sim_side == "空單" and current_price >= liq_price):
             st.error("🚨 強平風險！當前價格已觸及強平線")
         elif distance_to_liq < 5:
