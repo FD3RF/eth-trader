@@ -8,7 +8,7 @@ import ta
 import time
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="多币种AI智能交易终端 · 强烈信号版", layout="wide")
+st.set_page_config(page_title="多币种AI智能交易终端 · 专业版", layout="wide")
 
 st.markdown("""
 <style>
@@ -40,17 +40,32 @@ def fetch_price(coin_id):
         return None, None
 
 def generate_klines(price, interval_min=5, limit=200):
+    """基于当前价格生成模拟K线（价格中心为真实价格，波动符合统计学）"""
     now = datetime.now()
     times = [now - timedelta(minutes=i*interval_min) for i in range(limit)][::-1]
-    closes = [price * (1 + 0.001*np.random.randn()) for _ in range(limit)]
+    # 生成随机游走，确保最新价格等于当前真实价格
+    returns = np.random.randn(limit) * 0.002  # 0.2% 标准差
+    price_series = price * np.exp(np.cumsum(returns))
+    # 调整使最后一个价格等于当前价格
+    price_series = price_series * (price / price_series[-1])
+    
+    closes = price_series
     opens = [closes[i-1] if i>0 else closes[0]*0.999 for i in range(limit)]
-    highs = [max(opens[i], closes[i])*1.001 for i in range(limit)]
-    lows = [min(opens[i], closes[i])*0.999 for i in range(limit)]
-    vols = np.random.uniform(100,500,limit)
-    return pd.DataFrame({"time":times,"open":opens,"high":highs,"low":lows,"close":closes,"volume":vols})
+    highs = np.maximum(opens, closes) * 1.002
+    lows = np.minimum(opens, closes) * 0.998
+    vols = np.random.uniform(100, 500, limit)
+    
+    return pd.DataFrame({
+        "time": times,
+        "open": opens,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": vols
+    })
 
 def add_advanced_indicators(df):
-    """添加高级技术指标"""
+    """添加高级技术指标（币安常用）"""
     df = df.copy()
     # 基础
     df["ma20"] = df["close"].rolling(20).mean()
@@ -61,21 +76,17 @@ def add_advanced_indicators(df):
     df["bb_upper"] = ta.volatility.BollingerBands(df["close"]).bollinger_hband()
     df["bb_lower"] = ta.volatility.BollingerBands(df["close"]).bollinger_lband()
     
-    # 高级趋势指标
+    # 高级趋势
     df["adx"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx()
     df["cci"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], window=20).cci()
     
-    # 成交量指标
+    # 成交量
     df["mfi"] = ta.volume.MFIIndicator(df["high"], df["low"], df["close"], df["volume"], window=14).money_flow_index()
     df["vwap"] = (df["volume"] * (df["high"]+df["low"]+df["close"])/3).cumsum() / df["volume"].cumsum()
     
     # 波动率
     df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
     df["natr"] = df["atr"] / df["close"] * 100
-    
-    # 其他
-    df["williams_r"] = ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"], lbp=14).williams_r()
-    df["uo"] = ta.momentum.UltimateOscillator(df["high"], df["low"], df["close"]).ultimate_oscillator()
     
     return df
 
@@ -112,7 +123,7 @@ def detect_candlestick_patterns(df):
         else:
             patterns.append("🪢 上吊线 (看跌)")
     
-    # 晨星/暮星（简化）
+    # 晨星/暮星
     if prev2 is not None:
         if prev2['close'] < prev2['open'] and prev['close'] < prev['open'] and last['close'] > last['open']:
             if last['close'] > (prev2['open'] + prev2['close'])/2:
@@ -124,14 +135,14 @@ def detect_candlestick_patterns(df):
     return patterns
 
 def calculate_signal_score(df):
-    """多因子评分系统，返回-100~100分"""
+    """多因子评分系统（-100~100）"""
     if df.empty or len(df) < 30:
         return 0, "数据不足"
     last = df.iloc[-1]
     score = 0
     reasons = []
     
-    # 趋势因子 (权重30)
+    # 趋势因子 (30)
     if not pd.isna(last['ma20']) and not pd.isna(last['ma60']):
         if last['ma20'] > last['ma60']:
             score += 20
@@ -139,13 +150,12 @@ def calculate_signal_score(df):
         else:
             score -= 20
             reasons.append("MA20<MA60")
-    # ADX趋势强度
     if not pd.isna(last['adx']):
         if last['adx'] > 25:
             score += 10 if score>0 else -10
             reasons.append(f"ADX{last['adx']:.0f}")
     
-    # 动量因子 (权重40)
+    # 动量因子 (40)
     if not pd.isna(last['rsi']):
         if last['rsi'] < 30:
             score += 30
@@ -176,7 +186,7 @@ def calculate_signal_score(df):
             score -= 10
             reasons.append("CCI超卖")
     
-    # 成交量因子 (权重20)
+    # 成交量因子 (20)
     if not pd.isna(last['mfi']):
         if last['mfi'] < 20:
             score += 15
@@ -185,7 +195,7 @@ def calculate_signal_score(df):
             score -= 15
             reasons.append("MFI超买")
     
-    # 形态因子 (权重10)
+    # 形态因子 (10)
     patterns = detect_candlestick_patterns(df)
     for p in patterns:
         if "看涨" in p or "锤子" in p or "晨星" in p:
@@ -195,9 +205,8 @@ def calculate_signal_score(df):
             score -= 10
             reasons.append(p)
     
-    # 限制范围
     score = max(-100, min(100, score))
-    return score, ", ".join(reasons[:3])  # 只显示前3个理由
+    return score, ", ".join(reasons[:3])
 
 def get_signal_from_score(score):
     if score >= 60:
@@ -222,7 +231,120 @@ def calc_position(capital, entry, stop, leverage=100):
         pos_value = capital * leverage
     return pos_value / entry
 
-# ---------- 初始化 ----------
+def plot_professional_candlestick(df, selected_coin, interval):
+    """币安风格专业K线图"""
+    fig = make_subplots(
+        rows=3, cols=1, 
+        shared_xaxes=True, 
+        row_heights=[0.5, 0.25, 0.25],
+        vertical_spacing=0.03,
+        subplot_titles=(
+            f"{selected_coin}/USDT {interval} K线图",
+            "RSI (14)",
+            "成交量"
+        )
+    )
+    
+    # 主图K线（币安配色：绿涨红跌）
+    fig.add_trace(go.Candlestick(
+        x=df.time,
+        open=df.open,
+        high=df.high,
+        low=df.low,
+        close=df.close,
+        name="K线",
+        increasing_line_color='#26A69A',
+        decreasing_line_color='#EF5350',
+        showlegend=True,
+        hoverinfo='x+y+name',
+        hoverlabel=dict(bgcolor='#1E1F2A', font_size=12)
+    ), row=1, col=1)
+    
+    # 均线
+    fig.add_trace(go.Scatter(
+        x=df.time, y=df.ma20, 
+        name="MA20", line=dict(color='#F0B90B', width=1.5)
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.time, y=df.ma60, 
+        name="MA60", line=dict(color='#1890FF', width=1.5)
+    ), row=1, col=1)
+    
+    # 布林带
+    fig.add_trace(go.Scatter(
+        x=df.time, y=df.bb_upper, 
+        name="布林上轨", line=dict(color='#888888', width=1, dash='dash'),
+        opacity=0.5
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.time, y=df.bb_lower, 
+        name="布林下轨", line=dict(color='#888888', width=1, dash='dash'),
+        opacity=0.5
+    ), row=1, col=1)
+    
+    # RSI
+    fig.add_trace(go.Scatter(
+        x=df.time, y=df.rsi, 
+        name="RSI(14)", line=dict(color='#9B59B6', width=2)
+    ), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="rgba(239, 83, 80, 0.5)", row=2)
+    fig.add_hline(y=30, line_dash="dash", line_color="rgba(38, 166, 154, 0.5)", row=2)
+    fig.add_hline(y=50, line_dash="dot", line_color="#888888", row=2, opacity=0.3)
+    
+    # 成交量（按涨跌着色）
+    volume_colors = ['#26A69A' if close >= open else '#EF5350' 
+                     for close, open in zip(df['close'], df['open'])]
+    fig.add_trace(go.Bar(
+        x=df.time, y=df.volume, 
+        name="成交量",
+        marker_color=volume_colors,
+        marker_line_width=0,
+        opacity=0.8,
+        showlegend=False
+    ), row=3, col=1)
+    
+    # 十字光标与布局
+    fig.update_layout(
+        template="plotly_dark",
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            type='date',
+            showspikes=True,
+            spikecolor="white",
+            spikethickness=1,
+            spikemode="across"
+        ),
+        yaxis=dict(
+            showspikes=True,
+            spikecolor="white",
+            spikethickness=1,
+            spikemode="across"
+        ),
+        hovermode='x unified',
+        hoverdistance=100,
+        spikedistance=1000,
+        height=700,
+        margin=dict(l=50, r=20, t=50, b=50),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor="rgba(0,0,0,0.5)",
+            font=dict(size=11)
+        )
+    )
+    
+    fig.update_yaxes(title_text="价格 (USDT)", row=1, col=1, tickformat=".2f")
+    fig.update_yaxes(title_text="RSI", row=2, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="成交量", row=3, col=1)
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+    
+    return fig
+
+# ---------- 初始化session ----------
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now()
     st.session_state.prices = {coin: 2600 for coin in COINS}
@@ -243,6 +365,7 @@ with st.sidebar:
     capital = st.number_input("本金 (USDT)", 10, value=1000)
     lev = st.select_slider("杠杆倍数", [10,20,50,100], value=100)
     
+    # 获取实时价格作为默认入场价
     price, _ = fetch_price(coin_id)
     if price:
         st.session_state.prices[selected_coin] = price
@@ -256,7 +379,7 @@ with st.sidebar:
         st.rerun()
 
 # ---------- 主界面 ----------
-st.title(f"📊 {selected_coin} AI智能交易终端 · 强烈信号版")
+st.title(f"📊 {selected_coin} AI智能交易终端 · 专业版")
 st.caption(f"数据更新: {st.session_state.last_refresh.strftime('%H:%M:%S')} | 基于CoinGecko")
 
 price, change = fetch_price(coin_id)
@@ -265,24 +388,30 @@ if price:
 else:
     price = st.session_state.prices.get(selected_coin, 2600)
 
-# 生成K线并计算高级指标
+# 生成K线数据
 interval_min = int(interval.replace('m','').replace('h','60'))
 df = generate_klines(price, interval_min)
 df = add_advanced_indicators(df)
 last = df.iloc[-1]
 prev = df.iloc[-2]
 
-# 计算信号评分
+# 计算信号
 score, reason_summary = calculate_signal_score(df)
 direction, conf, extra_reason = get_signal_from_score(score)
 
-# 顶部指标
+# 顶部指标卡片
 col1, col2, col3, col4, col5 = st.columns(5)
-with col1: st.metric(f"{selected_coin}/USDT", f"${last['close']:.2f}", f"{last['close']-prev['close']:+.2f}")
-with col2: st.metric("RSI(14)", f"{last['rsi']:.1f}")
-with col3: st.metric("ADX", f"{last['adx']:.1f}")
-with col4: st.metric("ATR%", f"{last['natr']:.2f}%")
-with col5: st.metric("成交量", f"{last['volume']:.0f}")
+with col1:
+    delta = last['close'] - prev['close']
+    st.metric(f"{selected_coin}/USDT", f"${last['close']:.2f}", f"{delta:+.2f}")
+with col2:
+    st.metric("RSI(14)", f"{last['rsi']:.1f}")
+with col3:
+    st.metric("ADX", f"{last['adx']:.1f}")
+with col4:
+    st.metric("ATR%", f"{last['natr']:.2f}%")
+with col5:
+    st.metric("成交量", f"{last['volume']:.0f}")
 
 st.warning(f"当前杠杆 {lev}倍 | 本金 {capital:.0f} USDT | 可开最大 {capital*lev/price:.3f} {selected_coin} | 单笔风险≤2%")
 
@@ -308,40 +437,12 @@ with st.expander("📊 AI实时监控分析", expanded=True):
         st.markdown(f"- 阻力: ${resistance:.2f}")
         st.markdown(f"- 24h涨跌: {change:+.2f}%" if change else "-")
 
-# K线图
+# 专业K线图
 st.subheader(f"{interval} K线图")
-fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                    row_heights=[0.5,0.25,0.25], 
-                    vertical_spacing=0.05,
-                    subplot_titles=(f"{selected_coin} Price", "RSI", "Volume/MFI"))
-
-# 主图
-fig.add_trace(go.Candlestick(x=df.time, open=df.open, high=df.high, low=df.low, close=df.close, 
-                              name="K线", increasing_line_color="#26A69A", decreasing_line_color="#EF5350"), row=1, col=1)
-fig.add_trace(go.Scatter(x=df.time, y=df.ma20, name="MA20", line=dict(color="orange")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df.time, y=df.ma60, name="MA60", line=dict(color="blue")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df.time, y=df.bb_upper, name="布林上轨", line=dict(color="gray", dash="dash")), row=1, col=1)
-fig.add_trace(go.Scatter(x=df.time, y=df.bb_lower, name="布林下轨", line=dict(color="gray", dash="dash")), row=1, col=1)
-
-# RSI
-fig.add_trace(go.Scatter(x=df.time, y=df.rsi, name="RSI", line=dict(color="purple")), row=2, col=1)
-fig.add_hline(y=70, line_dash="dash", line_color="red", row=2)
-fig.add_hline(y=30, line_dash="dash", line_color="green", row=2)
-
-# 成交量+MFI
-fig.add_trace(go.Bar(x=df.time, y=df.volume, name="成交量", marker_color="lightblue"), row=3, col=1)
-fig.add_trace(go.Scatter(x=df.time, y=df.mfi, name="MFI", line=dict(color="gold")), row=3, col=1)
-fig.add_hline(y=80, line_dash="dash", line_color="red", row=3)
-fig.add_hline(y=20, line_dash="dash", line_color="green", row=3)
-
-fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=700)
-fig.update_xaxes(title_text="时间", row=3, col=1)
-fig.update_yaxes(title_text="价格 (USDT)", row=1, col=1)
-fig.update_yaxes(title_text="RSI", row=2, col=1)
-fig.update_yaxes(title_text="成交量/MFI", row=3, col=1)
+fig = plot_professional_candlestick(df, selected_coin, interval)
 st.plotly_chart(fig, use_container_width=True)
 
-# AI信号区域
+# AI信号与入场策略
 colL, colR = st.columns(2)
 with colL:
     st.subheader("🎯 AI智能信号")
@@ -350,7 +451,6 @@ with colL:
     else:
         st.markdown(f'<div class="signal-box"><span style="font-size:24px;color:{"#26A69A" if "多" in direction else "#EF5350" if "空" in direction else "#888"};">{"🟢" if "多" in direction else "🔴" if "空" in direction else "⚪"} {direction}</span><br>评分: {score}<br>{extra_reason}<br>因子: {reason_summary}</div>', unsafe_allow_html=True)
     
-    # 显示K线形态
     patterns = detect_candlestick_patterns(df)
     if patterns:
         st.markdown("**📐 形态识别:**")
