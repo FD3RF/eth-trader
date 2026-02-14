@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合約交易監控中心 · 最終增強版
-多週期切換 | AI預測 | 模擬盈虧＋強平分析 | 微信提醒 | 詳細錯誤診斷
-數據源：幣安合約公開 API（無需金鑰）
+🚀 全天候智能合約交易監控中心 · 終極故障轉移版
+多端點自動切換（合約/現貨）｜HTTP 451 智能規避｜AI預測｜強平分析｜微信提醒
+數據源：幣安公開 API（自動選擇可用節點）
 """
 
 import streamlit as st
@@ -20,100 +20,143 @@ warnings.filterwarnings('ignore')
 
 # -------------------- 強平價格計算（逐倉，簡化版） --------------------
 def calculate_liquidation_price(entry_price, side, leverage):
-    """
-    簡化逐倉強平價格計算（不計維持保證金率變化）
-    做多：強平價 = entry_price * (1 - 1/leverage)
-    做空：強平價 = entry_price * (1 + 1/leverage)
-    """
     if side == "long":
         return entry_price * (1 - 1/leverage)
     else:
         return entry_price * (1 + 1/leverage)
 
-# -------------------- 公開數據獲取器（合約版，純同步 + 重試 + 錯誤收集） --------------------
-class ContractDataFetcher:
+# -------------------- 智能數據獲取器（多端點故障轉移） --------------------
+class SmartDataFetcher:
     def __init__(self):
-        self.kline_url = "https://fapi.binance.com/fapi/v1/klines"
-        self.mark_price_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+        # 合約端點（優先）
+        self.fapi_endpoints = [
+            "https://fapi.binance.com",
+            "https://fapi1.binance.com",
+            "https://fapi2.binance.com",
+            "https://fapi3.binance.com"
+        ]
+        # 現貨端點（備用）
+        self.api_endpoints = [
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+            "https://api3.binance.com"
+        ]
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
-        self.timeout = 15  # 延長超時
-        self.retries = 3
-        self.errors = []   # 收集錯誤訊息
+        self.timeout = 10
+        self.retries = 2
+        self.current_source = "合約"  # 用於界面顯示
 
-    def fetch_kline_sync(self, period):
-        """同步獲取單個週期K線，含重試，返回 (df, error_msg)"""
+    def _try_endpoints(self, base_urls, path, params, is_mark_price=False):
+        """嘗試多個端點，返回 (response_json, success_endpoint)"""
+        for base in base_urls:
+            url = f"{base}{path}"
+            for attempt in range(self.retries):
+                try:
+                    resp = requests.get(url, params=params, timeout=self.timeout)
+                    if resp.status_code == 200:
+                        return resp.json(), base
+                    elif resp.status_code == 451:
+                        # 地區封鎖，直接跳過此端點
+                        break
+                    # 其他錯誤，重試
+                    time.sleep(1)
+                except Exception:
+                    time.sleep(1)
+            # 端點重試失敗，嘗試下一個
+        return None, None
+
+    def fetch_kline(self, period):
+        """獲取K線，優先合約，失敗則現貨"""
+        # 先嚐試合約
         params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
-        for attempt in range(self.retries):
-            try:
-                resp = requests.get(self.kline_url, params=params, timeout=self.timeout)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, list):
-                        df = pd.DataFrame(data, columns=[
-                            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                            'close_time', 'quote_asset_volume', 'num_trades',
-                            'taker_buy_base', 'taker_buy_quote', 'ignore'
-                        ])
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        for col in ['open', 'high', 'low', 'close', 'volume']:
-                            df[col] = df[col].astype(float)
-                        return df, None
-                    else:
-                        err = f"{period}: API 返回非列表資料"
-                else:
-                    err = f"{period}: HTTP {resp.status_code}"
-                # 非成功狀態，等待後重試
-                time.sleep(2)
-            except requests.exceptions.Timeout:
-                err = f"{period}: 請求超時"
-                time.sleep(2)
-            except requests.exceptions.ConnectionError:
-                err = f"{period}: 連線錯誤"
-                time.sleep(2)
-            except Exception as e:
-                err = f"{period}: {str(e)}"
-                time.sleep(2)
-        # 所有重試失敗
-        return None, err
+        data, base = self._try_endpoints(self.fapi_endpoints, "/fapi/v1/klines", params)
+        if data is not None:
+            self.current_source = "合約"
+            return self._parse_kline(data), None
 
-    def fetch_mark_price_sync(self):
-        """獲取標記價格，含重試，返回 (price, error_msg)"""
+        # 合約失敗，嘗試現貨
+        data, base = self._try_endpoints(self.api_endpoints, "/api/v3/klines", params)
+        if data is not None:
+            self.current_source = "現貨"
+            return self._parse_kline(data), None
+
+        return None, "所有端點K線獲取失敗"
+
+    def _parse_kline(self, data):
+        """將原始K線數據轉為DataFrame"""
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'num_trades',
+            'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df
+
+    def fetch_mark_price(self):
+        """獲取標記價格（合約專用），若失敗則返回None"""
         params = {'symbol': self.symbol}
-        for attempt in range(self.retries):
-            try:
-                resp = requests.get(self.mark_price_url, params=params, timeout=10)
-                if resp.status_code == 200:
-                    return float(resp.json()['markPrice']), None
-                else:
-                    err = f"標記價格: HTTP {resp.status_code}"
-                time.sleep(2)
-            except requests.exceptions.Timeout:
-                err = "標記價格: 請求超時"
-                time.sleep(2)
-            except requests.exceptions.ConnectionError:
-                err = "標記價格: 連線錯誤"
-                time.sleep(2)
-            except Exception as e:
-                err = f"標記價格: {str(e)}"
-                time.sleep(2)
-        return None, err
+        data, base = self._try_endpoints(self.fapi_endpoints, "/fapi/v1/premiumIndex", params)
+        if data is not None:
+            return float(data['markPrice']), None
+        return None, "無法獲取標記價格（合約端點不可用）"
+
+    def fetch_current_price(self):
+        """獲取當前價格（現貨最新價）作為備用"""
+        params = {'symbol': self.symbol}
+        data, base = self._try_endpoints(self.api_endpoints, "/api/v3/ticker/price", params)
+        if data is not None:
+            return float(data['price']), None
+        return None, "無法獲取現貨價格"
 
     def fetch_all(self):
-        """同步獲取所有數據，返回 (data_dict, mark_price, error_list)"""
+        """獲取所有週期K線，並決定價格源"""
         data_dict = {}
-        error_list = []
+        errors = []
+        source_display = "未知"
+
+        # 獲取所有週期K線（使用同一個source）
+        first_period = True
         for p in self.periods:
-            df, err = self.fetch_kline_sync(p)
+            df, err = self.fetch_kline(p)
             if df is not None:
                 data_dict[p] = df
+                if first_period:
+                    source_display = self.current_source
+                    first_period = False
             else:
-                error_list.append(err)
-        mark_price, mp_err = self.fetch_mark_price_sync()
-        if mp_err:
-            error_list.append(mp_err)
-        return data_dict, mark_price, error_list
+                errors.append(f"{p}: {err}")
+
+        # 獲取價格（優先標記價格，否則用現貨最新價）
+        price = None
+        price_source = ""
+        if data_dict:
+            # 嘗試獲取標記價格
+            mark, err = self.fetch_mark_price()
+            if mark is not None:
+                price = mark
+                price_source = "標記價格(合約)"
+            else:
+                # 備用：使用現貨最新價
+                spot_price, err2 = self.fetch_current_price()
+                if spot_price is not None:
+                    price = spot_price
+                    price_source = "現貨最新價"
+                else:
+                    # 最後備用：使用所選週期K線最新收盤價
+                    last_period = self.periods[-1]
+                    if last_period in data_dict:
+                        price = data_dict[last_period]['close'].iloc[-1]
+                        price_source = f"{last_period}收盤價"
+                        errors.append(f"價格源使用K線收盤價（{last_period}）")
+                    else:
+                        errors.append("無法獲取任何價格")
+
+        return data_dict, price, price_source, errors, source_display
 
 # -------------------- 指標計算 --------------------
 def add_indicators(df):
@@ -164,21 +207,18 @@ class MultiPeriodFusion:
     def get_period_signal(self, df):
         last = df.iloc[-1]
         signals = {}
-        # 趨勢
         if last['ma20'] > last['ma60']:
             signals['trend'] = 1
         elif last['ma20'] < last['ma60']:
             signals['trend'] = -1
         else:
             signals['trend'] = 0
-        # 震盪
         if last['rsi'] < 30:
             signals['oscillator'] = 1
         elif last['rsi'] > 70:
             signals['oscillator'] = -1
         else:
             signals['oscillator'] = 0
-        # 成交量
         if last['volume_ratio'] > 1.2 and last['close'] > last['open']:
             signals['volume'] = 1
         elif last['volume_ratio'] > 1.2 and last['close'] < last['open']:
@@ -228,7 +268,7 @@ def send_signal_alert(direction, confidence, price, reason=""):
     content = f"""【合約訊號提醒】
 方向: {dir_str}
 置信度: {confidence:.1%}
-標記價格: ${price:.2f}
+價格: ${price:.2f}
 時間: {now.strftime('%Y-%m-%d %H:%M:%S')}
 {reason}"""
     url = "http://www.pushplus.plus/send"
@@ -240,16 +280,15 @@ def send_signal_alert(direction, confidence, price, reason=""):
     except:
         pass
 
-# -------------------- 緩存數據獲取（含錯誤收集與顯示） --------------------
+# -------------------- 緩存數據獲取（智能故障轉移） --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
-    """獲取所有數據，並返回 (data_dict, mark_price, error_list)"""
-    fetcher = ContractDataFetcher()
-    data_dict, mark_price, errors = fetcher.fetch_all()
+    fetcher = SmartDataFetcher()
+    data_dict, price, price_source, errors, source_display = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
             data_dict[p] = add_indicators(data_dict[p])
-    return data_dict, mark_price, errors
+    return data_dict, price, price_source, errors, source_display
 
 # -------------------- Streamlit 介面 --------------------
 st.set_page_config(page_title="合約智能監控·100倍槓桿", layout="wide")
@@ -264,11 +303,12 @@ st.markdown("""
 .loss { color: #FF5555; }
 .warning { color: #FFA500; }
 .error-box { background: #3A1F1F; border-left: 6px solid #FF5555; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
+.info-box { background: #1A2A3A; border-left: 6px solid #00F5A0; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合約智能監控中心 · 100倍槓桿版")
-st.caption("數據源：幣安合約｜多週期｜AI預測｜強平分析｜微信提醒")
+st.title("🧠 合約智能監控中心 · 終極故障轉移版")
+st.caption("數據源：智能切換（合約/現貨）｜多週期｜AI預測｜強平分析｜微信提醒")
 
 # 初始化
 if 'ai' not in st.session_state:
@@ -292,15 +332,19 @@ with st.sidebar:
     sim_leverage = st.slider("槓桿倍數", 1, 100, 10)
     sim_quantity = st.number_input("數量 (ETH)", value=0.01, format="%.4f")
 
-# 獲取數據（含錯誤）
-data_dict, mark_price, errors = fetch_all_data()
+# 獲取數據
+data_dict, current_price, price_source, errors, source_display = fetch_all_data()
 
-# 顯示錯誤訊息（如果有）
+# 顯示數據源狀態
+if data_dict:
+    st.markdown(f'<div class="info-box">✅ 當前數據源：{source_display} | 價格源：{price_source}</div>', unsafe_allow_html=True)
+
+# 顯示錯誤訊息
 if errors:
     with st.container():
         st.markdown('<div class="error-box">', unsafe_allow_html=True)
         st.error("⚠️ 部分數據獲取失敗，詳細錯誤：")
-        for err in errors[:5]:  # 最多顯示5條
+        for err in errors[:5]:
             st.write(f"- {err}")
         if len(errors) > 5:
             st.write(f"... 還有 {len(errors)-5} 條錯誤")
@@ -328,14 +372,11 @@ with col1:
         df['日期'] = df['timestamp']
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.7, 0.3],
-                            subplot_titles=(f"ETHUSDT 永續 {selected_period}", "RSI"))
-        # K線
+                            subplot_titles=(f"ETHUSDT {selected_period}", "RSI"))
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                       low=df['low'], close=df['close'], name="K線"), row=1, col=1)
-        # 均線
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma60'], name="MA60", line=dict(color="blue")), row=1, col=1)
-        # 訊號箭頭
         if fusion_dir != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -345,7 +386,6 @@ with col1:
             else:
                 fig.add_annotation(x=last_date, y=last_price * 0.98,
                                    text="▼ 融合空", showarrow=True, arrowhead=2, arrowcolor="red")
-        # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple")), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
@@ -359,15 +399,14 @@ with col2:
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 觀望"}
     st.markdown(f'<div class="ai-box">{dir_map[fusion_dir]}<br>置信度: {fusion_conf:.1%}</div>', unsafe_allow_html=True)
 
-    # 標記價格顯示
-    if mark_price is not None:
-        st.metric("標記價格", f"${mark_price:.2f}")
+    # 價格顯示
+    if current_price is not None:
+        st.metric("當前價格", f"${current_price:.2f}", delta_color="off")
     else:
-        st.metric("標記價格", "獲取中...")
+        st.metric("當前價格", "獲取中...")
 
     # 模擬合約盈虧與強平分析
-    if sim_entry > 0 and mark_price is not None and selected_period in data_dict:
-        current_price = mark_price
+    if sim_entry > 0 and current_price is not None and selected_period in data_dict:
         if sim_side == "多單":
             pnl = (current_price - sim_entry) * sim_quantity
             pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100
@@ -391,7 +430,6 @@ with col2:
         </div>
         """, unsafe_allow_html=True)
 
-        # 強平警告
         if (sim_side == "多單" and current_price <= liq_price) or (sim_side == "空單" and current_price >= liq_price):
             st.error("🚨 強平風險！當前價格已觸及強平線")
         elif distance_to_liq < 5:
