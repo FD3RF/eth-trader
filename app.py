@@ -1,7 +1,3 @@
-# ---------- 您的原代码（我仅做了两处修改）----------
-# 修改1：将随机数据生成改为 CoinGecko 实时数据 + 少量模拟填充（保证真实+完整）
-# 修改2：增加 requirements 对应的导入
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,7 +14,7 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="终极至尊AI交易系统 · 量子版", layout="wide", initial_sidebar_state="expanded")
 
-# ---------- 极致视觉CSS（您的原样）----------
+# ---------- 极致视觉CSS ----------
 st.markdown("""
 <style>
     .stApp {
@@ -93,7 +89,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- 币种配置（您的原样）----------
+# ---------- 币种配置 ----------
 COINS = {
     "BTC": {"id": "bitcoin", "name": "Bitcoin", "symbol": "BTC"},
     "ETH": {"id": "ethereum", "name": "Ethereum", "symbol": "ETH"},
@@ -119,7 +115,7 @@ COINS = {
     "XAG": {"id": "silver", "name": "Silver", "symbol": "XAG"},
 }
 
-# ---------- 修改1：改用 CoinGecko 实时价格 + 少量模拟生成K线（保证真实数据）----------
+# ---------- 数据获取（模拟 + 实时价格）----------
 @st.cache_data(ttl=30)
 def fetch_price(coin_id):
     if coin_id in ["gold", "silver"]:
@@ -135,15 +131,14 @@ def fetch_price(coin_id):
         return None, None
 
 def generate_klines(price, interval_min=5, limit=500):
-    # 基于当前价格生成模拟K线（波动率可控，保证有数据）
     now = datetime.now()
     times = [now - timedelta(minutes=i*interval_min) for i in range(limit)][::-1]
-    returns = np.random.randn(limit) * 0.002  # 0.2% 波动
+    returns = np.random.randn(limit) * 0.002
     for i in range(1, limit):
         if abs(returns[i-1]) > 0.003:
-            returns[i] *= 1.5  # 趋势延续
+            returns[i] *= 1.5
     price_series = price * np.exp(np.cumsum(returns))
-    price_series = price_series * (price / price_series[-1])  # 确保最新价等于输入价
+    price_series = price_series * (price / price_series[-1])
     closes = price_series
     opens = [closes[i-1] if i>0 else closes[0]*0.999 for i in range(limit)]
     highs = np.maximum(opens, closes) * 1.002
@@ -158,7 +153,7 @@ def generate_klines(price, interval_min=5, limit=500):
         "volume": vols
     })
 
-# ---------- 您的所有高级函数（保持原样）----------
+# ---------- 技术指标 ----------
 def add_ichimoku_full(df):
     high_9 = df['high'].rolling(9).max()
     low_9 = df['low'].rolling(9).min()
@@ -212,6 +207,7 @@ def add_advanced_indicators(df):
     df = add_ichimoku_full(df)
     return df
 
+# ---------- 形态识别 ----------
 def detect_candlestick_patterns(df):
     patterns = []
     if len(df) < 3:
@@ -251,6 +247,7 @@ def detect_candlestick_patterns(df):
             patterns.append("🔴 红三兵 (看涨)")
     return patterns
 
+# ---------- 机器学习模型 ----------
 def train_ml_model(df):
     if len(df) < 100:
         return None, None
@@ -279,6 +276,7 @@ def ml_predict(df, model, scaler):
     prob = model.predict_proba(X_last)[0][1]
     return prob
 
+# ---------- 蒙特卡洛模拟 ----------
 def monte_carlo_simulation(df, steps=10, n_simulations=100):
     last_price = df['close'].iloc[-1]
     returns = df['close'].pct_change().dropna()
@@ -299,6 +297,7 @@ def monte_carlo_simulation(df, steps=10, n_simulations=100):
     lower = np.percentile(sim_array, 5, axis=0)
     return mean_path, upper, lower
 
+# ---------- 风险价值 ----------
 def calculate_var(df, confidence=0.95, horizon=1):
     returns = df['close'].pct_change().dropna()
     if len(returns) < 30:
@@ -306,6 +305,7 @@ def calculate_var(df, confidence=0.95, horizon=1):
     var = np.percentile(returns, (1-confidence)*100) * np.sqrt(horizon)
     return abs(var)
 
+# ---------- 多因子评分 ----------
 def calculate_signal_score(df, ml_prob=0.5):
     if df.empty or len(df) < 30:
         return 0, "数据不足"
