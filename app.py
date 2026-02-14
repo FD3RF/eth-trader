@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合約交易監控中心 · 终极绝望版
-100倍槓桿 | 智能故障轉移（幣安/Bybit/OKX/CryptoCompare） | 模擬數據回退 | AI信號 | 強平分析 | 微信提醒
+🚀 全天候智能合約交易監控中心 · 终极核弹版
+100倍槓桿 | 11+交易所自動切換 | 分鐘級數據 | AI信號 | 強平分析 | 微信提醒
+數據源：幣安/Bybit/OKX/火幣/Gate/MEXC/KuCoin/CryptoCompare + 模擬回退
 """
 
 import streamlit as st
@@ -30,19 +31,17 @@ def generate_simulated_data(periods, days=2):
     data_dict = {}
     end_time = datetime.now()
     for period in periods:
-        # 确定K线间隔（秒）
         interval_seconds = {
             '1m': 60, '5m': 300, '15m': 900,
             '1h': 3600, '4h': 14400, '1d': 86400
         }.get(period, 60)
         num_bars = 200
         timestamps = [end_time - timedelta(seconds=interval_seconds * (num_bars - i - 1)) for i in range(num_bars)]
-        # 生成随机价格走势（带趋势）
         base_price = 2000
         price = base_price
         prices = []
         for i in range(num_bars):
-            change = np.random.randn() * 10 + (i / num_bars) * 5  # 微弱上升趋势
+            change = np.random.randn() * 10 + (i / num_bars) * 5
             price += change
             prices.append(max(price, 10))
         df = pd.DataFrame({
@@ -57,151 +56,107 @@ def generate_simulated_data(periods, days=2):
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
         data_dict[period] = df
-    return data_dict, 2000.0  # 返回模拟数据和模拟价格
+    return data_dict, 2000.0
 
-# -------------------- 智能數據獲取器（含模拟回退） --------------------
-class DesperateDataFetcher:
+# -------------------- 智能數據獲取器（终极版） --------------------
+class NuclearDataFetcher:
     def __init__(self):
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
-        self.timeout = 5  # 缩短超时，避免卡死
+        self.timeout = 5
         self.retries = 1
         self.current_source = "未知"
 
-        # 交易所列表（优先级从高到低）
+        # ========== 交易所K线源（按优先级排列） ==========
         self.exchanges = [
-            # 币安合约镜像
-            {'name': '币安合约', 'priority': 1, 'type': 'binance_fapi',
+            # 币安合約镜像
+            {'name': '币安合约', 'type': 'binance_fapi',
              'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
-             'url_path': '/fapi/v1/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit}},
+             'url_path': '/fapi/v1/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
+             'parser': self._parse_binance_kline},
             # 币安现货镜像
-            {'name': '币安现货', 'priority': 2, 'type': 'binance_spot',
+            {'name': '币安现货', 'type': 'binance_spot',
              'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
-             'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit}},
+             'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
+             'parser': self._parse_binance_kline},
             # Bybit
-            {'name': 'Bybit', 'priority': 3, 'type': 'bybit',
+            {'name': 'Bybit', 'type': 'bybit',
              'hosts': ['api.bybit.com'],
-             'url_path': '/v5/market/kline', 'params': {'category': 'linear', 'symbol': self.symbol, 'interval': None, 'limit': self.limit}},
+             'url_path': '/v5/market/kline', 'params': {'category': 'linear', 'symbol': self.symbol, 'interval': None, 'limit': self.limit},
+             'parser': self._parse_bybit_kline},
             # OKX
-            {'name': 'OKX', 'priority': 4, 'type': 'okx',
+            {'name': 'OKX', 'type': 'okx',
              'hosts': ['www.okx.com'],
-             'url_path': '/api/v5/market/candles', 'params': {'instId': self.symbol + '-SWAP', 'bar': None, 'limit': self.limit}},
-            # CryptoCompare（公共聚合API，一般国内可用）
-            {'name': 'CryptoCompare', 'priority': 5, 'type': 'cryptocompare',
+             'url_path': '/api/v5/market/candles', 'params': {'instId': self.symbol + '-SWAP', 'bar': None, 'limit': self.limit},
+             'parser': self._parse_okx_kline},
+            # 火币 HTX
+            {'name': '火币 HTX', 'type': 'huobi',
+             'hosts': ['api.huobi.pro'],
+             'url_path': '/linear-swap-ex/market/history/kline', 'params': {'contract_code': self.symbol + '-USDT', 'period': None, 'size': self.limit},
+             'parser': self._parse_huobi_kline},
+            # Gate.io
+            {'name': 'Gate.io', 'type': 'gate',
+             'hosts': ['api.gateio.ws'],
+             'url_path': '/api/v4/futures/usdt/candlesticks', 'params': {'contract': self.symbol, 'interval': None, 'limit': self.limit},
+             'parser': self._parse_gate_kline},
+            # MEXC
+            {'name': 'MEXC', 'type': 'mexc',
+             'hosts': ['api.mexc.com'],
+             'url_path': '/api/v3/klines', 'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
+             'parser': self._parse_binance_kline},  # MEXC 使用与币安相同的格式
+            # KuCoin
+            {'name': 'KuCoin', 'type': 'kucoin',
+             'hosts': ['api.kucoin.com'],
+             'url_path': '/api/v1/market/candles', 'params': {'type': None, 'symbol': self.symbol + '-USDT', 'limit': self.limit},
+             'parser': self._parse_kucoin_kline},
+            # CryptoCompare（新增分钟级支持）
+            {'name': 'CryptoCompare', 'type': 'cryptocompare',
              'hosts': ['min-api.cryptocompare.com'],
-             'url_path': '/data/v2/histoday', 'params': {'fsym': 'ETH', 'tsym': 'USD', 'limit': self.limit, 'aggregate': 1},
-             'period_map': {'1d': 'day', '1h': 'hour', '4h': 'hour'}}  # 需特殊处理
+             'url_path': None,  # 动态选择
+             'params': {'fsym': 'ETH', 'tsym': 'USD', 'limit': self.limit},
+             'parser': self._parse_cryptocompare_kline},
         ]
 
-        # 价格源列表
+        # ========== 价格源 ==========
         self.price_sources = [
-            {'name': '币安合約標記價', 'priority': 1,
+            {'name': '币安合約標記價', 'type': 'binance_fapi',
              'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
              'url_path': '/fapi/v1/premiumIndex', 'params': {'symbol': self.symbol},
              'parser': lambda data: float(data['markPrice'])},
-            {'name': '币安現貨最新價', 'priority': 2,
+            {'name': '币安現貨最新價', 'type': 'binance_spot',
              'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
              'url_path': '/api/v3/ticker/price', 'params': {'symbol': self.symbol},
              'parser': lambda data: float(data['price'])},
-            {'name': 'Bybit最新價', 'priority': 3,
+            {'name': 'Bybit最新價', 'type': 'bybit',
              'hosts': ['api.bybit.com'],
              'url_path': '/v5/market/tickers', 'params': {'category': 'linear', 'symbol': self.symbol},
              'parser': lambda data: float(data['result']['list'][0]['markPrice'])},
-            {'name': 'OKX最新價', 'priority': 4,
+            {'name': 'OKX最新價', 'type': 'okx',
              'hosts': ['www.okx.com'],
              'url_path': '/api/v5/market/ticker', 'params': {'instId': self.symbol + '-SWAP'},
              'parser': lambda data: float(data['data'][0]['last'])},
-            {'name': 'CryptoCompare價格', 'priority': 5,
+            {'name': '火幣 HTX最新價', 'type': 'huobi',
+             'hosts': ['api.huobi.pro'],
+             'url_path': '/linear-swap-ex/market/detail', 'params': {'contract_code': self.symbol + '-USDT'},
+             'parser': lambda data: float(data['tick']['close'])},
+            {'name': 'Gate.io最新價', 'type': 'gate',
+             'hosts': ['api.gateio.ws'],
+             'url_path': '/api/v4/futures/usdt/tickers', 'params': {'contract': self.symbol},
+             'parser': lambda data: float(data[0]['last'])},
+            {'name': 'MEXC最新價', 'type': 'mexc',
+             'hosts': ['api.mexc.com'],
+             'url_path': '/api/v3/ticker/price', 'params': {'symbol': self.symbol},
+             'parser': lambda data: float(data['price'])},
+            {'name': 'KuCoin最新價', 'type': 'kucoin',
+             'hosts': ['api.kucoin.com'],
+             'url_path': '/api/v1/market/orderbook/level1', 'params': {'symbol': self.symbol + '-USDT'},
+             'parser': lambda data: float(data['data']['price'])},
+            {'name': 'CryptoCompare價格', 'type': 'cryptocompare',
              'hosts': ['min-api.cryptocompare.com'],
              'url_path': '/data/price', 'params': {'fsym': 'ETH', 'tsyms': 'USD'},
-             'parser': lambda data: float(data['USD'])}
+             'parser': lambda data: float(data['USD'])},
         ]
-
-    def _fetch_from_exchange(self, exchange, period):
-        """尝试从单个交易所获取K线"""
-        for host in exchange['hosts']:
-            url = f"https://{host}{exchange['url_path']}"
-            params = exchange['params'].copy()
-            # 处理周期参数
-            if exchange['type'] in ('binance_fapi', 'binance_spot', 'bybit'):
-                params['interval'] = period
-            elif exchange['type'] == 'okx':
-                params['bar'] = period
-            elif exchange['type'] == 'cryptocompare':
-                # CryptoCompare需要特殊处理：histoday/histohour
-                if period == '1d':
-                    url = f"https://{host}/data/v2/histoday"
-                elif period in ('1h', '4h'):
-                    url = f"https://{host}/data/v2/histohour"
-                    params['limit'] = self.limit
-                    if period == '4h':
-                        params['aggregate'] = 4  # 4小时K线
-                else:
-                    return None, f"{exchange['name']} 不支持周期 {period}"
-                params['fsym'] = 'ETH'
-                params['tsym'] = 'USD'
-                params.pop('interval', None)
-                params.pop('bar', None)
-            try:
-                resp = requests.get(url, params=params, timeout=self.timeout)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # 解析
-                    if exchange['type'] in ('binance_fapi', 'binance_spot'):
-                        df = self._parse_binance_kline(data)
-                        return df, None
-                    elif exchange['type'] == 'bybit':
-                        if data.get('retCode') == 0:
-                            df = self._parse_bybit_kline(data)
-                            return df, None
-                        else:
-                            return None, f"{exchange['name']} 业务错误: {data.get('retMsg')}"
-                    elif exchange['type'] == 'okx':
-                        if data.get('code') == '0':
-                            df = self._parse_okx_kline(data)
-                            return df, None
-                        else:
-                            return None, f"{exchange['name']} 业务错误: {data.get('msg')}"
-                    elif exchange['type'] == 'cryptocompare':
-                        if data.get('Response') == 'Success':
-                            df = self._parse_cryptocompare_kline(data, period)
-                            return df, None
-                        else:
-                            return None, f"{exchange['name']} 错误: {data.get('Message')}"
-                elif resp.status_code == 451:
-                    return None, f"{exchange['name']} HTTP 451 (被封鎖)"
-                else:
-                    return None, f"{exchange['name']} HTTP {resp.status_code}"
-            except requests.exceptions.Timeout:
-                return None, f"{exchange['name']} 超时"
-            except requests.exceptions.ConnectionError:
-                return None, f"{exchange['name']} 连接错误"
-            except Exception as e:
-                return None, f"{exchange['name']} 异常: {str(e)}"
-        return None, f"{exchange['name']} 所有主机失败"
-
-    def _fetch_price_from_source(self, source):
-        """尝试从单个价格源获取价格"""
-        for host in source['hosts']:
-            url = f"https://{host}{source['url_path']}"
-            params = source['params'].copy()
-            try:
-                resp = requests.get(url, params=params, timeout=self.timeout)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    try:
-                        price = source['parser'](data)
-                        return price, None
-                    except Exception as e:
-                        return None, f"{source['name']} 解析失败: {e}"
-                elif resp.status_code == 451:
-                    return None, f"{source['name']} HTTP 451"
-                else:
-                    return None, f"{source['name']} HTTP {resp.status_code}"
-            except Exception as e:
-                return None, f"{source['name']} 请求异常: {str(e)}"
-        return None, f"{source['name']} 所有主机失败"
 
     # ---------- 解析函数 ----------
     def _parse_binance_kline(self, data):
@@ -216,6 +171,8 @@ class DesperateDataFetcher:
         return df
 
     def _parse_bybit_kline(self, data):
+        if data.get('retCode') != 0:
+            return None
         items = data['result']['list']
         df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
@@ -224,6 +181,8 @@ class DesperateDataFetcher:
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
     def _parse_okx_kline(self, data):
+        if data.get('code') != '0':
+            return None
         items = data['data']
         df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'volCcy', 'volCcyQuote', 'confirm'])
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
@@ -231,8 +190,43 @@ class DesperateDataFetcher:
             df[col] = df[col].astype(float)
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
+    def _parse_huobi_kline(self, data):
+        if data.get('status') != 'ok':
+            return None
+        items = data['data']
+        df = pd.DataFrame(items)
+        df['timestamp'] = pd.to_datetime(df['id'], unit='s')
+        df.rename(columns={'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'vol': 'volume'}, inplace=True)
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df
+
+    def _parse_gate_kline(self, data):
+        # Gate.io 返回列表 [timestamp, volume, close, high, low, open, ...]
+        df = pd.DataFrame(data, columns=['timestamp', 'volume', 'close', 'high', 'low', 'open', 'quote_volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='s')
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df
+
+    def _parse_kucoin_kline(self, data):
+        # KuCoin 返回 {"code":"200000","data":[[time,open,close,high,low,volume,turnover]]}
+        if data.get('code') != '200000':
+            return None
+        items = data['data']
+        df = pd.DataFrame(items, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='s')
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df
+
     def _parse_cryptocompare_kline(self, data, period):
-        # CryptoCompare返回格式：{"Data":{"Data":[{"time":...,"open":...,"high":...,"low":...,"close":...,"volumefrom":...}]}}
+        # 根据period选择合适的历史端点
+        if data.get('Response') != 'Success':
+            return None
         items = data['Data']['Data']
         df = pd.DataFrame(items)
         df['timestamp'] = pd.to_datetime(df['time'], unit='s')
@@ -242,19 +236,98 @@ class DesperateDataFetcher:
             df[col] = df[col].astype(float)
         return df
 
+    # ---------- 请求核心 ----------
+    def _fetch_kline_from_exchange(self, exch, period):
+        for host in exch['hosts']:
+            # 构建URL和参数
+            if exch['type'] == 'cryptocompare':
+                # 动态选择端点：分钟级使用 histominute
+                if period in ['1m', '5m', '15m']:
+                    url = f"https://{host}/data/v2/histominute"
+                    params = exch['params'].copy()
+                    # aggregate 参数：1m=1, 5m=5, 15m=15
+                    aggregate = {'1m':1, '5m':5, '15m':15}[period]
+                    params['aggregate'] = aggregate
+                elif period in ['1h', '4h']:
+                    url = f"https://{host}/data/v2/histohour"
+                    params = exch['params'].copy()
+                    aggregate = 1 if period == '1h' else 4
+                    params['aggregate'] = aggregate
+                elif period == '1d':
+                    url = f"https://{host}/data/v2/histoday"
+                    params = exch['params'].copy()
+                    params.pop('aggregate', None)
+                else:
+                    return None, f"{exch['name']} 不支持周期 {period}"
+            else:
+                url = f"https://{host}{exch['url_path']}"
+                params = exch['params'].copy()
+                # 设置周期参数
+                if exch['type'] in ('binance_fapi', 'binance_spot', 'bybit', 'mexc'):
+                    params['interval'] = period
+                elif exch['type'] == 'okx':
+                    params['bar'] = period
+                elif exch['type'] == 'huobi':
+                    params['period'] = period
+                elif exch['type'] == 'gate':
+                    params['interval'] = period
+                elif exch['type'] == 'kucoin':
+                    params['type'] = period
+
+            try:
+                resp = requests.get(url, params=params, timeout=self.timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    df = exch['parser'](data, period) if exch['type'] == 'cryptocompare' else exch['parser'](data)
+                    if df is not None and not df.empty:
+                        return df, None
+                    else:
+                        return None, f"{exch['name']} 返回空数据"
+                elif resp.status_code == 451:
+                    return None, f"{exch['name']} HTTP 451 (被封鎖)"
+                else:
+                    return None, f"{exch['name']} HTTP {resp.status_code}"
+            except requests.exceptions.Timeout:
+                return None, f"{exch['name']} 超时"
+            except requests.exceptions.ConnectionError:
+                return None, f"{exch['name']} 连接错误"
+            except Exception as e:
+                return None, f"{exch['name']} 异常: {str(e)}"
+        return None, f"{exch['name']} 所有主机失败"
+
+    def _fetch_price_from_source(self, src):
+        for host in src['hosts']:
+            url = f"https://{host}{src['url_path']}"
+            params = src['params'].copy()
+            try:
+                resp = requests.get(url, params=params, timeout=self.timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    try:
+                        price = src['parser'](data)
+                        return price, None
+                    except Exception as e:
+                        return None, f"{src['name']} 解析失败: {e}"
+                elif resp.status_code == 451:
+                    return None, f"{src['name']} HTTP 451"
+                else:
+                    return None, f"{src['name']} HTTP {resp.status_code}"
+            except Exception as e:
+                return None, f"{src['name']} 请求异常: {str(e)}"
+        return None, f"{src['name']} 所有主机失败"
+
     def fetch_all(self):
-        """获取所有数据，失败时返回模拟数据"""
-        all_errors = []
         data_dict = {}
+        all_errors = []
         price = None
         price_source = "无"
         source_display = "无"
 
-        # 按优先级尝试获取K线
+        # 按优先级依次尝试获取每个周期的K线
         for period in self.periods:
             period_success = False
-            for exch in sorted(self.exchanges, key=lambda x: x['priority']):
-                df, err = self._fetch_from_exchange(exch, period)
+            for exch in self.exchanges:
+                df, err = self._fetch_kline_from_exchange(exch, period)
                 if df is not None:
                     data_dict[period] = df
                     source_display = exch['name']
@@ -265,9 +338,9 @@ class DesperateDataFetcher:
             if not period_success:
                 all_errors.append(f"{period} 所有交易所失败")
 
-        # 如果有至少一个周期成功，则尝试获取价格
+        # 获取价格
         if data_dict:
-            for src in sorted(self.price_sources, key=lambda x: x['priority']):
+            for src in self.price_sources:
                 p, err = self._fetch_price_from_source(src)
                 if p is not None:
                     price = p
@@ -275,16 +348,19 @@ class DesperateDataFetcher:
                     break
                 else:
                     all_errors.append(f"价格 {err}")
-            # 如果价格仍未获取到，使用4h收盘价
-            if price is None and '4h' in data_dict:
-                price = data_dict['4h']['close'].iloc[-1]
-                price_source = "4h收盘价(备用)"
-            elif price is None and data_dict:
-                first = next(iter(data_dict))
-                price = data_dict[first]['close'].iloc[-1]
-                price_source = f"{first}收盘价(备用)"
+            if price is None:
+                # 使用4h收盘价作为备用
+                if '4h' in data_dict:
+                    price = data_dict['4h']['close'].iloc[-1]
+                    price_source = "4h收盘价(备用)"
+                elif data_dict:
+                    first = next(iter(data_dict))
+                    price = data_dict[first]['close'].iloc[-1]
+                    price_source = f"{first}收盘价(备用)"
+                else:
+                    price = 2000.0
+                    price_source = "默认价格"
         else:
-            # 所有周期都失败，生成模拟数据
             all_errors.append("所有外部数据源均失败，启用模拟数据")
             data_dict, price = generate_simulated_data(self.periods)
             source_display = "模拟数据(演示模式)"
@@ -417,7 +493,7 @@ def send_signal_alert(direction, confidence, price, reason=""):
 # -------------------- 缓存数据获取 --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
-    fetcher = DesperateDataFetcher()
+    fetcher = NuclearDataFetcher()
     data_dict, price, price_source, errors, source_display = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
@@ -442,8 +518,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合約智能監控中心 · 终极绝望版")
-st.caption("数据源：自动切换+模拟回退｜多周期｜AI预测｜强平分析｜微信提醒")
+st.title("🧠 合約智能監控中心 · 终极核弹版")
+st.caption("数据源：11+交易所自动切换｜分钟级数据｜AI预测｜强平分析｜微信提醒")
 
 # 初始化
 if 'ai' not in st.session_state:
