@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能交易监控中心 · 公開數據版
-多週期切換 | AI預測 | 模擬盈虧聯動 | 微信提醒 | 永久在線
-完全使用幣安公開 API，無需任何金鑰設定。
+🚀 全天候智能合約交易監控中心 · 100倍槓桿版
+多週期切換 | AI預測 | 模擬盈虧＋強平分析 | 微信提醒
+數據源：幣安合約公開 API（無需金鑰）
 """
 
 import streamlit as st
@@ -15,87 +15,104 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 import asyncio
 import aiohttp
-import time
 from streamlit_autorefresh import st_autorefresh
 import warnings
 warnings.filterwarnings('ignore')
 
-# -------------------- 公開數據獲取器（異步 + 同步備援） --------------------
-class PublicDataFetcher:
+# -------------------- 公開數據獲取器（合約版） --------------------
+class ContractDataFetcher:
     def __init__(self):
-        self.base_url = "https://api.binance.com/api/v3/klines"
+        self.kline_url = "https://fapi.binance.com/fapi/v1/klines"
+        self.mark_price_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+        self.funding_rate_url = "https://fapi.binance.com/fapi/v1/fundingRate"
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
 
-    async def fetch_period_async(self, session, period):
-        """異步獲取單個週期"""
+    async def fetch_kline_async(self, session, period):
+        """異步獲取K線"""
         params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
         try:
-            async with session.get(self.base_url, params=params, timeout=10) as resp:
+            async with session.get(self.kline_url, params=params, timeout=10) as resp:
                 if resp.status != 200:
                     return period, None
                 data = await resp.json()
                 if isinstance(data, list):
-                    df = self._convert_to_dataframe(data)
+                    df = pd.DataFrame(data, columns=[
+                        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                        'close_time', 'quote_asset_volume', 'num_trades',
+                        'taker_buy_base', 'taker_buy_quote', 'ignore'
+                    ])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = df[col].astype(float)
                     return period, df
                 else:
                     return period, None
         except Exception as e:
-            print(f"Async error {period}: {e}")
+            print(f"K線異步錯誤 {period}: {e}")
             return period, None
 
-    def fetch_period_sync(self, period):
-        """同步獲取單個週期（備用）"""
-        params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
+    async def fetch_mark_price_async(self, session):
+        """獲取當前標記價格和資金費率"""
         try:
-            resp = requests.get(self.base_url, params=params, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list):
-                    df = self._convert_to_dataframe(data)
-                    return df
-            return None
-        except Exception as e:
-            print(f"Sync error {period}: {e}")
-            return None
-
-    def _convert_to_dataframe(self, data):
-        """將幣安原始數據轉為 DataFrame"""
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'num_trades',
-            'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-
-    async def fetch_all_async(self):
-        """嘗試異步獲取所有週期"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                tasks = [self.fetch_period_async(session, p) for p in self.periods]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                data_dict = {}
-                for p, df in results:
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        data_dict[p] = df
-                if data_dict:
-                    return data_dict
-        except Exception as e:
-            print(f"Async fetch all failed: {e}")
+            async with session.get(self.mark_price_url, params={'symbol': self.symbol}, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    mark_price = float(data['markPrice'])
+                    return mark_price
+        except:
+            pass
         return None
 
+    async def fetch_all_async(self):
+        """異步獲取所有週期K線 + 標記價格"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                # 並發獲取K線
+                kline_tasks = [self.fetch_kline_async(session, p) for p in self.periods]
+                kline_results = await asyncio.gather(*kline_tasks, return_exceptions=True)
+                data_dict = {}
+                for p, df in kline_results:
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        data_dict[p] = df
+
+                # 獲取標記價格
+                mark_price = await self.fetch_mark_price_async(session)
+
+                return data_dict, mark_price
+        except Exception as e:
+            print(f"異步獲取全部失敗: {e}")
+            return None, None
+
     def fetch_all_sync(self):
-        """同步獲取所有週期（備用）"""
+        """同步備用獲取"""
         data_dict = {}
-        for p in self.periods:
-            df = self.fetch_period_sync(p)
-            if df is not None:
-                data_dict[p] = df
-        return data_dict if data_dict else None
+        mark_price = None
+        try:
+            # 同步獲取K線
+            for p in self.periods:
+                params = {'symbol': self.symbol, 'interval': p, 'limit': self.limit}
+                resp = requests.get(self.kline_url, params=params, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        df = pd.DataFrame(data, columns=[
+                            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                            'close_time', 'quote_asset_volume', 'num_trades',
+                            'taker_buy_base', 'taker_buy_quote', 'ignore'
+                        ])
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        for col in ['open', 'high', 'low', 'close', 'volume']:
+                            df[col] = df[col].astype(float)
+                        data_dict[p] = df
+            # 同步獲取標記價格
+            resp = requests.get(self.mark_price_url, params={'symbol': self.symbol}, timeout=5)
+            if resp.status_code == 200:
+                mark_price = float(resp.json()['markPrice'])
+        except Exception as e:
+            print(f"同步獲取錯誤: {e}")
+        return data_dict, mark_price
 
 # -------------------- 指標計算 --------------------
 def add_indicators(df):
@@ -114,9 +131,8 @@ def add_indicators(df):
     df['volume_ratio'] = df['volume'] / df['volume_sma']
     return df
 
-# -------------------- AI 預測模組（簡化版，僅規則） --------------------
+# -------------------- AI 預測（簡化規則版） --------------------
 class SimpleAIPredictor:
-    """純規則預測，不依賴任何模型檔案"""
     def predict(self, df_dict):
         signals = {}
         for period, df in df_dict.items():
@@ -135,16 +151,12 @@ class SimpleAIPredictor:
         direction = 1 if avg_signal > 0.2 else -1 if avg_signal < -0.2 else 0
         return direction, confidence
 
-# -------------------- 多週期策略融合 --------------------
+# -------------------- 多週期融合 --------------------
 class MultiPeriodFusion:
     def __init__(self):
         self.period_weights = {
-            '1m': 0.05,
-            '5m': 0.1,
-            '15m': 0.15,
-            '1h': 0.2,
-            '4h': 0.25,
-            '1d': 0.25
+            '1m': 0.05, '5m': 0.1, '15m': 0.15,
+            '1h': 0.2, '4h': 0.25, '1d': 0.25
         }
         self.strategy_weights = {'trend': 0.5, 'oscillator': 0.3, 'volume': 0.2}
 
@@ -198,8 +210,8 @@ class MultiPeriodFusion:
         confidence = min(abs(avg_score) * 1.2, 1.0)
         return direction, confidence
 
-# -------------------- 微信推送（帶冷卻） --------------------
-PUSHPLUS_TOKEN = ""  # 如需推送，請在 Streamlit Secrets 設定
+# -------------------- 微信推送（選用） --------------------
+PUSHPLUS_TOKEN = st.secrets.get("PUSHPLUS_TOKEN", "")  # 若無則不推送
 last_signal_time = None
 last_signal_direction = 0
 signal_cooldown_minutes = 5
@@ -212,51 +224,60 @@ def send_signal_alert(direction, confidence, price, reason=""):
     if direction == last_signal_direction and last_signal_time and (now - last_signal_time).total_seconds() < signal_cooldown_minutes * 60:
         return
     dir_str = "做多" if direction == 1 else "做空"
-    content = f"""【交易訊號提醒】
+    content = f"""【合約訊號提醒】
 方向: {dir_str}
 置信度: {confidence:.1%}
-當前價格: ${price:.2f}
+標記價格: ${price:.2f}
 時間: {now.strftime('%Y-%m-%d %H:%M:%S')}
 {reason}"""
     url = "http://www.pushplus.plus/send"
-    data = {"token": PUSHPLUS_TOKEN, "title": "🤖 交易訊號", "content": content, "template": "txt"}
+    data = {"token": PUSHPLUS_TOKEN, "title": "🤖 合約訊號", "content": content, "template": "txt"}
     try:
         requests.post(url, json=data, timeout=5)
         last_signal_time = now
         last_signal_direction = direction
-    except Exception as e:
-        print(f"推送失敗: {e}")
+    except:
+        pass
 
-# -------------------- 緩存數據獲取（自動異步 + 同步備援） --------------------
+# -------------------- 緩存數據獲取 --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
-    """嘗試異步獲取，若失敗則改用同步"""
-    fetcher = PublicDataFetcher()
-    
-    # 先嘗試異步
+    fetcher = ContractDataFetcher()
+    # 優先異步
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        data_dict = loop.run_until_complete(fetcher.fetch_all_async())
+        data_dict, mark_price = loop.run_until_complete(fetcher.fetch_all_async())
         if data_dict:
             for p in data_dict:
                 data_dict[p] = add_indicators(data_dict[p])
-            return data_dict
-    except Exception as e:
-        print(f"非同步獲取失敗，切換至同步模式: {e}")
-    
-    # 異步失敗，改用同步
-    data_dict = fetcher.fetch_all_sync()
+            return data_dict, mark_price
+    except:
+        pass
+    # 備用同步
+    data_dict, mark_price = fetcher.fetch_all_sync()
     if data_dict:
         for p in data_dict:
             data_dict[p] = add_indicators(data_dict[p])
-        return data_dict
+        return data_dict, mark_price
     else:
-        st.error("無法獲取幣安數據，請檢查網路連線")
-        return {}
+        st.error("無法獲取合約數據，請檢查網路")
+        return {}, None
+
+# -------------------- 強平價格計算（逐倉，不計手續費） --------------------
+def calculate_liquidation_price(entry_price, side, leverage, margin_mode='isolated'):
+    """
+    簡化逐倉強平價格計算（不計維持保證金率變化）
+    做多：強平價 = entry_price * (1 - 1/leverage)
+    做空：強平價 = entry_price * (1 + 1/leverage)
+    """
+    if side == "long":
+        return entry_price * (1 - 1/leverage)
+    else:
+        return entry_price * (1 + 1/leverage)
 
 # -------------------- Streamlit 介面 --------------------
-st.set_page_config(page_title="全天候智能交易監控中心", layout="wide")
+st.set_page_config(page_title="合約智能監控·100倍槓桿", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -266,13 +287,14 @@ st.markdown("""
 .signal-sell { color: #FF5555; font-weight: bold; }
 .profit { color: #00F5A0; }
 .loss { color: #FF5555; }
+.warning { color: #FFA500; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 全天候智能交易監控中心 · 公開數據版")
-st.caption("數據緩存60秒｜多週期切換｜AI預測｜盈虧聯動｜微信提醒")
+st.title("🧠 合約智能監控中心 · 100倍槓桿版")
+st.caption("數據源：幣安合約｜多週期｜AI預測｜強平分析｜微信提醒")
 
-# 初始化（使用簡化版 AI）
+# 初始化
 if 'ai' not in st.session_state:
     st.session_state.ai = SimpleAIPredictor()
 if 'fusion' not in st.session_state:
@@ -288,22 +310,23 @@ with st.sidebar:
     if auto_refresh:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
     st.markdown("---")
-    st.subheader("💰 模擬交易")
-    sim_entry = st.number_input("入場價", value=0.0, format="%.2f")
-    sim_stop = st.number_input("止損價", value=0.0, format="%.2f")
+    st.subheader("📈 模擬合約")
+    sim_entry = st.number_input("開倉價", value=0.0, format="%.2f")
+    sim_side = st.selectbox("方向", ["多單", "空單"])
+    sim_leverage = st.slider("槓桿倍數", 1, 100, 10)
     sim_quantity = st.number_input("數量 (ETH)", value=0.01, format="%.4f")
 
 # 獲取數據
-data_dict = fetch_all_data()
+data_dict, mark_price = fetch_all_data()
 
-# 計算 AI 和融合訊號
+# 計算訊號
 if data_dict:
     ai_dir, ai_conf = st.session_state.ai.predict(data_dict)
     fusion_dir, fusion_conf = st.session_state.fusion.fuse_periods(data_dict)
-    # 發送微信提醒（如有設定 token）
+    # 推送
     if fusion_dir != 0 and selected_period in data_dict and PUSHPLUS_TOKEN:
-        price_for_alert = data_dict[selected_period]['close'].iloc[-1]
-        send_signal_alert(fusion_dir, fusion_conf, price_for_alert, "融合訊號觸發")
+        price_alert = data_dict[selected_period]['close'].iloc[-1]
+        send_signal_alert(fusion_dir, fusion_conf, price_alert, "融合訊號")
 else:
     ai_dir, ai_conf = 0, 0.0
     fusion_dir, fusion_conf = 0, 0
@@ -312,20 +335,20 @@ else:
 col1, col2 = st.columns([2.2, 1.3])
 
 with col1:
-    st.subheader(f"📊 實時K線 ({selected_period})")
+    st.subheader(f"📊 合約K線 ({selected_period})")
     if data_dict and selected_period in data_dict:
         df = data_dict[selected_period].tail(100).copy()
         df['日期'] = df['timestamp']
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.7, 0.3],
-                            subplot_titles=(f"ETH/USDT {selected_period}", "RSI"))
+                            subplot_titles=(f"ETHUSDT 永續 {selected_period}", "RSI"))
         # K線
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                       low=df['low'], close=df['close'], name="K線"), row=1, col=1)
         # 均線
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma60'], name="MA60", line=dict(color="blue")), row=1, col=1)
-        # 融合訊號箭頭
+        # 訊號箭頭
         if fusion_dir != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -345,25 +368,46 @@ with col1:
         st.info("等待數據...")
 
 with col2:
-    st.subheader("🧠 實時決策")
+    st.subheader("🧠 即時決策")
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 觀望"}
     st.markdown(f'<div class="ai-box">{dir_map[fusion_dir]}<br>置信度: {fusion_conf:.1%}</div>', unsafe_allow_html=True)
 
-    # 模擬盈虧顯示
-    if sim_entry > 0 and selected_period in data_dict:
-        current_price = data_dict[selected_period]['close'].iloc[-1]
-        pnl = (current_price - sim_entry) * sim_quantity
-        pnl_pct = (current_price - sim_entry) / sim_entry * 100
+    # 標記價格顯示
+    if mark_price is not None:
+        st.metric("標記價格", f"${mark_price:.2f}")
+    else:
+        st.metric("標記價格", "獲取中...")
+
+    # 模擬合約盈虧與強平分析
+    if sim_entry > 0 and mark_price is not None and selected_period in data_dict:
+        current_price = mark_price  # 使用標記價格計算盈虧
+        if sim_side == "多單":
+            pnl = (current_price - sim_entry) * sim_quantity
+            pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100
+            liq_price = calculate_liquidation_price(sim_entry, "long", sim_leverage)
+        else:
+            pnl = (sim_entry - current_price) * sim_quantity
+            pnl_pct = (sim_entry - current_price) / sim_entry * sim_leverage * 100
+            liq_price = calculate_liquidation_price(sim_entry, "short", sim_leverage)
+
         color_class = "profit" if pnl >= 0 else "loss"
+        distance_to_liq = abs(current_price - liq_price) / current_price * 100  # 距離強平百分比
+
         st.markdown(f"""
         <div class="metric">
-            <h4>模擬持倉</h4>
-            <p>入場: ${sim_entry:.2f}</p>
-            <p>當前: ${current_price:.2f}</p>
+            <h4>模擬合約持倉</h4>
+            <p>方向: {sim_side} | 槓桿: {sim_leverage}x</p>
+            <p>開倉: ${sim_entry:.2f}</p>
             <p class="{color_class}">盈虧: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
-            <p>止損: ${sim_stop:.2f}</p>
+            <p>強平價: <span class="warning">${liq_price:.2f}</span></p>
+            <p>距強平: {distance_to_liq:.2f}%</p>
         </div>
         """, unsafe_allow_html=True)
-        if sim_stop > 0:
-            if (sim_entry > sim_stop and current_price <= sim_stop) or (sim_entry < sim_stop and current_price >= sim_stop):
-                st.warning("⚠️ 止損觸發！")
+
+        # 強平警告
+        if (sim_side == "多單" and current_price <= liq_price) or (sim_side == "空單" and current_price >= liq_price):
+            st.error("🚨 強平風險！當前價格已觸及強平線")
+        elif distance_to_liq < 5:
+            st.warning(f"⚠️ 距離強平僅 {distance_to_liq:.2f}%，請注意風險")
+    else:
+        st.info("請輸入開倉價以查看模擬盈虧與強平分析")
