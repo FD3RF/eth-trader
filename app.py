@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极极限实盘版V2（可调灵敏度）
-数据源：MEXC + CryptoCompare | 多周期融合 | 多指标信号 | 动态止损止盈 | 强平预警 | 100倍杠杆适配
-侧边栏增加“信号灵敏度”滑块，可调节信号触发阈值。
+🚀 合约智能监控中心 · 终极职业版 V3
+数据源：MEXC + CryptoCompare | 多周期融合 | 职业级风险引擎 | 动态仓位 | 回撤监控 | 共振矩阵
+适配 100倍杠杆，符合职业交易员标准
 """
 
 import streamlit as st
@@ -24,6 +24,61 @@ def calculate_liquidation_price(entry_price, side, leverage):
         return entry_price * (1 - 1/leverage)
     else:
         return entry_price * (1 + 1/leverage)
+
+# -------------------- 市场状态判断 --------------------
+def get_market_state(df, period='15m'):
+    """
+    判断市场状态：趋势/震荡/高波动
+    基于 ADX 和 ATR%
+    """
+    high, low, close = df['high'], df['low'], df['close']
+    adx = ta.trend.ADXIndicator(high, low, close, window=14).adx()
+    current_adx = adx.iloc[-1]
+    atr = df['atr'].iloc[-1]
+    atr_pct = (atr / close.iloc[-1]) * 100
+    
+    if current_adx > 25:
+        state = "趋势"
+    else:
+        state = "震荡"
+    
+    if atr_pct > 5:
+        volatility = "高波动"
+    elif atr_pct > 2:
+        volatility = "中波动"
+    else:
+        volatility = "低波动"
+    
+    return state, volatility, current_adx, atr_pct
+
+# -------------------- 信号强度评分 (0-100) --------------------
+def signal_strength_score(df, fusion_dir, fusion_conf):
+    """
+    综合多个因子给出信号强度评分
+    """
+    if fusion_dir == 0:
+        return 0
+    last = df.iloc[-1]
+    score = 0
+    # 趋势因子
+    if last['ma20'] > last['ma60']:
+        score += 20
+    # RSI 因子
+    if fusion_dir == 1 and last['rsi'] < 40:
+        score += 20
+    elif fusion_dir == -1 and last['rsi'] > 60:
+        score += 20
+    # 成交量因子
+    if last['volume_ratio'] > 1.2:
+        score += 15
+    # 布林带因子
+    if fusion_dir == 1 and last['close'] < last['bb_low'] * 1.02:
+        score += 15
+    elif fusion_dir == -1 and last['close'] > last['bb_high'] * 0.98:
+        score += 15
+    # 置信度因子
+    score += fusion_conf * 30
+    return min(int(score), 100)
 
 # -------------------- 高级信号生成（多指标融合，可调灵敏度）--------------------
 def generate_signals(df, sensitivity=1.0):
@@ -49,22 +104,22 @@ def generate_signals(df, sensitivity=1.0):
     df['volume_ratio'] = df['volume'] / df['volume_sma']
 
     # 根据灵敏度调整阈值
-    rsi_oversold = 30 / sensitivity  # 灵敏度越高，超卖阈值越低（更容易触发买入）
-    rsi_overbought = 70 * sensitivity  # 灵敏度越高，超买阈值越高（更容易触发卖出）
-    volume_threshold = 1.2 / sensitivity  # 灵敏度越高，放量要求越低
+    rsi_oversold = 30 / sensitivity
+    rsi_overbought = 70 * sensitivity
+    volume_threshold = 1.2 / sensitivity
 
     # 多头信号条件
     buy_cond1 = (df['rsi'] < rsi_oversold) & (df['close'] > df['ma20'])
     buy_cond2 = (df['macd_diff'] > 0) & (df['macd_diff'].shift(1) <= 0)
     buy_cond3 = (df['close'] > df['ma20']) & (df['ma20'] > df['ma60']) & (df['volume_ratio'] > volume_threshold)
-    buy_cond4 = (df['close'] < df['bb_low']) & (df['rsi'] < 50)  # 布林下轨附近
+    buy_cond4 = (df['close'] < df['bb_low']) & (df['rsi'] < 50)
     df['buy_signal'] = buy_cond1 | buy_cond2 | buy_cond3 | buy_cond4
 
     # 空头信号条件
     sell_cond1 = (df['rsi'] > rsi_overbought) & (df['close'] < df['ma60'])
     sell_cond2 = (df['macd_diff'] < 0) & (df['macd_diff'].shift(1) >= 0)
     sell_cond3 = (df['close'] < df['ma20']) & (df['ma20'] < df['ma60']) & (df['volume_ratio'] > volume_threshold)
-    sell_cond4 = (df['close'] > df['bb_high']) & (df['rsi'] > 50)  # 布林上轨附近
+    sell_cond4 = (df['close'] > df['bb_high']) & (df['rsi'] > 50)
     df['sell_signal'] = sell_cond1 | sell_cond2 | sell_cond3 | sell_cond4
 
     return df
@@ -250,6 +305,33 @@ class MultiPeriodFusion:
         confidence = min(abs(avg_score) * 1.2, 1.0)
         return direction, confidence
 
+# -------------------- 多周期共振矩阵 --------------------
+def resonance_matrix(df_dict):
+    """
+    生成各周期信号强度表格
+    """
+    rows = []
+    for period, df in df_dict.items():
+        if df is not None and len(df) > 20:
+            last = df.iloc[-1]
+            # 简单信号：1=多，-1=空，0=观望
+            if last['rsi'] < 30 and last['close'] > last['ma20']:
+                sig = 1
+            elif last['rsi'] > 70 and last['close'] < last['ma60']:
+                sig = -1
+            else:
+                sig = 0
+            rows.append({
+                '周期': period,
+                '信号': sig,
+                'RSI': round(last['rsi'], 1),
+                'MA20': round(last['ma20'], 1),
+                'MA60': round(last['ma60'], 1),
+                'ATR%': round(last['atr']/last['close']*100, 2)
+            })
+    df_matrix = pd.DataFrame(rows)
+    return df_matrix
+
 # -------------------- 动态止损止盈计算 --------------------
 def dynamic_stops(entry_price, side, atr, leverage, risk_reward=2.0):
     """基于ATR和杠杆计算止损止盈"""
@@ -261,6 +343,30 @@ def dynamic_stops(entry_price, side, atr, leverage, risk_reward=2.0):
         take_profit = entry_price - 1.5 * atr * risk_reward
     return stop_loss, take_profit
 
+# -------------------- 风险暴露与仓位计算 --------------------
+def calculate_risk_exposure(entry_price, stop_loss, quantity, leverage, account_balance):
+    """
+    计算单笔风险暴露百分比
+    """
+    if stop_loss is None or entry_price == 0:
+        return 0
+    risk_per_unit = abs(entry_price - stop_loss)
+    total_risk = risk_per_unit * quantity * leverage
+    risk_pct = (total_risk / account_balance) * 100 if account_balance > 0 else 0
+    return risk_pct
+
+def kelly_fraction(win_rate, avg_win, avg_loss):
+    """
+    Kelly公式计算最优仓位比例
+    """
+    if avg_loss == 0:
+        return 0
+    b = avg_win / avg_loss
+    p = win_rate
+    q = 1 - p
+    kelly = (p * b - q) / b
+    return max(0, min(kelly, 0.25))  # 限制最大25%
+
 # -------------------- 缓存数据获取 --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data(sensitivity):
@@ -271,8 +377,46 @@ def fetch_all_data(sensitivity):
             data_dict[p] = generate_signals(data_dict[p], sensitivity)
     return data_dict, price, price_source, errors, source_display
 
+# -------------------- 会话状态初始化 --------------------
+def init_session_state():
+    if 'account_balance' not in st.session_state:
+        st.session_state.account_balance = 10000.0  # 初始资金
+    if 'daily_pnl' not in st.session_state:
+        st.session_state.daily_pnl = 0.0
+    if 'daily_loss_limit' not in st.session_state:
+        st.session_state.daily_loss_limit = 500.0  # 日亏损限额
+    if 'peak_balance' not in st.session_state:
+        st.session_state.peak_balance = 10000.0
+    if 'trade_history' not in st.session_state:
+        st.session_state.trade_history = []  # 用于计算胜率等
+    if 'last_date' not in st.session_state:
+        st.session_state.last_date = datetime.now().date()
+
+# -------------------- 更新每日盈亏与回撤 --------------------
+def update_daily_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage):
+    today = datetime.now().date()
+    if today != st.session_state.last_date:
+        # 新的一天，重置日盈亏
+        st.session_state.daily_pnl = 0.0
+        st.session_state.last_date = today
+
+    if sim_entry > 0:
+        if sim_side == "多单":
+            unrealized_pnl = (current_price - sim_entry) * sim_quantity * sim_leverage
+        else:
+            unrealized_pnl = (sim_entry - current_price) * sim_quantity * sim_leverage
+        st.session_state.daily_pnl = unrealized_pnl  # 简化，实际应基于已平仓盈亏
+
+    # 更新峰值
+    current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+    if current_balance > st.session_state.peak_balance:
+        st.session_state.peak_balance = current_balance
+
+    current_drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100
+    return current_drawdown
+
 # -------------------- Streamlit 界面 --------------------
-st.set_page_config(page_title="合约智能监控·终极实盘版V2", layout="wide")
+st.set_page_config(page_title="合约智能监控·终极职业版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -286,13 +430,17 @@ st.markdown("""
 .danger { color: #FF0000; font-weight: bold; }
 .info-box { background: #1A2A3A; border-left: 6px solid #00F5A0; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 .trade-plan { background: #232734; padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 6px solid #FFAA00; }
+.dashboard { background: #1A1D27; padding: 15px; border-radius: 8px; border-left: 6px solid #00F5A0; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极极限实盘版V2（可调灵敏度）")
-st.caption("数据源：MEXC + CryptoCompare｜多周期融合｜多指标信号｜动态止损止盈｜强平预警｜100倍杠杆适配")
+st.title("🧠 合约智能监控中心 · 终极职业版 V3")
+st.caption("数据源：MEXC + CryptoCompare｜职业级风险引擎｜多周期共振｜动态仓位｜回撤监控｜100倍杠杆适配")
 
-# 初始化
+# 初始化会话状态
+init_session_state()
+
+# 初始化融合模块
 if 'fusion' not in st.session_state:
     st.session_state.fusion = MultiPeriodFusion()
 
@@ -302,8 +450,7 @@ with st.sidebar:
     period_options = ['1m', '5m', '15m', '1h', '4h', '1d']
     selected_period = st.selectbox("选择K线周期", period_options, index=2)
     
-    # 新增信号灵敏度滑块
-    sensitivity = st.slider("信号灵敏度", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
+    sensitivity = st.slider("信号灵敏度", 0.5, 2.0, 1.0, 0.1,
                             help="值越大，信号越容易触发（但假信号可能增多）。建议1.0为标准值。")
     
     auto_refresh = st.checkbox("开启自动刷新", value=True)
@@ -316,15 +463,21 @@ with st.sidebar:
     sim_side = st.selectbox("方向", ["多单", "空单"])
     sim_leverage = st.slider("杠杆倍数", 1, 100, 10)
     sim_quantity = st.number_input("数量 (ETH)", value=0.01, format="%.4f")
+    st.markdown("---")
+    st.subheader("💰 账户设置")
+    account_balance = st.number_input("初始资金 (USDT)", value=st.session_state.account_balance, min_value=100.0, step=1000.0, format="%.2f")
+    daily_loss_limit = st.number_input("日亏损限额 (USDT)", value=st.session_state.daily_loss_limit, min_value=0.0, step=100.0, format="%.2f")
+    # 更新 session_state
+    st.session_state.account_balance = account_balance
+    st.session_state.daily_loss_limit = daily_loss_limit
 
-# 获取数据（传入灵敏度）
+# 获取数据
 data_dict, current_price, price_source, errors, source_display = fetch_all_data(sensitivity)
 
 # 显示数据源状态
 if data_dict:
     st.markdown(f'<div class="info-box">✅ 当前数据源：{source_display} | 价格源：{price_source} | 灵敏度：{sensitivity}</div>', unsafe_allow_html=True)
 
-# 简单显示错误（仅当严重时）
 if errors and len(errors) > 3:
     st.warning(f"⚠️ 部分周期数据不可用 ({len(errors)}个周期)，将使用可用周期计算信号")
 
@@ -334,12 +487,20 @@ if data_dict:
 else:
     fusion_dir, fusion_conf = 0, 0
 
-# 获取当前周期的ATR用于交易计划
+# 获取当前周期的数据和ATR
+selected_df = data_dict.get(selected_period) if data_dict else None
 atr_value = None
-if data_dict and selected_period in data_dict:
-    atr_series = data_dict[selected_period]['atr']
+market_state = "未知"
+volatility = "未知"
+adx = 0
+atr_pct = 0
+if selected_df is not None and len(selected_df) > 20:
+    atr_series = selected_df['atr']
     if not atr_series.empty:
         atr_value = atr_series.iloc[-1]
+        state, vol, adx, atr_pct = get_market_state(selected_df)
+        market_state = state
+        volatility = vol
 
 # 生成动态止损止盈
 stop_loss = None
@@ -347,13 +508,46 @@ take_profit = None
 if fusion_dir != 0 and current_price is not None and atr_value is not None and atr_value > 0:
     stop_loss, take_profit = dynamic_stops(current_price, fusion_dir, atr_value, sim_leverage)
 
+# 计算风险暴露
+risk_pct = 0
+if sim_entry > 0 and stop_loss is not None:
+    risk_pct = calculate_risk_exposure(sim_entry, stop_loss, sim_quantity, sim_leverage, st.session_state.account_balance)
+
+# 更新每日盈亏与回撤
+current_drawdown = 0
+if selected_df is not None and current_price is not None:
+    current_drawdown = update_daily_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage)
+
+# 信号强度评分
+signal_score = 0
+if selected_df is not None:
+    signal_score = signal_strength_score(selected_df, fusion_dir, fusion_conf)
+
+# 检查日亏损限制
+daily_loss_exceeded = st.session_state.daily_pnl < -st.session_state.daily_loss_limit
+if daily_loss_exceeded:
+    st.error("🚨 日亏损限额已触发！建议停止交易。")
+
+# 多周期共振矩阵
+if data_dict:
+    matrix_df = resonance_matrix(data_dict)
+    # 将信号映射为图标
+    matrix_df['信号'] = matrix_df['信号'].map({1: "▲ 多", -1: "▼ 空", 0: "⚪ 观"})
+else:
+    matrix_df = pd.DataFrame()
+
 # 主布局
 col1, col2 = st.columns([2.2, 1.3])
 
 with col1:
+    # 市场状态标识
+    if selected_df is not None:
+        state_color = {"趋势": "#00F5A0", "震荡": "#FFAA00", "高波动": "#FF5555"}.get(market_state, "#FFFFFF")
+        st.markdown(f"<h5>市场状态: <span style='color:{state_color};'>{market_state} / {volatility}</span> (ADX: {adx:.1f}, ATR%: {atr_pct:.2f}%)</h5>", unsafe_allow_html=True)
+    
     st.subheader(f"📊 合约K线 ({selected_period})  — 绿色▲=做多信号，红色▼=做空信号")
-    if data_dict and selected_period in data_dict:
-        df = data_dict[selected_period].tail(100).copy()
+    if selected_df is not None:
+        df = selected_df.tail(100).copy()
         df['日期'] = df['timestamp']
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.7, 0.3],
@@ -381,7 +575,7 @@ with col1:
                 row=1, col=1
             )
 
-        # 当前融合信号箭头（最后一根）
+        # 当前融合信号箭头
         if fusion_dir != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -406,35 +600,65 @@ with col2:
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 观望"}
     st.markdown(f'<div class="ai-box">{dir_map[fusion_dir]}<br>置信度: {fusion_conf:.1%}</div>', unsafe_allow_html=True)
 
+    # 信号强度条形图
+    if signal_score > 0:
+        st.progress(signal_score/100, text=f"信号强度: {signal_score}/100")
+    else:
+        st.info("信号强度: 0/100")
+
     if current_price is not None:
         st.metric("当前价格", f"${current_price:.2f}", delta_color="off")
     else:
         st.metric("当前价格", "获取中...")
 
-    # 显示动态交易计划
+    # 风险仪表盘
+    with st.container():
+        st.markdown('<div class="dashboard">', unsafe_allow_html=True)
+        st.markdown("#### 📊 风险仪表盘")
+        col_risk1, col_risk2 = st.columns(2)
+        with col_risk1:
+            st.metric("账户余额", f"${st.session_state.account_balance:.2f}")
+            st.metric("日盈亏", f"${st.session_state.daily_pnl:.2f}", delta_color="inverse")
+        with col_risk2:
+            st.metric("当前回撤", f"{current_drawdown:.2f}%")
+            st.metric("风险暴露", f"{risk_pct:.2f}%")
+        # 日亏损状态
+        if daily_loss_exceeded:
+            st.error("⚠️ 日亏损超限")
+        else:
+            remaining = st.session_state.daily_loss_limit + st.session_state.daily_pnl
+            st.info(f"日亏损剩余: ${remaining:.2f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # 动态交易计划
     if fusion_dir != 0 and stop_loss is not None and take_profit is not None:
-        risk_pct = abs(current_price - stop_loss) / current_price * 100
-        reward_pct = abs(take_profit - current_price) / current_price * 100
+        risk_pct_plan = abs(current_price - stop_loss) / current_price * 100
+        reward_pct_plan = abs(take_profit - current_price) / current_price * 100
         st.markdown(f"""
         <div class="trade-plan">
-            <h4>📋 动态交易计划 (基于ATR)</h4>
+            <h4>📋 动态交易计划</h4>
             <p>进场: <span style="color:#00F5A0">${current_price:.2f}</span></p>
-            <p>止损: <span style="color:#FF5555">${stop_loss:.2f}</span> (风险 {risk_pct:.2f}%)</p>
-            <p>止盈: <span style="color:#00F5A0">${take_profit:.2f}</span> (盈亏比 {reward_pct/risk_pct:.2f})</p>
+            <p>止损: <span style="color:#FF5555">${stop_loss:.2f}</span> (风险 {risk_pct_plan:.2f}%)</p>
+            <p>止盈: <span style="color:#00F5A0">${take_profit:.2f}</span> (盈亏比 {reward_pct_plan/risk_pct_plan:.2f})</p>
             <p>ATR(14): {atr_value:.2f}</p>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.info("当前无明确信号，无交易计划")
 
+    # 多周期共振矩阵
+    if not matrix_df.empty:
+        with st.expander("📈 多周期共振矩阵", expanded=False):
+            st.dataframe(matrix_df, use_container_width=True)
+
     # 模拟合约持仓显示 + 强平预警
-    if sim_entry > 0 and current_price is not None and selected_period in data_dict:
+    if sim_entry > 0 and current_price is not None and selected_df is not None:
         if sim_side == "多单":
-            pnl = (current_price - sim_entry) * sim_quantity
+            pnl = (current_price - sim_entry) * sim_quantity * sim_leverage
             pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100
             liq_price = calculate_liquidation_price(sim_entry, "long", sim_leverage)
         else:
-            pnl = (sim_entry - current_price) * sim_quantity
+            pnl = (sim_entry - current_price) * sim_quantity * sim_leverage
             pnl_pct = (sim_entry - current_price) / sim_entry * sim_leverage * 100
             liq_price = calculate_liquidation_price(sim_entry, "short", sim_leverage)
 
