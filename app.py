@@ -7,7 +7,6 @@ from plotly.subplots import make_subplots
 import ta
 import time
 from datetime import datetime, timedelta
-import random
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 import warnings
@@ -87,16 +86,10 @@ st.markdown("""
         background: linear-gradient(90deg, transparent, #00D4FF, #F0B90B, transparent);
         margin: 20px 0;
     }
-    .fib-line {
-        position: relative;
-        height: 4px;
-        background: linear-gradient(90deg, #FF6B6B, #FFD93D, #6BCB77, #4D96FF);
-        margin: 10px 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- 币种配置（扩展版）----------
+# ---------- 币种配置（支持6大主流币）----------
 COINS = {
     "ETH": {"id": "ethereum", "name": "Ethereum", "symbol": "ETH"},
     "BTC": {"id": "bitcoin", "name": "Bitcoin", "symbol": "BTC"},
@@ -109,6 +102,7 @@ COINS = {
 # ---------- CoinGecko 免费数据源 ----------
 @st.cache_data(ttl=30)
 def fetch_price(coin_id):
+    """获取实时价格和24h涨跌"""
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
     try:
         r = requests.get(url, timeout=10)
@@ -117,24 +111,23 @@ def fetch_price(coin_id):
     except:
         return None, None
 
-def generate_klines(price, interval_min=5, limit=500):  # 增加数据量
-    """基于当前价格生成模拟K线（含随机游走和波动聚集）"""
+def generate_klines(price, interval_min=5, limit=500):
+    """基于当前价格生成模拟K线（含波动聚集）"""
     now = datetime.now()
     times = [now - timedelta(minutes=i*interval_min) for i in range(limit)][::-1]
     # 使用GARCH-like波动聚集
     returns = np.random.randn(limit) * 0.002
-    # 加入波动聚集：如果前一日波动大，今日波动也大
     for i in range(1, limit):
         if abs(returns[i-1]) > 0.003:
             returns[i] *= 1.5
     price_series = price * np.exp(np.cumsum(returns))
-    price_series = price_series * (price / price_series[-1])
+    price_series = price_series * (price / price_series[-1])  # 确保最新价等于真实价
     
     closes = price_series
     opens = [closes[i-1] if i>0 else closes[0]*0.999 for i in range(limit)]
     highs = np.maximum(opens, closes) * 1.002
     lows = np.minimum(opens, closes) * 0.998
-    vols = np.random.uniform(100, 500, limit) * (1 + 0.5*np.abs(returns))  # 成交量与波动相关
+    vols = np.random.uniform(100, 500, limit) * (1 + 0.5*np.abs(returns))
     
     return pd.DataFrame({
         "time": times,
@@ -145,7 +138,7 @@ def generate_klines(price, interval_min=5, limit=500):  # 增加数据量
         "volume": vols
     })
 
-# ---------- 高级指标（含Ichimoku完整版、斐波那契、成交量分布）----------
+# ---------- 高级指标（含Ichimoku、斐波那契、成交量分布）----------
 def add_ichimoku(df):
     """添加完整Ichimoku云图指标"""
     high_9 = df['high'].rolling(9).max()
@@ -181,7 +174,7 @@ def add_fibonacci_levels(df, window=100):
     return df
 
 def add_volume_profile(df, bins=10):
-    """添加成交量分布（简化版，最近50根）"""
+    """添加成交量分布（最近50根）"""
     if len(df) < 50:
         return df
     recent = df.iloc[-50:]
@@ -189,10 +182,9 @@ def add_volume_profile(df, bins=10):
     price_max = recent['high'].max()
     bin_edges = np.linspace(price_min, price_max, bins+1)
     volume_by_price = np.zeros(bins)
-    for i, row in recent.iterrows():
+    for _, row in recent.iterrows():
         for j in range(bins):
             if row['low'] <= bin_edges[j+1] and row['high'] >= bin_edges[j]:
-                # 简单分配：成交量均匀分布在K线范围内
                 overlap = min(row['high'], bin_edges[j+1]) - max(row['low'], bin_edges[j])
                 if overlap > 0:
                     volume_by_price[j] += row['volume'] * overlap / (row['high'] - row['low'])
@@ -281,7 +273,7 @@ def detect_candlestick_patterns(df):
             if last['close'] < (prev2['open'] + prev2['close'])/2:
                 patterns.append("🌆 暮星形态")
     
-    # 三只乌鸦/红三兵（简化）
+    # 三只乌鸦/红三兵
     if len(df) > 3:
         if all(df.iloc[-i]['close'] < df.iloc[-i]['open'] for i in range(1,4)) and all(df.iloc[-i]['close'] < df.iloc[-i-1]['close'] for i in range(1,3)):
             patterns.append("🐦‍⬛ 三只乌鸦 (看跌)")
@@ -292,43 +284,41 @@ def detect_candlestick_patterns(df):
 
 # ---------- 机器学习信号（逻辑回归）----------
 def train_ml_model(df):
-    """使用历史数据训练简单逻辑回归模型"""
+    """使用历史数据训练逻辑回归模型"""
     if len(df) < 100:
         return None, None
-    # 准备特征
     feature_cols = ['rsi', 'macd', 'adx', 'cci', 'mfi', 'kdj_k', 'kdj_d', 'natr']
     X = df[feature_cols].dropna().values
-    # 目标：未来5根K线是否上涨
     y = (df['close'].shift(-5) > df['close']).astype(int).dropna().values
     min_len = min(len(X), len(y))
+    if min_len < 50:
+        return None, None
     X = X[:min_len]
     y = y[:min_len]
-    if len(X) < 50:
-        return None, None
-    # 标准化
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    # 训练
     model = LogisticRegression(max_iter=1000)
     model.fit(X_scaled, y)
     return model, scaler
 
 def ml_predict(df, model, scaler):
     if model is None:
-        return 0
+        return 0.5
     feature_cols = ['rsi', 'macd', 'adx', 'cci', 'mfi', 'kdj_k', 'kdj_d', 'natr']
     last = df[feature_cols].iloc[-1:].dropna()
     if last.empty:
-        return 0
+        return 0.5
     X_last = scaler.transform(last)
-    prob = model.predict_proba(X_last)[0][1]  # 上涨概率
+    prob = model.predict_proba(X_last)[0][1]
     return prob
 
-# ---------- 蒙特卡洛模拟（预测未来10步）----------
+# ---------- 蒙特卡洛模拟 ----------
 def monte_carlo_simulation(df, steps=10, n_simulations=100):
     """基于历史波动率模拟未来价格路径"""
     last_price = df['close'].iloc[-1]
     returns = df['close'].pct_change().dropna()
+    if len(returns) < 30:
+        return [last_price]*(steps+1), [last_price]*(steps+1), [last_price]*(steps+1)
     mu = returns.mean()
     sigma = returns.std()
     simulations = []
@@ -338,14 +328,13 @@ def monte_carlo_simulation(df, steps=10, n_simulations=100):
             ret = np.random.normal(mu, sigma)
             prices.append(prices[-1] * (1 + ret))
         simulations.append(prices)
-    # 计算平均路径和置信区间
     sim_array = np.array(simulations)
     mean_path = np.mean(sim_array, axis=0)
     upper = np.percentile(sim_array, 95, axis=0)
     lower = np.percentile(sim_array, 5, axis=0)
     return mean_path, upper, lower
 
-# ---------- 风险价值（VaR）计算 ----------
+# ---------- 风险价值（VaR）----------
 def calculate_var(df, confidence=0.95, horizon=1):
     returns = df['close'].pct_change().dropna()
     if len(returns) < 30:
@@ -353,8 +342,8 @@ def calculate_var(df, confidence=0.95, horizon=1):
     var = np.percentile(returns, (1-confidence)*100) * np.sqrt(horizon)
     return abs(var)
 
-# ---------- 多因子评分系统（整合ML）----------
-def calculate_signal_score(df, ml_prob=0):
+# ---------- 多因子评分系统 ----------
+def calculate_signal_score(df, ml_prob=0.5):
     if df.empty or len(df) < 30:
         return 0, "数据不足"
     last = df.iloc[-1]
@@ -442,10 +431,12 @@ def calculate_signal_score(df, ml_prob=0):
         reasons.append("ML看跌")
     
     # 斐波那契支撑/阻力
-    if not pd.isna(last['fib_0.618']) and last['close'] < last['fib_0.618']:
-        score += 5  # 接近支撑
-    if not pd.isna(last['fib_0.382']) and last['close'] > last['fib_0.382']:
-        score -= 5  # 接近阻力
+    if 'fib_0.618' in df.columns and not pd.isna(last['fib_0.618']):
+        if last['close'] < last['fib_0.618']:
+            score += 5
+    if 'fib_0.382' in df.columns and not pd.isna(last['fib_0.382']):
+        if last['close'] > last['fib_0.382']:
+            score -= 5
     
     score = max(-100, min(100, score))
     return score, ", ".join(reasons[:3])
@@ -510,8 +501,9 @@ def plot_ultimate_candlestick(df, selected_coin, interval):
     fig.add_trace(go.Scatter(x=df.time, y=df.bb_lower, name="布林下轨", line=dict(color='#888888', width=1, dash='dash'), opacity=0.5), row=1, col=1)
     
     # Ichimoku 云
-    fig.add_trace(go.Scatter(x=df.time, y=df['ichimoku_senkou_a'], name="云带A", line=dict(color='green', width=1), opacity=0.3), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.time, y=df['ichimoku_senkou_b'], name="云带B", line=dict(color='red', width=1), opacity=0.3, fill='tonexty', fillcolor='rgba(128,128,128,0.2)'), row=1, col=1)
+    if 'ichimoku_senkou_a' in df.columns and 'ichimoku_senkou_b' in df.columns:
+        fig.add_trace(go.Scatter(x=df.time, y=df['ichimoku_senkou_a'], name="云带A", line=dict(color='green', width=1), opacity=0.3), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.time, y=df['ichimoku_senkou_b'], name="云带B", line=dict(color='red', width=1), opacity=0.3, fill='tonexty', fillcolor='rgba(128,128,128,0.2)'), row=1, col=1)
     
     # RSI
     fig.add_trace(go.Scatter(x=df.time, y=df.rsi, name="RSI(14)", line=dict(color='#9B59B6', width=2)), row=2, col=1)
@@ -695,7 +687,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ---------- AI实时监控分析（四列增强）----------
+# ---------- AI实时监控分析（四列）----------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("📊 AI实时监控分析")
 colA, colB, colC, colD = st.columns(4)
@@ -717,15 +709,19 @@ with colC:
     resistance = last['bb_upper'] if not pd.isna(last['bb_upper']) else last['close']*1.02
     st.markdown(f"- 支撑: **${support:.2f}**")
     st.markdown(f"- 阻力: **${resistance:.2f}**")
-    st.markdown(f"- 斐波那契0.618: **${last['fib_0.618']:.2f}**" if 'fib_0.618' in df.columns else "")
-    st.markdown(f"- 成交量密集: **${last['volume_profile_max']:.2f}**" if 'volume_profile_max' in df.columns else "")
+    if 'fib_0.618' in df.columns and not pd.isna(last['fib_0.618']):
+        st.markdown(f"- 斐波那契0.618: **${last['fib_0.618']:.2f}**")
+    if 'volume_profile_max' in df.columns and not pd.isna(last['volume_profile_max']):
+        st.markdown(f"- 成交量密集: **${last['volume_profile_max']:.2f}**")
 with colD:
     st.markdown("**Ichimoku云**")
     if 'ichimoku_tenkan' in df.columns and not pd.isna(last['ichimoku_tenkan']):
         st.markdown(f"- 转换线: **${last['ichimoku_tenkan']:.2f}**")
         st.markdown(f"- 基准线: **${last['ichimoku_kijun']:.2f}**")
-        st.markdown(f"- 云带A: **${last['ichimoku_senkou_a']:.2f}**" if not pd.isna(last['ichimoku_senkou_a']) else "")
-        st.markdown(f"- 云带B: **${last['ichimoku_senkou_b']:.2f}**" if not pd.isna(last['ichimoku_senkou_b']) else "")
+        if not pd.isna(last['ichimoku_senkou_a']):
+            st.markdown(f"- 云带A: **${last['ichimoku_senkou_a']:.2f}**")
+        if not pd.isna(last['ichimoku_senkou_b']):
+            st.markdown(f"- 云带B: **${last['ichimoku_senkou_b']:.2f}**")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- K线图 ----------
@@ -840,7 +836,6 @@ with colY:
 # ---------- 历史信号回测面板 ----------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.subheader("📜 历史信号回测")
-# 记录当前信号
 current_signal = {
     "time": datetime.now().strftime("%H:%M"),
     "coin": selected_coin,
@@ -855,8 +850,7 @@ if len(st.session_state.signal_history) > 20:
 if st.session_state.signal_history:
     df_signals = pd.DataFrame(st.session_state.signal_history)
     total = len(df_signals)
-    # 模拟胜率（根据评分方向，假设>0为正确，这里仅演示）
-    wins = len(df_signals[df_signals['score'] > 0])  # 简化
+    wins = len(df_signals[df_signals['score'] > 0])  # 简化模拟
     win_rate = wins/total if total>0 else 0
     st.markdown(f"**最近{total}次信号统计** (基于评分方向模拟): 胜率 {win_rate:.1%}")
     st.dataframe(df_signals[['time','coin','direction','score','price']], use_container_width=True, hide_index=True)
