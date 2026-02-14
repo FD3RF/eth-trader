@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 import os
 
-# ---------- 页面配置 ----------
+# 页面配置
 st.set_page_config(
     page_title="全中文智能交易监控中心",
     page_icon="📊",
@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ---------- 自定义样式 ----------
+# 自定义样式
 st.markdown("""
 <style>
     .stApp { background-color: #0E1117; color: #FAFAFA; }
@@ -44,31 +44,27 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- 从secrets或环境变量读取密钥 ----------
+# 从secrets读取密钥
 def get_secret(key):
     try:
         return st.secrets[key]
     except:
         return os.getenv(key)
 
-BINANCE_API_KEY = get_secret("BINANCE_API_KEY")   # 只读权限的币安API Key（可选，获取高权重）
-AINFT_KEY = get_secret("AINFT_KEY")                # AINFT API Key（必需，用于AI信号）
+BINANCE_API_KEY = get_secret("BINANCE_API_KEY")
+AINFT_KEY = get_secret("AINFT_KEY")
 if not AINFT_KEY:
     st.error("❌ 未找到 AINFT_KEY，请在 secrets 或环境变量中配置")
     st.stop()
 
-# ---------- 数据获取函数（带缓存和自动过期）----------
-@st.cache_data(ttl=60)  # 缓存60秒，实现自动刷新
+# ---------- 数据获取函数 ----------
+@st.cache_data(ttl=60)
 def fetch_klines(symbol="ETHUSDT", interval="5m", limit=200):
-    """从币安获取K线数据"""
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
-        if BINANCE_API_KEY:
-            headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-        else:
-            resp = requests.get(url, params=params, timeout=10)
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY} if BINANCE_API_KEY else {}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -86,34 +82,36 @@ def fetch_klines(symbol="ETHUSDT", interval="5m", limit=200):
     return df
 
 def add_indicators(df):
-    """添加技术指标：MA20, MA60, RSI"""
     df = df.copy()
     df["ma20"] = df["close"].rolling(20).mean()
     df["ma60"] = df["close"].rolling(60).mean()
     df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
     return df
 
-# ---------- 多周期数据获取 ----------
 @st.cache_data(ttl=60)
 def fetch_all_periods():
     periods = ["1m","5m","15m","1h","4h","1d"]
     data = {}
     for p in periods:
-        df = fetch_klines(interval=p, limit=200)
-        if not df.empty:
-            df = add_indicators(df)
-            data[p] = df
+        try:
+            df = fetch_klines(interval=p, limit=200)
+            if not df.empty:
+                df = add_indicators(df)
+                data[p] = df
+            else:
+                data[p] = pd.DataFrame()
+        except Exception as e:
+            st.warning(f"获取 {p} 数据失败: {e}")
+            data[p] = pd.DataFrame()
     return data
 
 # ---------- 调用AINFT获取AI信号 ----------
 def get_ai_signal(eth_df, btc_df=None):
-    """使用AINFT GPT-5.2生成交易信号"""
     if eth_df.empty:
-        return "数据不足", 0.0
+        return "数据不足", 0, ""
     e = eth_df.iloc[-1]
     time_str = e["time"].strftime("%Y-%m-%d %H:%M")
 
-    # 如果没有BTC数据，则只使用ETH
     btc_info = ""
     if btc_df is not None and not btc_df.empty:
         b = btc_df.iloc[-1]
@@ -140,7 +138,7 @@ RSI: {e['rsi']:.1f}
 理由：[一句话]
 """
 
-    url = "https://chat.aintf.com/webapi/chat/openai"
+    url = "https://chat.ainft.com/webapi/chat/openai"   # ✅ 修正为正确域名
     headers = {
         "Authorization": f"Bearer {AINFT_KEY}",
         "Content-Type": "application/json"
@@ -158,14 +156,12 @@ RSI: {e['rsi']:.1f}
         resp.raise_for_status()
         result = resp.json()
         content = result["choices"][0]["message"]["content"]
-        # 解析方向
         if "做多" in content:
             direction = "做多"
         elif "做空" in content:
             direction = "做空"
         else:
             direction = "观望"
-        # 提取置信度（简单匹配数字）
         import re
         conf_match = re.search(r'置信度[：:]\s*(\d+)', content)
         confidence = int(conf_match.group(1)) if conf_match else 50
@@ -211,7 +207,7 @@ if use_simulated:
     dates = pd.date_range(end=datetime.now(), periods=200, freq='5min')
     sim_df = pd.DataFrame({
         "time": dates,
-        "close": np.random.normal(1950, 20, 200).cumsum() + 1800,
+        "close": np.random.normal(2600, 20, 200).cumsum() + 1800,
         "high": 0,
         "low": 0,
         "open": 0,
@@ -223,36 +219,30 @@ if use_simulated:
     sim_df = add_indicators(sim_df)
     data_dict = {interval: sim_df}
 else:
-    # 获取真实数据
     data_dict = fetch_all_periods()
-    if interval not in data_dict:
+    if interval not in data_dict or data_dict[interval].empty:
         st.error(f"周期 {interval} 数据获取失败")
         st.stop()
 
-# 当前周期数据
 df = data_dict[interval]
-if df.empty:
-    st.error("数据为空")
-    st.stop()
-
 latest = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else latest
 
-# ---------- 顶部指标卡片 ----------
+# 顶部指标卡片
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     delta = latest["close"] - prev["close"]
     st.metric("ETH/USDT", f"${latest['close']:.2f}", f"{delta:+.2f}")
 with col2:
-    st.metric("RSI(14)", f"{latest['rsi']:.1f}")
+    st.metric("RSI(14)", f"{latest['rsi']:.1f}" if not pd.isna(latest['rsi']) else "N/A")
 with col3:
-    st.metric("MA20", f"${latest['ma20']:.2f}")
+    st.metric("MA20", f"${latest['ma20']:.2f}" if not pd.isna(latest['ma20']) else "N/A")
 with col4:
-    st.metric("MA60", f"${latest['ma60']:.2f}")
+    st.metric("MA60", f"${latest['ma60']:.2f}" if not pd.isna(latest['ma60']) else "N/A")
 with col5:
     st.metric("成交量", f"{latest['volume']:.0f}")
 
-# ---------- K线图 ----------
+# K线图
 st.subheader(f"{interval} K线图")
 
 fig = make_subplots(
@@ -262,7 +252,6 @@ fig = make_subplots(
     row_heights=[0.7, 0.3]
 )
 
-# 蜡烛图
 fig.add_trace(go.Candlestick(
     x=df["time"],
     open=df["open"],
@@ -274,11 +263,9 @@ fig.add_trace(go.Candlestick(
     decreasing_line_color="#EF5350"
 ), row=1, col=1)
 
-# 均线
 fig.add_trace(go.Scatter(x=df["time"], y=df["ma20"], name="MA20", line=dict(color="orange", width=1)), row=1, col=1)
 fig.add_trace(go.Scatter(x=df["time"], y=df["ma60"], name="MA60", line=dict(color="blue", width=1)), row=1, col=1)
 
-# RSI
 fig.add_trace(go.Scatter(x=df["time"], y=df["rsi"], name="RSI", line=dict(color="purple")), row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
 fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
@@ -296,12 +283,11 @@ fig.update_yaxes(title_text="RSI", row=2, col=1)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ---------- 信号与交易面板 ----------
+# AI信号与模拟盈亏
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
     st.subheader("🎯 AI 信号")
-    # 获取BTC数据用于联动（可选）
     btc_df = data_dict.get("15m") if "15m" in data_dict else None
     direction, confidence, full_content = get_ai_signal(df, btc_df)
 
@@ -327,37 +313,35 @@ with col_right:
     st.subheader("💰 模拟盈亏")
     if entry_price > 0:
         current_price = latest["close"]
-        if entry_price > 0:
-            if direction == "做多":
-                profit_pct = (current_price - entry_price) / entry_price * 100
-                profit_usd = (current_price - entry_price) * qty
-            else:  # 做空
-                profit_pct = (entry_price - current_price) / entry_price * 100
-                profit_usd = (entry_price - current_price) * qty
-            color = "#26A69A" if profit_usd >= 0 else "#EF5350"
-            st.markdown(f"""
-            <div style="background: #1E1F2A; padding: 20px; border-radius: 10px;">
-                <span style="font-size: 20px;">当前盈亏</span><br>
-                <span style="font-size: 32px; font-weight: bold; color: {color};">{profit_usd:+.2f} USDT</span><br>
-                <span style="color: #AAAAAA;">({profit_pct:+.2f}%)</span>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.info("输入入场价以计算盈亏")
+        if direction == "做多":
+            profit_pct = (current_price - entry_price) / entry_price * 100
+            profit_usd = (current_price - entry_price) * qty
+        else:  # 做空
+            profit_pct = (entry_price - current_price) / entry_price * 100
+            profit_usd = (entry_price - current_price) * qty
+        color = "#26A69A" if profit_usd >= 0 else "#EF5350"
+        st.markdown(f"""
+        <div style="background: #1E1F2A; padding: 20px; border-radius: 10px;">
+            <span style="font-size: 20px;">当前盈亏</span><br>
+            <span style="font-size: 32px; font-weight: bold; color: {color};">{profit_usd:+.2f} USDT</span><br>
+            <span style="color: #AAAAAA;">({profit_pct:+.2f}%)</span>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         st.info("输入入场价以计算盈亏")
 
-# ---------- 各周期快照 ----------
+# 各周期快照
 st.subheader("📌 各周期快照")
 
 snapshot_cols = st.columns(3)
 periods_list = ["1m","5m","15m","1h","4h","1d"]
 for i, p in enumerate(periods_list):
     with snapshot_cols[i % 3]:
-        if p in data_dict and not data_dict[p].empty:
+        if p in data_dict and not data_dict[p].empty and len(data_dict[p]) > 1:
             d = data_dict[p].iloc[-1]
-            arrow = "↑" if d["close"] > data_dict[p].iloc[-2]["close"] else "↓" if len(data_dict[p])>1 else "→"
-            color = "#26A69A" if arrow == "↑" else "#EF5350" if arrow == "↓" else "#888888"
+            d_prev = data_dict[p].iloc[-2]
+            arrow = "↑" if d["close"] > d_prev["close"] else "↓"
+            color = "#26A69A" if arrow == "↑" else "#EF5350"
             st.markdown(f"""
             <div class="snapshot-item">
                 <span style="font-weight: bold;">{p}</span>
@@ -366,9 +350,9 @@ for i, p in enumerate(periods_list):
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.markdown(f"<div class='snapshot-item'>{p}: 数据缺失</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='snapshot-item'>{p}: 数据获取中...</div>", unsafe_allow_html=True)
 
-# ---------- 自动刷新逻辑 ----------
+# 自动刷新
 if auto_refresh and not use_simulated:
     time_since = (datetime.now() - st.session_state.last_refresh).total_seconds()
     if time_since > 60:
@@ -376,6 +360,5 @@ if auto_refresh and not use_simulated:
         st.session_state.last_refresh = datetime.now()
         st.rerun()
 
-# ---------- 页脚 ----------
 st.divider()
 st.caption("⚠️ 所有数据来自币安实时行情，AI信号仅供参考，不构成投资建议。杠杆交易风险极高，请自行控制仓位。")
