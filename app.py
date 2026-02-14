@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import ta
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 
 # 页面配置
@@ -123,7 +123,7 @@ MA20: {b['ma20']:.2f} | MA60: {b['ma60']:.2f}
 """
 
     prompt = f"""
-【ETH {eth_df['interval'] if 'interval' in eth_df.columns else '当前周期'}实时数据】
+【ETH 当前周期实时数据】
 时间: {time_str}
 价格: {e['close']:.2f} USDT
 MA20: {e['ma20']:.2f} | MA60: {e['ma60']:.2f}
@@ -138,7 +138,7 @@ RSI: {e['rsi']:.1f}
 理由：[一句话]
 """
 
-    url = "https://chat.ainft.com/webapi/chat/openai"   # ✅ 修正为正确域名
+    url = "https://chat.ainft.com/webapi/chat/openai"   # 正确域名
     headers = {
         "Authorization": f"Bearer {AINFT_KEY}",
         "Content-Type": "application/json"
@@ -187,11 +187,8 @@ with st.sidebar:
     use_simulated = st.checkbox("使用模拟数据（调试用）", value=False)
     st.divider()
     st.subheader("📈 模拟交易")
-    col1, col2 = st.columns(2)
-    with col1:
-        entry_price = st.number_input("入场价 (USDT)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
-    with col2:
-        stop_price = st.number_input("止损价 (USDT)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
+    entry_price = st.number_input("入场价 (USDT)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
+    stop_price = st.number_input("止损价 (USDT)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
     qty = st.number_input("数量 (ETH)", min_value=0.001, value=0.01, step=0.001, format="%.3f")
     if st.button("🚀 刷新数据", use_container_width=True):
         st.cache_data.clear()
