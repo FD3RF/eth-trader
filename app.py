@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合約交易監控中心 · 最終穩定版
-多週期切換 | AI預測 | 模擬盈虧＋強平分析 | 微信提醒
+🚀 全天候智能合約交易監控中心 · 最終增強版
+多週期切換 | AI預測 | 模擬盈虧＋強平分析 | 微信提醒 | 詳細錯誤診斷
 數據源：幣安合約公開 API（無需金鑰）
 """
 
@@ -30,7 +30,7 @@ def calculate_liquidation_price(entry_price, side, leverage):
     else:
         return entry_price * (1 + 1/leverage)
 
-# -------------------- 公開數據獲取器（合約版，純同步 + 重試） --------------------
+# -------------------- 公開數據獲取器（合約版，純同步 + 重試 + 錯誤收集） --------------------
 class ContractDataFetcher:
     def __init__(self):
         self.kline_url = "https://fapi.binance.com/fapi/v1/klines"
@@ -38,11 +38,12 @@ class ContractDataFetcher:
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
-        self.timeout = 10
+        self.timeout = 15  # 延長超時
         self.retries = 3
+        self.errors = []   # 收集錯誤訊息
 
     def fetch_kline_sync(self, period):
-        """同步獲取單個週期K線，含重試"""
+        """同步獲取單個週期K線，含重試，返回 (df, error_msg)"""
         params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
         for attempt in range(self.retries):
             try:
@@ -58,37 +59,61 @@ class ContractDataFetcher:
                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                         for col in ['open', 'high', 'low', 'close', 'volume']:
                             df[col] = df[col].astype(float)
-                        return df
-                # 非200狀態碼，短暫等待後重試
-                time.sleep(1)
-            except Exception as e:
-                print(f"K線獲取失敗 {period} (嘗試 {attempt+1}/{self.retries}): {e}")
+                        return df, None
+                    else:
+                        err = f"{period}: API 返回非列表資料"
+                else:
+                    err = f"{period}: HTTP {resp.status_code}"
+                # 非成功狀態，等待後重試
                 time.sleep(2)
-        return None
+            except requests.exceptions.Timeout:
+                err = f"{period}: 請求超時"
+                time.sleep(2)
+            except requests.exceptions.ConnectionError:
+                err = f"{period}: 連線錯誤"
+                time.sleep(2)
+            except Exception as e:
+                err = f"{period}: {str(e)}"
+                time.sleep(2)
+        # 所有重試失敗
+        return None, err
 
     def fetch_mark_price_sync(self):
-        """獲取標記價格，含重試"""
+        """獲取標記價格，含重試，返回 (price, error_msg)"""
         params = {'symbol': self.symbol}
         for attempt in range(self.retries):
             try:
-                resp = requests.get(self.mark_price_url, params=params, timeout=5)
+                resp = requests.get(self.mark_price_url, params=params, timeout=10)
                 if resp.status_code == 200:
-                    return float(resp.json()['markPrice'])
-                time.sleep(1)
-            except Exception as e:
-                print(f"標記價格獲取失敗 (嘗試 {attempt+1}/{self.retries}): {e}")
+                    return float(resp.json()['markPrice']), None
+                else:
+                    err = f"標記價格: HTTP {resp.status_code}"
                 time.sleep(2)
-        return None
+            except requests.exceptions.Timeout:
+                err = "標記價格: 請求超時"
+                time.sleep(2)
+            except requests.exceptions.ConnectionError:
+                err = "標記價格: 連線錯誤"
+                time.sleep(2)
+            except Exception as e:
+                err = f"標記價格: {str(e)}"
+                time.sleep(2)
+        return None, err
 
     def fetch_all(self):
-        """同步獲取所有數據，返回 (data_dict, mark_price)"""
+        """同步獲取所有數據，返回 (data_dict, mark_price, error_list)"""
         data_dict = {}
+        error_list = []
         for p in self.periods:
-            df = self.fetch_kline_sync(p)
+            df, err = self.fetch_kline_sync(p)
             if df is not None:
                 data_dict[p] = df
-        mark_price = self.fetch_mark_price_sync()
-        return data_dict, mark_price
+            else:
+                error_list.append(err)
+        mark_price, mp_err = self.fetch_mark_price_sync()
+        if mp_err:
+            error_list.append(mp_err)
+        return data_dict, mark_price, error_list
 
 # -------------------- 指標計算 --------------------
 def add_indicators(df):
@@ -215,18 +240,16 @@ def send_signal_alert(direction, confidence, price, reason=""):
     except:
         pass
 
-# -------------------- 緩存數據獲取（純同步，含重試） --------------------
+# -------------------- 緩存數據獲取（含錯誤收集與顯示） --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
+    """獲取所有數據，並返回 (data_dict, mark_price, error_list)"""
     fetcher = ContractDataFetcher()
-    data_dict, mark_price = fetcher.fetch_all()
+    data_dict, mark_price, errors = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
             data_dict[p] = add_indicators(data_dict[p])
-        return data_dict, mark_price
-    else:
-        st.error("❌ 無法獲取合約數據，請檢查網路連線或稍後重試")
-        return {}, None
+    return data_dict, mark_price, errors
 
 # -------------------- Streamlit 介面 --------------------
 st.set_page_config(page_title="合約智能監控·100倍槓桿", layout="wide")
@@ -240,6 +263,7 @@ st.markdown("""
 .profit { color: #00F5A0; }
 .loss { color: #FF5555; }
 .warning { color: #FFA500; }
+.error-box { background: #3A1F1F; border-left: 6px solid #FF5555; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -268,8 +292,19 @@ with st.sidebar:
     sim_leverage = st.slider("槓桿倍數", 1, 100, 10)
     sim_quantity = st.number_input("數量 (ETH)", value=0.01, format="%.4f")
 
-# 獲取數據
-data_dict, mark_price = fetch_all_data()
+# 獲取數據（含錯誤）
+data_dict, mark_price, errors = fetch_all_data()
+
+# 顯示錯誤訊息（如果有）
+if errors:
+    with st.container():
+        st.markdown('<div class="error-box">', unsafe_allow_html=True)
+        st.error("⚠️ 部分數據獲取失敗，詳細錯誤：")
+        for err in errors[:5]:  # 最多顯示5條
+            st.write(f"- {err}")
+        if len(errors) > 5:
+            st.write(f"... 還有 {len(errors)-5} 條錯誤")
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # 計算訊號
 if data_dict:
@@ -332,7 +367,7 @@ with col2:
 
     # 模擬合約盈虧與強平分析
     if sim_entry > 0 and mark_price is not None and selected_period in data_dict:
-        current_price = mark_price  # 使用標記價格計算盈虧
+        current_price = mark_price
         if sim_side == "多單":
             pnl = (current_price - sim_entry) * sim_quantity
             pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100
