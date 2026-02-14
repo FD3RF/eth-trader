@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 全天候智能合約交易監控中心 · 終極完美版
-100倍槓桿 | 智能故障轉移 | 多週期融合 | AI信號 | 強平分析 | 微信提醒
-數據源：幣安公開API（自動切換合約/現貨鏡像節點，規避HTTP 451）
+🚀 全天候智能合約交易監控中心 · 終極多交易所版
+100倍槓桿 | 智能故障轉移（幣安/Bybit/OKX） | 多週期融合 | AI信號 | 強平分析 | 微信提醒
+數據源：幣安（合約+现货镜像）、Bybit、OKX 公開API，自動切換
 """
 
 import streamlit as st
@@ -20,78 +20,104 @@ warnings.filterwarnings('ignore')
 
 # -------------------- 強平價格計算（逐倉，簡化版） --------------------
 def calculate_liquidation_price(entry_price, side, leverage):
-    """
-    簡化逐倉強平價格計算（不計維持保證金率變化）
-    做多：強平價 = entry_price * (1 - 1/leverage)
-    做空：強平價 = entry_price * (1 + 1/leverage)
-    """
     if side == "long":
         return entry_price * (1 - 1/leverage)
     else:
         return entry_price * (1 + 1/leverage)
 
-# -------------------- 智能數據獲取器（多端點故障轉移） --------------------
-class SmartDataFetcher:
+# -------------------- 智能數據獲取器（多交易所故障轉移） --------------------
+class UltimateDataFetcher:
     def __init__(self):
-        # 合約端點（優先）
-        self.fapi_endpoints = [
-            "https://fapi.binance.com",
-            "https://fapi1.binance.com",
-            "https://fapi2.binance.com",
-            "https://fapi3.binance.com"
-        ]
-        # 現貨端點（備用）
-        self.api_endpoints = [
-            "https://api.binance.com",
-            "https://api1.binance.com",
-            "https://api2.binance.com",
-            "https://api3.binance.com"
-        ]
         self.symbol = "ETHUSDT"
         self.periods = ['1m', '5m', '15m', '1h', '4h', '1d']
         self.limit = 200
         self.timeout = 10
         self.retries = 2
-        self.current_source = "合約"  # 用於界面顯示
+        self.current_source = "未知"  # 用於界面顯示
 
-    def _try_endpoints(self, base_urls, path, params, is_mark_price=False):
-        """嘗試多個端點，返回 (response_json, success_endpoint)"""
-        for base in base_urls:
-            url = f"{base}{path}"
-            for attempt in range(self.retries):
-                try:
-                    resp = requests.get(url, params=params, timeout=self.timeout)
-                    if resp.status_code == 200:
-                        return resp.json(), base
-                    elif resp.status_code == 451:
-                        # 地區封鎖，直接跳過此端點
-                        break
-                    # 其他錯誤，短暫等待後重試
-                    time.sleep(1)
-                except Exception:
-                    time.sleep(1)
-            # 端點重試失敗，嘗試下一個
-        return None, None
+        # 定義交易所端點及對應的K線轉換函數
+        self.exchanges = [
+            {
+                'name': '幣安合約',
+                'priority': 1,
+                'url_template': "https://{host}/fapi/v1/klines",
+                'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
+                'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
+                'parser': self._parse_binance_kline
+            },
+            {
+                'name': '幣安現貨',
+                'priority': 2,
+                'url_template': "https://{host}/api/v3/klines",
+                'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
+                'params': {'symbol': self.symbol, 'interval': None, 'limit': self.limit},
+                'parser': self._parse_binance_kline
+            },
+            {
+                'name': 'Bybit',
+                'priority': 3,
+                'url_template': "https://api.bybit.com/v5/market/kline",
+                'hosts': ['api.bybit.com'],  # Bybit 無鏡像，直接使用
+                'params': {
+                    'category': 'linear',
+                    'symbol': self.symbol,
+                    'interval': None,
+                    'limit': self.limit
+                },
+                'parser': self._parse_bybit_kline
+            },
+            {
+                'name': 'OKX',
+                'priority': 4,
+                'url_template': "https://www.okx.com/api/v5/market/candles",
+                'hosts': ['www.okx.com'],
+                'params': {
+                    'instId': self.symbol + "-SWAP",  # 永續合約
+                    'bar': None,
+                    'limit': self.limit
+                },
+                'parser': self._parse_okx_kline
+            }
+        ]
 
-    def fetch_kline(self, period):
-        """獲取K線，優先合約，失敗則現貨"""
-        # 先嚐試合約
-        params = {'symbol': self.symbol, 'interval': period, 'limit': self.limit}
-        data, base = self._try_endpoints(self.fapi_endpoints, "/fapi/v1/klines", params)
-        if data is not None:
-            self.current_source = "合約"
-            return self._parse_kline(data), None
+        # 價格源端點（用於獲取當前價格/標記價格）
+        self.price_sources = [
+            {
+                'name': '幣安合約標記價',
+                'priority': 1,
+                'url_template': "https://{host}/fapi/v1/premiumIndex",
+                'hosts': ['fapi.binance.com', 'fapi1.binance.com', 'fapi2.binance.com', 'fapi3.binance.com'],
+                'params': {'symbol': self.symbol},
+                'parser': lambda data: float(data['markPrice'])
+            },
+            {
+                'name': '幣安現貨最新價',
+                'priority': 2,
+                'url_template': "https://{host}/api/v3/ticker/price",
+                'hosts': ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com'],
+                'params': {'symbol': self.symbol},
+                'parser': lambda data: float(data['price'])
+            },
+            {
+                'name': 'Bybit最新價',
+                'priority': 3,
+                'url_template': "https://api.bybit.com/v5/market/tickers",
+                'hosts': ['api.bybit.com'],
+                'params': {'category': 'linear', 'symbol': self.symbol},
+                'parser': lambda data: float(data['result']['list'][0]['markPrice'])
+            },
+            {
+                'name': 'OKX最新價',
+                'priority': 4,
+                'url_template': "https://www.okx.com/api/v5/market/ticker",
+                'hosts': ['www.okx.com'],
+                'params': {'instId': self.symbol + "-SWAP"},
+                'parser': lambda data: float(data['data'][0]['last'])
+            }
+        ]
 
-        # 合約失敗，嘗試現貨
-        data, base = self._try_endpoints(self.api_endpoints, "/api/v3/klines", params)
-        if data is not None:
-            self.current_source = "現貨"
-            return self._parse_kline(data), None
-
-        return None, "所有端點K線獲取失敗"
-
-    def _parse_kline(self, data):
-        """將原始K線數據轉為DataFrame"""
+    # ---------- K線解析函數 ----------
+    def _parse_binance_kline(self, data):
         df = pd.DataFrame(data, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_asset_volume', 'num_trades',
@@ -102,69 +128,128 @@ class SmartDataFetcher:
             df[col] = df[col].astype(float)
         return df
 
-    def fetch_mark_price(self):
-        """獲取標記價格（合約專用），若失敗則返回None"""
-        params = {'symbol': self.symbol}
-        data, base = self._try_endpoints(self.fapi_endpoints, "/fapi/v1/premiumIndex", params)
-        if data is not None:
-            return float(data['markPrice']), None
-        return None, "無法獲取標記價格（合約端點不可用）"
+    def _parse_bybit_kline(self, data):
+        # Bybit v5 kline 返回格式：{"result":{"list":[["1670601600000","17095","17100","17090","17095","100"]]}}
+        items = data['result']['list']
+        df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
-    def fetch_current_price(self):
-        """獲取當前價格（現貨最新價）作為備用"""
-        params = {'symbol': self.symbol}
-        data, base = self._try_endpoints(self.api_endpoints, "/api/v3/ticker/price", params)
-        if data is not None:
-            return float(data['price']), None
-        return None, "無法獲取現貨價格"
+    def _parse_okx_kline(self, data):
+        # OKX 返回：{"data":[["1597026383000","3.721","3.743","3.677","3.708","2425.11"]]}
+        items = data['data']
+        df = pd.DataFrame(items, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'volCcy', 'volCcyQuote', 'confirm'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
+    # ---------- 通用請求方法 ----------
+    def _try_fetch(self, source_list, period=None):
+        """
+        根據優先級嘗試多個源，返回 (成功數據, 源名稱, 錯誤列表)
+        period 為K線週期時，會替換params中的interval/bar
+        """
+        errors = []
+        for src in source_list:
+            for host in src['hosts']:
+                url = src['url_template'].format(host=host)
+                params = src['params'].copy()
+                # 替換週期參數
+                if period:
+                    if 'interval' in params:
+                        params['interval'] = period
+                    if 'bar' in params:
+                        # OKX 的 bar 格式：1m,5m,15m,1h,4h,1d
+                        params['bar'] = period
+                for attempt in range(self.retries):
+                    try:
+                        resp = requests.get(url, params=params, timeout=self.timeout)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            # 檢查交易所返回的業務狀態碼
+                            if src['name'].startswith('Bybit') and data.get('retCode') != 0:
+                                errors.append(f"{src['name']} 業務錯誤: {data.get('retMsg')}")
+                                break
+                            if src['name'].startswith('OKX') and data.get('code') != '0':
+                                errors.append(f"{src['name']} 業務錯誤: {data.get('msg')}")
+                                break
+                            # 解析數據
+                            try:
+                                df = src['parser'](data)
+                                if df is not None and not df.empty:
+                                    self.current_source = src['name']
+                                    return df, src['name'], errors
+                            except Exception as e:
+                                errors.append(f"{src['name']} 解析失敗: {e}")
+                                break
+                        elif resp.status_code == 451:
+                            errors.append(f"{src['name']} HTTP 451 (被封鎖)")
+                            break  # 地區封鎖，跳過此主機
+                        else:
+                            errors.append(f"{src['name']} HTTP {resp.status_code}")
+                    except requests.exceptions.Timeout:
+                        errors.append(f"{src['name']} 超時")
+                    except requests.exceptions.ConnectionError:
+                        errors.append(f"{src['name']} 連線錯誤")
+                    except Exception as e:
+                        errors.append(f"{src['name']} 異常: {e}")
+                    time.sleep(1)  # 重試間隔
+        return None, None, errors
+
+    def fetch_kline(self, period):
+        """獲取單個週期K線，返回 (df, source_name, errors)"""
+        # 將週期轉換為各交易所接受的格式
+        period_map = {
+            '1m': '1m', '5m': '5m', '15m': '15m',
+            '1h': '1h', '4h': '4h', '1d': '1d'
+        }
+        exch_period = period_map.get(period, period)
+        return self._try_fetch(self.exchanges, exch_period)
+
+    def fetch_price(self):
+        """獲取當前價格，返回 (price, source_name, errors)"""
+        result, source, errors = self._try_fetch(self.price_sources)
+        if result is not None:
+            return result, source, errors
+        return None, None, errors
 
     def fetch_all(self):
-        """獲取所有週期K線，並決定價格源"""
+        """獲取所有週期K線和當前價格"""
         data_dict = {}
-        errors = []
+        kline_errors = []
+        price_errors = []
         source_display = "未知"
 
-        # 獲取所有週期K線（使用同一個source）
-        first_period = True
+        # 獲取所有週期K線
         for p in self.periods:
-            df, err = self.fetch_kline(p)
+            df, src, errs = self.fetch_kline(p)
             if df is not None:
                 data_dict[p] = df
-                if first_period:
-                    source_display = self.current_source
-                    first_period = False
+                if source_display == "未知":
+                    source_display = src
+                kline_errors.extend(errs)
             else:
-                errors.append(f"{p}: {err}")
+                kline_errors.extend(errs)
 
-        # 獲取價格（優先標記價格，否則用現貨最新價）
-        price = None
-        price_source = ""
-        if data_dict:
-            # 嘗試獲取標記價格
-            mark, err = self.fetch_mark_price()
-            if mark is not None:
-                price = mark
-                price_source = "標記價格(合約)"
-            else:
-                # 備用：使用現貨最新價
-                spot_price, err2 = self.fetch_current_price()
-                if spot_price is not None:
-                    price = spot_price
-                    price_source = "現貨最新價"
-                else:
-                    # 最後備用：使用所選週期K線最新收盤價（此處用4h）
-                    if '4h' in data_dict:
-                        price = data_dict['4h']['close'].iloc[-1]
-                        price_source = "4h收盤價"
-                        errors.append("價格源使用K線收盤價（4h）")
-                    elif self.periods[-1] in data_dict:
-                        price = data_dict[self.periods[-1]]['close'].iloc[-1]
-                        price_source = f"{self.periods[-1]}收盤價"
-                        errors.append(f"價格源使用K線收盤價（{self.periods[-1]}）")
-                    else:
-                        errors.append("無法獲取任何價格")
+        # 獲取價格
+        price, price_source, price_errs = self.fetch_price()
+        price_errors.extend(price_errs)
 
-        return data_dict, price, price_source, errors, source_display
+        # 如果沒有價格，使用4h收盤價作為備用
+        if price is None and '4h' in data_dict:
+            price = data_dict['4h']['close'].iloc[-1]
+            price_source = "4h收盤價(備用)"
+        elif price is None and data_dict:
+            # 使用第一個週期收盤價
+            first_period = next(iter(data_dict))
+            price = data_dict[first_period]['close'].iloc[-1]
+            price_source = f"{first_period}收盤價(備用)"
+
+        all_errors = kline_errors + price_errors
+        return data_dict, price, price_source, all_errors, source_display
 
 # -------------------- 指標計算 --------------------
 def add_indicators(df):
@@ -215,21 +300,18 @@ class MultiPeriodFusion:
     def get_period_signal(self, df):
         last = df.iloc[-1]
         signals = {}
-        # 趨勢
         if last['ma20'] > last['ma60']:
             signals['trend'] = 1
         elif last['ma20'] < last['ma60']:
             signals['trend'] = -1
         else:
             signals['trend'] = 0
-        # 震盪
         if last['rsi'] < 30:
             signals['oscillator'] = 1
         elif last['rsi'] > 70:
             signals['oscillator'] = -1
         else:
             signals['oscillator'] = 0
-        # 成交量
         if last['volume_ratio'] > 1.2 and last['close'] > last['open']:
             signals['volume'] = 1
         elif last['volume_ratio'] > 1.2 and last['close'] < last['open']:
@@ -294,7 +376,7 @@ def send_signal_alert(direction, confidence, price, reason=""):
 # -------------------- 緩存數據獲取（智能故障轉移） --------------------
 @st.cache_data(ttl=60)
 def fetch_all_data():
-    fetcher = SmartDataFetcher()
+    fetcher = UltimateDataFetcher()
     data_dict, price, price_source, errors, source_display = fetcher.fetch_all()
     if data_dict:
         for p in data_dict:
@@ -318,8 +400,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合約智能監控中心 · 終極完美版")
-st.caption("數據源：智能切換（合約/現貨）｜多週期｜AI預測｜強平分析｜微信提醒")
+st.title("🧠 合約智能監控中心 · 終極多交易所版")
+st.caption("數據源：幣安/Bybit/OKX 自動切換｜多週期｜AI預測｜強平分析｜微信提醒")
 
 # 初始化
 if 'ai' not in st.session_state:
@@ -384,13 +466,10 @@ with col1:
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.7, 0.3],
                             subplot_titles=(f"ETHUSDT {selected_period}", "RSI"))
-        # K線
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                       low=df['low'], close=df['close'], name="K線"), row=1, col=1)
-        # 均線
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma20'], name="MA20", line=dict(color="orange")), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ma60'], name="MA60", line=dict(color="blue")), row=1, col=1)
-        # 融合信號箭頭
         if fusion_dir != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -400,7 +479,6 @@ with col1:
             else:
                 fig.add_annotation(x=last_date, y=last_price * 0.98,
                                    text="▼ 融合空", showarrow=True, arrowhead=2, arrowcolor="red")
-        # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple")), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
@@ -414,13 +492,11 @@ with col2:
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 觀望"}
     st.markdown(f'<div class="ai-box">{dir_map[fusion_dir]}<br>置信度: {fusion_conf:.1%}</div>', unsafe_allow_html=True)
 
-    # 價格顯示
     if current_price is not None:
         st.metric("當前價格", f"${current_price:.2f}", delta_color="off")
     else:
         st.metric("當前價格", "獲取中...")
 
-    # 模擬合約盈虧與強平分析
     if sim_entry > 0 and current_price is not None and selected_period in data_dict:
         if sim_side == "多單":
             pnl = (current_price - sim_entry) * sim_quantity
@@ -445,7 +521,6 @@ with col2:
         </div>
         """, unsafe_allow_html=True)
 
-        # 強平警告
         if (sim_side == "多單" and current_price <= liq_price) or (sim_side == "空單" and current_price >= liq_price):
             st.error("🚨 強平風險！當前價格已觸及強平線")
         elif distance_to_liq < 5:
