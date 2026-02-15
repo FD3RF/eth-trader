@@ -22,16 +22,16 @@ import os
 
 warnings.filterwarnings('ignore')
 
-# ==================== 全局配置 ====================
+# ==================== 全局配置（统一使用浮点数）====================
 SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
 RISK_PCT = 0.01                     # 单笔风险 1%
-MAX_LEVERAGE = 20                   # 最大杠杆限制
+MAX_LEVERAGE = 20.0                 # 最大杠杆限制
 STOP_ATR = 1.5                      # 止损倍数
 TAKE_ATR = 3.0                      # 止盈倍数
 CONSECUTIVE_LOSS_LIMIT = 3          # 连亏刹车阈值
 CONSECUTIVE_STOP_HOURS = 24         # 连亏暂停小时数
-MAX_DRAWDOWN = 20                    # 最大回撤警戒线（%）
-DAILY_LOSS_LIMIT = 300               # 日亏损限额（USDT）
+MAX_DRAWDOWN = 20.0                  # 最大回撤警戒线（%）
+DAILY_LOSS_LIMIT = 300.0             # 日亏损限额（USDT）
 
 # ==================== 免费数据获取器（支持多币种）====================
 class FreeDataFetcherV5:
@@ -139,7 +139,7 @@ class FreeDataFetcherV5:
 def evaluate_market(df_dict):
     """判断市场状态：趋势/震荡/禁止交易"""
     if '15m' not in df_dict:
-        return "禁止交易", 0, 0
+        return "禁止交易", 0.0, 0.0
     df = df_dict['15m']
     last = df.iloc[-1]
     
@@ -149,8 +149,6 @@ def evaluate_market(df_dict):
     atr_pct = last['atr_pct']
     
     # 异常波动检测
-    high = last['high']
-    low = last['low']
     body = abs(last['close'] - last['open'])
     if body > 3 * last['atr']:
         return "禁止交易", atr_pct, adx
@@ -227,7 +225,7 @@ def calculate_position_size(balance, entry_price, stop_price, risk_pct=RISK_PCT,
     risk_amount = balance * risk_pct
     stop_distance = abs(entry_price - stop_price)
     if stop_distance == 0:
-        return 0
+        return 0.0
     # 理论仓位价值
     position_value = risk_amount / stop_distance * entry_price
     # 根据杠杆限制
@@ -260,7 +258,7 @@ class SurvivalProtection:
         # 更新回撤
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
-        drawdown = (self.peak_balance - current_balance) / self.peak_balance * 100
+        drawdown = (self.peak_balance - current_balance) / self.peak_balance * 100.0
         
         # 模式切换冷却
         if self.last_mode is not None and current_mode != self.last_mode:
@@ -298,13 +296,13 @@ class SurvivalProtection:
 # ==================== 强平价格计算 ====================
 def calculate_liquidation_price(entry_price, side, leverage):
     if side == "多单":
-        return entry_price * (1 - 1/leverage)
+        return entry_price * (1 - 1.0/leverage)
     else:
-        return entry_price * (1 + 1/leverage)
+        return entry_price * (1 + 1.0/leverage)
 
 
 # ==================== 简易回测模块 ====================
-def run_backtest(df_dict, mode_func, signal_func, initial_balance=10000, lookback_days=30):
+def run_backtest(df_dict, mode_func, signal_func, initial_balance=10000.0, lookback_days=30):
     """
     简单回测：根据历史K线模拟交易
     返回：胜率、总收益、最大回撤、盈亏比、交易次数
@@ -318,24 +316,22 @@ def run_backtest(df_dict, mode_func, signal_func, initial_balance=10000, lookbac
     trades = 0
     wins = 0
     losses = 0
-    total_profit = 0
-    total_loss = 0
-    max_drawdown = 0
+    total_profit = 0.0
+    total_loss = 0.0
+    max_drawdown = 0.0
     
     position = None
-    entry_price = 0
+    entry_price = 0.0
     entry_side = None
     
     for i in range(len(df)):
         row = df.iloc[i]
         # 构造一个临时的data_dict供环境判断（只有当前周期）
-        temp_dict = {'15m': df.iloc[:i+1]}  # 使用截止当前的数据
+        temp_dict = {'15m': df.iloc[:i+1]}
         
         mode, _, _ = mode_func(temp_dict)  # 市场环境
         signal = signal_func(temp_dict, mode)  # 入场信号
         
-        # 异常波动过滤（在mode_func中已经处理，但这里也需检查当前K线是否有异常）
-        # 这里简化，直接使用mode_func的禁止交易状态
         if mode == "禁止交易":
             continue
         
@@ -354,9 +350,9 @@ def run_backtest(df_dict, mode_func, signal_func, initial_balance=10000, lookbac
             if (position == 'long' and signal <= 0) or (position == 'short' and signal >= 0):
                 exit_price = row['close']
                 if position == 'long':
-                    pnl = (exit_price - entry_price) / entry_price * 100
+                    pnl = (exit_price - entry_price) / entry_price * 100.0
                 else:
-                    pnl = (entry_price - exit_price) / entry_price * 100
+                    pnl = (entry_price - exit_price) / entry_price * 100.0
                 trades += 1
                 if pnl > 0:
                     wins += 1
@@ -364,25 +360,21 @@ def run_backtest(df_dict, mode_func, signal_func, initial_balance=10000, lookbac
                 else:
                     losses += 1
                     total_loss += abs(pnl)
-                balance *= (1 + pnl/100)
+                balance *= (1.0 + pnl/100.0)
                 if balance > peak:
                     peak = balance
                 else:
-                    dd = (peak - balance) / peak * 100
+                    dd = (peak - balance) / peak * 100.0
                     if dd > max_drawdown:
                         max_drawdown = dd
                 position = None
         
-        # 更新峰值
         if balance > peak:
             peak = balance
     
-    # 计算指标
-    win_rate = wins / trades if trades > 0 else 0
-    total_return = (balance - initial_balance) / initial_balance * 100
-    avg_win = total_profit / wins if wins > 0 else 0
-    avg_loss = total_loss / losses if losses > 0 else 0
-    profit_factor = total_profit / total_loss if total_loss > 0 else 0
+    win_rate = wins / trades if trades > 0 else 0.0
+    total_return = (balance - initial_balance) / initial_balance * 100.0
+    profit_factor = total_profit / total_loss if total_loss > 0 else 0.0
     
     return {
         '胜率': f"{win_rate*100:.1f}%",
@@ -438,7 +430,7 @@ def update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leve
     current_balance = st.session_state.account_balance + st.session_state.daily_pnl
     if current_balance > st.session_state.peak_balance:
         st.session_state.peak_balance = current_balance
-    drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100
+    drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100.0
     return drawdown
 
 
@@ -476,27 +468,27 @@ with st.sidebar:
     selected_symbol = st.selectbox("主交易对", SYMBOLS, index=0, key="selected_symbol")
     main_period = st.selectbox("主图周期", ["15m", "1h", "4h", "1d"], index=0)
     auto_refresh = st.checkbox("开启自动刷新", value=True)
-    refresh_interval = st.number_input("刷新间隔(秒)", 5, 60, 10, disabled=not auto_refresh)
+    refresh_interval = st.number_input("刷新间隔(秒)", min_value=5, max_value=60, value=10, step=1, disabled=not auto_refresh)
     if auto_refresh:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
     
     st.markdown("---")
     st.subheader("📈 模拟合约")
-    sim_entry = st.number_input("开仓价", value=0.0, format="%.2f")
+    sim_entry = st.number_input("开仓价", value=0.0, format="%.2f", step=0.01)
     sim_side = st.selectbox("方向", ["多单", "空单"])
-    sim_leverage = st.slider("杠杆倍数", 1, 100, 10)
-    sim_quantity = st.number_input("数量", value=0.01, format="%.4f")
+    sim_leverage = st.slider("杠杆倍数", min_value=1.0, max_value=100.0, value=10.0, step=1.0)
+    sim_quantity = st.number_input("数量", value=0.01, format="%.4f", step=0.001)
     
     st.markdown("---")
     st.subheader("💰 风控设置")
     account_balance = st.number_input("初始资金 (USDT)", value=st.session_state.account_balance, step=1000.0, format="%.2f")
     daily_loss_limit = st.number_input("日亏损限额 (USDT)", value=DAILY_LOSS_LIMIT, step=50.0, format="%.2f")
-    risk_per_trade = st.slider("单笔风险 (%)", 0.5, 3.0, RISK_PCT*100, 0.5) / 100
+    risk_per_trade = st.slider("单笔风险 (%)", min_value=0.5, max_value=3.0, value=RISK_PCT*100, step=0.5) / 100.0
     st.session_state.account_balance = account_balance
     
     st.markdown("---")
     st.subheader("📊 简易回测")
-    backtest_days = st.slider("回测天数", 7, 90, 30)
+    backtest_days = st.slider("回测天数", min_value=7, max_value=90, value=30, step=1)
     if st.button("运行回测"):
         with st.spinner("回测中..."):
             fetcher = FreeDataFetcherV5(symbols=[selected_symbol])
@@ -538,7 +530,6 @@ for i, sym in enumerate(SYMBOLS):
         signal = generate_entry_signal(df_dict, mode)
         all_modes[sym] = mode
         all_signals[sym] = signal
-        # 用信号方向作为总分简易表示（1多/-1空/0观望）
         score_display = {1: "多", -1: "空", 0: "观"}[signal]
         color = {1: "🟢", -1: "🔴", 0: "⚪"}[signal]
         with cols[i]:
@@ -562,12 +553,13 @@ market_mode, atr_pct, adx = evaluate_market(data_dict)
 entry_signal = generate_entry_signal(data_dict, market_mode)
 
 # 计算ATR值
-atr_value = 0
+atr_value = 0.0
 if '15m' in data_dict:
     atr_value = data_dict['15m']['atr'].iloc[-1]
 
 # 生成交易计划（如果有信号）
 stop_loss = take_profit = risk_reward = None
+position_size = 0.0
 if entry_signal != 0 and atr_value > 0:
     stop_loss, take_profit, risk_reward = calculate_stops(current_price, entry_signal, atr_value)
     # 计算仓位
@@ -578,8 +570,6 @@ if entry_signal != 0 and atr_value > 0:
         risk_pct=risk_per_trade,
         max_leverage=MAX_LEVERAGE
     )
-else:
-    position_size = 0
 
 # 更新风控统计
 drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage)
@@ -588,7 +578,7 @@ drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, s
 protection = st.session_state.protection
 now = datetime.now()
 # 模拟上次交易结果（这里假设自动交易会更新，暂时设为0）
-trade_result = 0  # 后续自动交易会更新
+trade_result = 0.0
 paused, drawdown_protect = protection.update(trade_result, 
                                               st.session_state.account_balance + st.session_state.daily_pnl,
                                               market_mode, now, st.session_state.daily_pnl)
@@ -622,7 +612,6 @@ with col_left:
     st.markdown(f"<h5>市场状态: <span style='color:green;'>{market_mode}</span> | ADX: {adx:.1f} | ATR%: {atr_pct:.2f}%</h5>", unsafe_allow_html=True)
     
     # 简化五层热力图（展示各层得分）
-    # 此处为了简洁，我们用市场环境中的指标替代
     layer_scores = {
         "趋势": 30 if market_mode == "趋势" else 0,
         "震荡": 30 if market_mode == "震荡" else 0,
@@ -714,18 +703,18 @@ with col_right:
     if sim_entry > 0 and current_price:
         if sim_side == "多单":
             pnl = (current_price - sim_entry) * sim_quantity * sim_leverage
-            pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100
+            pnl_pct = (current_price - sim_entry) / sim_entry * sim_leverage * 100.0
             liq_price = calculate_liquidation_price(sim_entry, "多单", sim_leverage)
         else:
             pnl = (sim_entry - current_price) * sim_quantity * sim_leverage
-            pnl_pct = (sim_entry - current_price) / sim_entry * sim_leverage * 100
+            pnl_pct = (sim_entry - current_price) / sim_entry * sim_leverage * 100.0
             liq_price = calculate_liquidation_price(sim_entry, "空单", sim_leverage)
         color_class = "profit" if pnl >= 0 else "loss"
-        distance = abs(current_price - liq_price) / current_price * 100
+        distance = abs(current_price - liq_price) / current_price * 100.0
         st.markdown(f"""
         <div class="metric">
             <h4>模拟持仓</h4>
-            <p>{sim_side} | {sim_leverage}x</p>
+            <p>{sim_side} | {sim_leverage:.1f}x</p>
             <p>开仓: ${sim_entry:.2f}</p>
             <p class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
             <p>强平价: <span class="warning">${liq_price:.2f}</span> (距 {distance:.1f}%)</p>
@@ -759,10 +748,8 @@ with col_right:
         else:
             # 检查是否应该平仓（反向信号或止损止盈触发）
             pos = st.session_state.auto_position
-            if (pos['side'] == 'long' and current_price <= pos['stop']) or \
-               (pos['side'] == 'long' and current_price >= pos['take']) or \
-               (pos['side'] == 'short' and current_price >= pos['stop']) or \
-               (pos['side'] == 'short' and current_price <= pos['take']) or \
+            if (pos['side'] == 'long' and (current_price <= pos['stop'] or current_price >= pos['take'])) or \
+               (pos['side'] == 'short' and (current_price >= pos['stop'] or current_price <= pos['take'])) or \
                (entry_signal == -1 and pos['side'] == 'long') or \
                (entry_signal == 1 and pos['side'] == 'short'):
                 # 平仓
@@ -770,7 +757,7 @@ with col_right:
                     pnl = (current_price - pos['entry']) * pos['leverage']
                 else:
                     pnl = (pos['entry'] - current_price) * pos['leverage']
-                pnl_pct = pnl / pos['entry'] * 100
+                pnl_pct = pnl / pos['entry'] * 100.0
                 # 更新保护层（传入交易结果）
                 protection.update(pnl, st.session_state.account_balance + st.session_state.daily_pnl,
                                    market_mode, now, st.session_state.daily_pnl)
@@ -792,15 +779,15 @@ with col_right:
     # 显示当前自动持仓
     if st.session_state.auto_position:
         pos = st.session_state.auto_position
-        pnl = (current_price - pos['entry']) * (1 if pos['side']=='long' else -1) * pos['leverage']
-        pnl_pct = (current_price - pos['entry']) / pos['entry'] * pos['leverage'] * 100 * (1 if pos['side']=='long' else -1)
+        pnl = (current_price - pos['entry']) * (1.0 if pos['side']=='long' else -1.0) * pos['leverage']
+        pnl_pct = (current_price - pos['entry']) / pos['entry'] * pos['leverage'] * 100.0 * (1.0 if pos['side']=='long' else -1.0)
         liq_price = calculate_liquidation_price(pos['entry'], "多单" if pos['side']=='long' else "空单", pos['leverage'])
-        distance = abs(current_price - liq_price) / current_price * 100
+        distance = abs(current_price - liq_price) / current_price * 100.0
         color_class = "profit" if pnl >= 0 else "loss"
         st.markdown(f"""
         <div class="metric">
             <h4>自动模拟持仓</h4>
-            <p>方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']}x</p>
+            <p>方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']:.1f}x</p>
             <p>开仓: ${pos['entry']:.2f} ({pos['time'].strftime('%H:%M')})</p>
             <p class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
             <p>强平价: <span class="warning">${liq_price:.2f}</span> (距 {distance:.1f}%)</p>
@@ -811,7 +798,7 @@ with col_right:
                 pnl = (current_price - pos['entry']) * pos['leverage']
             else:
                 pnl = (pos['entry'] - current_price) * pos['leverage']
-            pnl_pct = pnl / pos['entry'] * 100
+            pnl_pct = pnl / pos['entry'] * 100.0
             protection.update(pnl, st.session_state.account_balance + st.session_state.daily_pnl,
                               market_mode, now, st.session_state.daily_pnl)
             st.session_state.trade_log.append({
@@ -842,8 +829,6 @@ with col_right:
             st.info("暂无交易记录")
 
     # 历史信号记录
-    if 'signal_history' not in st.session_state:
-        st.session_state.signal_history = []
     if entry_signal != 0:
         current_dir = "多" if entry_signal == 1 else "空"
         if not st.session_state.signal_history or st.session_state.signal_history[-1]['方向'] != current_dir:
