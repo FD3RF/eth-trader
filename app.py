@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极神级版（MEXC数据源）
-五层共振 | 动态概率评分 | 双模式切换 | 全免费数据源 | 半自动交易
-数据源：MEXC + Alternative.me + 模拟链上
+🚀 合约智能监控中心 · 终极神级版（多币种+信号阈值+历史记录）
+五层共振 + AI决策 + 全免费数据源 + 动态风控 + 多币种支持
 """
 
 import streamlit as st
@@ -17,26 +16,22 @@ from datetime import datetime, timedelta
 import time
 from streamlit_autorefresh import st_autorefresh
 import warnings
-warnings.filterwarnings('ignore')
 import joblib
 import os
 
-# ==================== 配置 ====================
-SYMBOLS = {
-    "ETH/USDT": {"base": "ETH", "mexc": "ETHUSDT"},
-    "BTC/USDT": {"base": "BTC", "mexc": "BTCUSDT"},
-    "SOL/USDT": {"base": "SOL", "mexc": "SOLUSDT"},
-    "BNB/USDT": {"base": "BNB", "mexc": "BNBUSDT"}
-}
+warnings.filterwarnings('ignore')
 
-# ==================== 免费数据源获取（MEXC）====================
+# ==================== 配置 ====================
+SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]  # 支持的交易对
+
+# ==================== 免费数据获取器（支持多币种）====================
 class FreeDataFetcherV5:
-    """完全免费的数据获取器，使用MEXC（在中国大陆可用）"""
+    """支持多币种的免费数据获取器"""
     
-    def __init__(self, symbol="ETH/USDT"):
-        self.symbol = symbol
-        self.base = SYMBOLS[symbol]["base"]
-        self.mexc_symbol = SYMBOLS[symbol]["mexc"]
+    def __init__(self, symbols=None):
+        if symbols is None:
+            symbols = SYMBOLS
+        self.symbols = symbols
         self.periods = ['15m', '1h', '4h', '1d']
         self.limit = 500
         self.timeout = 10
@@ -53,21 +48,20 @@ class FreeDataFetcherV5:
         # 模拟链上数据（标注模拟）
         self.chain_netflow = 5234
         self.chain_whale = 128
-        
-    def fetch_kline(self, timeframe):
-        """从MEXC获取K线"""
+    
+    def fetch_kline(self, symbol, timeframe):
+        """获取单个币种K线"""
         try:
-            # MEXC的K线接口支持标准周期格式
-            ohlcv = self.exchange.fetch_ohlcv(self.mexc_symbol, timeframe, limit=self.limit)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=self.limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = df[col].astype(float)
             return df, "MEXC"
         except Exception as e:
-            st.warning(f"MEXC {timeframe} 获取失败: {e}")
+            st.warning(f"{symbol} {timeframe} 获取失败: {e}")
             return None, None
-
+    
     def fetch_fear_greed(self):
         """获取恐惧贪婪指数"""
         try:
@@ -78,50 +72,33 @@ class FreeDataFetcherV5:
         except:
             pass
         return 50
-
+    
     def fetch_all(self):
-        """获取所有数据"""
-        data_dict = {}
-        price_sources = []
-        errors = []
-
-        for period in self.periods:
-            df, src = self.fetch_kline(period)
-            if df is not None:
-                data_dict[period] = self._add_indicators(df)
-                price_sources.append(src)
-            else:
-                errors.append(f"{period} 获取失败")
-
-        # 如果没有任何数据，返回空字典
-        if not data_dict:
-            return {
-                "data_dict": {},
-                "current_price": None,
-                "source_display": "无",
-                "errors": errors,
-                "fear_greed": 50,
-                "chain_netflow": self.chain_netflow,
-                "chain_whale": self.chain_whale
-            }
-
-        # 当前价格（取15m最新）
-        current_price = data_dict['15m']['close'].iloc[-1] if '15m' in data_dict else None
-
+        """获取所有币种所有周期的数据"""
+        all_data = {}
         fear_greed = self.fetch_fear_greed()
-
-        source_display = price_sources[0] if price_sources else "无"
-
-        return {
-            "data_dict": data_dict,
-            "current_price": current_price,
-            "source_display": source_display,
-            "errors": errors,
-            "fear_greed": fear_greed,
-            "chain_netflow": self.chain_netflow,
-            "chain_whale": self.chain_whale
-        }
-
+        
+        for symbol in self.symbols:
+            data_dict = {}
+            price_sources = []
+            for period in self.periods:
+                df, src = self.fetch_kline(symbol, period)
+                if df is not None:
+                    data_dict[period] = self._add_indicators(df)
+                    price_sources.append(src)
+            
+            if data_dict:
+                all_data[symbol] = {
+                    "data_dict": data_dict,
+                    "current_price": data_dict['15m']['close'].iloc[-1] if '15m' in data_dict else None,
+                    "source": price_sources[0] if price_sources else "MEXC",
+                    "fear_greed": fear_greed,
+                    "chain_netflow": self.chain_netflow,
+                    "chain_whale": self.chain_whale,
+                }
+        
+        return all_data
+    
     def _add_indicators(self, df):
         """添加技术指标"""
         df = df.copy()
@@ -181,7 +158,7 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
         multi_score = 15
         multi_dir = 1
 
-    # 3. 资金面层（无真实资金费率时暂用模拟，此处先默认0分）
+    # 3. 资金面层（无真实数据，暂用模拟）
     fund_score = 0
     fund_dir = 0
 
@@ -300,8 +277,6 @@ def detect_market_mode(df_dict):
 
 # ==================== 实时热力图 ====================
 def create_heatmap_data(layer_scores, direction):
-    if not layer_scores:
-        return pd.DataFrame()
     layers = list(layer_scores.keys())
     scores = list(layer_scores.values())
     dir_icons = []
@@ -375,8 +350,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极神级版（MEXC数据源）")
-st.caption("五层共振 + AI决策 + 全免费数据源 + 动态风控")
+st.title("🧠 合约智能监控中心 · 终极神级版（多币种+可调阈值）")
+st.caption("五层共振 + AI决策 + 多币种对比 + 动态风控 + 历史信号")
 
 # 初始化
 init_risk_state()
@@ -385,18 +360,24 @@ ai_model = load_ai_model()
 # 侧边栏
 with st.sidebar:
     st.header("⚙️ 控制面板")
-    symbol = st.selectbox("交易对", list(SYMBOLS.keys()), index=0)
+    
+    # 币种选择
+    selected_symbol = st.selectbox("主交易对", SYMBOLS, index=0, key="selected_symbol")
+    
     main_period = st.selectbox("主图周期", ["15m", "1h", "4h", "1d"], index=0)
+    
     auto_refresh = st.checkbox("开启自动刷新", value=True)
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 60, 10, disabled=not auto_refresh)
     if auto_refresh:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
+    
     st.markdown("---")
     st.subheader("📈 模拟合约")
     sim_entry = st.number_input("开仓价", value=0.0, format="%.2f")
     sim_side = st.selectbox("方向", ["多单", "空单"])
     sim_leverage = st.slider("杠杆倍数", 1, 100, 10)
     sim_quantity = st.number_input("数量", value=0.01, format="%.4f")
+    
     st.markdown("---")
     st.subheader("💰 风控设置")
     account_balance = st.number_input("初始资金 (USDT)", value=st.session_state.account_balance, step=1000.0, format="%.2f")
@@ -404,43 +385,46 @@ with st.sidebar:
     risk_per_trade = st.slider("单笔风险 (%)", 0.5, 3.0, 2.0, 0.5)
     st.session_state.account_balance = account_balance
     st.session_state.daily_loss_limit = daily_loss_limit
+    
+    # ========== 信号阈值设置 ==========
+    st.markdown("---")
+    st.subheader("🎛️ 信号阈值")
+    long_threshold = st.slider("做多信号阈值 (总分)", 50, 95, 80, key="long_threshold")
+    short_threshold = st.slider("做空信号阈值 (总分)", 5, 50, 20, key="short_threshold")
 
 # 获取数据
 with st.spinner("获取全市场数据..."):
-    fetcher = FreeDataFetcherV5(symbol)
-    data = fetcher.fetch_all()
+    fetcher = FreeDataFetcherV5(symbols=SYMBOLS)
+    all_data = fetcher.fetch_all()
 
+# 计算所有币种的五层共振分数
+all_scores = {}
+for sym, data in all_data.items():
+    data_dict = data["data_dict"]
+    fear_greed = data["fear_greed"]
+    chain_netflow = data["chain_netflow"]
+    chain_whale = data["chain_whale"]
+    final_dir, total_score, layer_scores = five_layer_score(data_dict, fear_greed, chain_netflow, chain_whale)
+    all_scores[sym] = total_score
+st.session_state.all_scores = all_scores
+
+# 当前选中的币种数据
+if selected_symbol not in all_data:
+    selected_symbol = SYMBOLS[0]
+data = all_data[selected_symbol]
 data_dict = data["data_dict"]
 current_price = data["current_price"]
-source_display = data["source_display"]
 fear_greed = data["fear_greed"]
+source_display = data["source"]
 chain_netflow = data["chain_netflow"]
 chain_whale = data["chain_whale"]
-errors = data["errors"]
 
-# 显示数据源状态
-if source_display != "无":
-    st.markdown(f"""
-    <div class="info-box">
-        ✅ 价格源：{source_display} | 恐惧贪婪：{fear_greed} | AI模型：{'已加载' if ai_model else '未加载(使用模拟)'}
-        <br>⚠️ 链上数据为模拟值（可替换为Dune免费API）
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    st.error("无法获取任何数据，请检查网络或稍后重试")
-
-if errors:
-    with st.expander("查看数据获取错误"):
-        for e in errors:
-            st.write(e)
-
-# 计算五层共振（如果数据为空，则返回默认值）
-final_dir, total_score, layer_scores = five_layer_score(
-    data_dict, fear_greed, chain_netflow, chain_whale
-)
+# 计算当前币种的五层共振
+final_dir, total_score, layer_scores = five_layer_score(data_dict, fear_greed, chain_netflow, chain_whale)
+st.session_state.total_score = total_score   # 用于下单按钮
 
 # 检测市场模式
-market_mode = detect_market_mode(data_dict) if data_dict else "未知"
+market_mode = detect_market_mode(data_dict)
 
 # 计算ATR%和ADX
 atr_pct = 0
@@ -452,7 +436,7 @@ if '15m' in data_dict:
 # 计算预期胜率（基于五层）
 win_prob = calculate_win_probability(total_score, layer_scores, atr_pct, adx)
 
-# AI预测（使用正确的7个特征）
+# AI预测
 ai_prob = 50
 if ai_model and '15m' in data_dict:
     try:
@@ -491,43 +475,55 @@ drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, s
 # 创建热力图
 heatmap_df = create_heatmap_data(layer_scores, final_dir)
 
+# ========== 显示数据源状态 ==========
+if source_display != "无":
+    st.markdown(f"""
+    <div class="info-box">
+        ✅ 价格源：{source_display} | 恐惧贪婪：{fear_greed} | AI模型：{'已加载' if ai_model else '未加载(使用模拟)'}
+        <br>⚠️ 链上数据为模拟值（可替换为Dune免费API）
+    </div>
+    """, unsafe_allow_html=True)
+
+# ========== 最佳品种提示 ==========
+if all_scores:
+    best_symbol = max(all_scores, key=all_scores.get)
+    best_score = all_scores[best_symbol]
+    st.info(f"🔥 当前最佳机会：**{best_symbol}**（总分 {best_score}）")
+
 # 主布局
 col_left, col_right = st.columns([2.2, 1.3])
 
 with col_left:
     # 市场状态
-    if data_dict and market_mode != "未知":
+    if data_dict:
         state_color = "green" if market_mode == "趋势" else "orange"
         st.markdown(f"<h5>市场状态: <span style='color:{state_color};'>{market_mode}</span></h5>", unsafe_allow_html=True)
 
     # 五层共振热力图
     st.subheader("🔥 五层共振热力图")
-    if not heatmap_df.empty:
-        cols = st.columns(5)
-        layer_names = list(layer_scores.keys())
-        layer_values = list(layer_scores.values())
-        colors = ['#00F5A0', '#00F5A0', '#FFAA00', '#FF5555', '#FFAA00']
-        for i, col in enumerate(cols):
-            with col:
-                val = layer_values[i]
-                bg_color = colors[i] if val > 10 else '#555'
-                st.markdown(f"""
-                <div style="background:{bg_color}22; border-left:4px solid {bg_color}; padding:10px; border-radius:5px; text-align:center;">
-                    <h4>{layer_names[i]}</h4>
-                    <h2>{val}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-    else:
-        st.info("暂无共振数据")
+    cols = st.columns(5)
+    layer_names = list(layer_scores.keys())
+    layer_values = list(layer_scores.values())
+    colors = ['#00F5A0', '#00F5A0', '#FFAA00', '#FF5555', '#FFAA00']
+    for i, col in enumerate(cols):
+        with col:
+            val = layer_values[i]
+            bg_color = colors[i] if val > 10 else '#555'
+            st.markdown(f"""
+            <div style="background:{bg_color}22; border-left:4px solid {bg_color}; padding:10px; border-radius:5px; text-align:center;">
+                <h4>{layer_names[i]}</h4>
+                <h2>{val}</h2>
+            </div>
+            """, unsafe_allow_html=True)
 
     # K线图
-    st.subheader(f"📊 {symbol} K线 ({main_period})")
+    st.subheader(f"📊 {selected_symbol} K线 ({main_period})")
     if main_period in data_dict:
         df = data_dict[main_period].tail(100).copy()
         df['日期'] = df['timestamp']
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                            row_heights=[0.7, 0.3],
-                           subplot_titles=(f"{symbol} {main_period}", "RSI"))
+                           subplot_titles=(f"{selected_symbol} {main_period}", "RSI"))
         # K线
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                      low=df['low'], close=df['close'], name="K线"), row=1, col=1)
@@ -565,12 +561,9 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
 
-    if current_price:
-        st.metric("当前价格", f"${current_price:.2f}")
-    else:
-        st.metric("当前价格", "N/A")
+    st.metric("当前价格", f"${current_price:.2f}" if current_price else "N/A")
 
-    # 风险仪表盘
+    # ========== 风险仪表盘 ==========
     with st.container():
         st.markdown('<div class="dashboard">', unsafe_allow_html=True)
         st.markdown("#### 📊 风险仪表盘")
@@ -581,21 +574,26 @@ with col_right:
         with col_r2:
             st.metric("当前回撤", f"{drawdown:.2f}%")
             st.metric("日亏损剩余", f"${st.session_state.daily_loss_limit + st.session_state.daily_pnl:.2f}")
+        
+        # 大号显示建议杠杆
+        if suggested_leverage > 0:
+            st.markdown(f"<h3 style='color:#00F5A0; text-align:center;'>建议杠杆：{suggested_leverage:.1f}x</h3>", unsafe_allow_html=True)
+        
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 资金面快照（暂无真实数据）
+    # ========== 资金面快照 ==========
     with st.expander("💰 资金面快照", expanded=True):
         st.write("资金费率: **暂缺（模拟）**")
         st.write("OI变化: **暂缺（模拟）**")
         st.write("多空比: **暂缺（模拟）**")
 
-    # 链上/情绪
+    # ========== 链上&情绪 ==========
     with st.expander("🔗 链上&情绪", expanded=False):
-        st.write(f"交易所净流入: **{chain_netflow:+.0f} ETH** (模拟)")
+        st.write(f"交易所净流入: **{chain_netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
         st.write(f"大额转账: **{chain_whale}** 笔 (模拟)")
         st.write(f"恐惧贪婪指数: **{fear_greed}**")
 
-    # 模拟合约持仓
+    # ========== 模拟合约持仓 ==========
     if sim_entry > 0 and current_price:
         if sim_side == "多单":
             pnl = (current_price - sim_entry) * sim_quantity * sim_leverage
@@ -620,3 +618,37 @@ with col_right:
             st.warning("⚠️ 接近强平线！")
     else:
         st.info("输入开仓价查看模拟")
+
+    # ========== 一键复制交易计划 ==========
+    if st.button("📋 复制当前交易计划"):
+        plan_text = f"""
+        交易对：{selected_symbol}
+        方向：{'多' if signal_dir==1 else '空' if signal_dir==-1 else '观望'}
+        当前价格：${current_price:.2f}
+        五层总分：{total_score}
+        AI预测胜率：{ai_prob:.1f}%
+        建议杠杆：{suggested_leverage:.1f}x
+        """
+        st.code(plan_text)
+        st.info("请手动复制以上计划")
+
+    # ========== 历史信号记录 ==========
+    if 'signal_history' not in st.session_state:
+        st.session_state.signal_history = []
+
+    # 检测新信号（与上次记录的信号不同）
+    if total_score >= st.session_state.long_threshold or total_score <= st.session_state.short_threshold:
+        current_dir = "多" if total_score >= st.session_state.long_threshold else "空" if total_score <= st.session_state.short_threshold else "观望"
+        if not st.session_state.signal_history or st.session_state.signal_history[-1]['方向'] != current_dir:
+            st.session_state.signal_history.append({
+                '时间': datetime.now().strftime("%H:%M"),
+                '方向': current_dir,
+                '总分': total_score
+            })
+            st.session_state.signal_history = st.session_state.signal_history[-20:]
+
+    with st.expander("📋 历史信号记录"):
+        if st.session_state.signal_history:
+            st.dataframe(pd.DataFrame(st.session_state.signal_history), use_container_width=True)
+        else:
+            st.info("暂无历史信号")
