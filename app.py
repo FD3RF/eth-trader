@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极神级版（多币种+信号阈值+历史记录）
-五层共振 + AI决策 + 全免费数据源 + 动态风控 + 多币种支持
+🚀 合约智能监控中心 · 终极神级版（多币种+AI交易计划）
+五层共振 + AI决策 + 动态止损止盈 + 历史信号
 """
 
 import streamlit as st
@@ -229,6 +229,28 @@ def ai_predict(model, features):
         return 50
 
 
+# ==================== 交易计划生成 ====================
+def generate_trade_plan(direction, current_price, atr_value, ai_prob):
+    """
+    根据方向、价格、ATR、AI胜率生成止损止盈价
+    止损 = 当前价 ± 1.5 * ATR
+    止盈 = 当前价 ∓ 3 * ATR (风险回报比1:2)
+    返回 (止损价, 止盈价, 盈亏比)
+    """
+    if direction == 0 or atr_value == 0 or current_price == 0:
+        return None, None, None
+    stop_distance = 1.5 * atr_value
+    take_distance = 3.0 * atr_value  # 1:2 盈亏比
+    if direction == 1:  # 做多
+        stop_loss = current_price - stop_distance
+        take_profit = current_price + take_distance
+    else:  # 做空
+        stop_loss = current_price + stop_distance
+        take_profit = current_price - take_distance
+    risk_reward = take_distance / stop_distance  # 盈亏比
+    return stop_loss, take_profit, risk_reward
+
+
 # ==================== 动态概率评分 & 仓位建议 ====================
 def calculate_win_probability(total_score, layer_scores, atr_pct, adx):
     base_prob = total_score * 0.9
@@ -332,7 +354,7 @@ def calculate_liquidation_price(entry_price, side, leverage):
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合约智能监控·终极神级版", layout="wide")
+st.set_page_config(page_title="合约智能监控·终极神级版+交易计划", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -350,8 +372,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极神级版（多币种+可调阈值）")
-st.caption("五层共振 + AI决策 + 多币种对比 + 动态风控 + 历史信号")
+st.title("🧠 合约智能监控中心 · 终极神级版（AI交易计划）")
+st.caption("五层共振 + AI决策 + 动态止损止盈 + 历史信号")
 
 # 初始化
 init_risk_state()
@@ -429,9 +451,14 @@ market_mode = detect_market_mode(data_dict)
 # 计算ATR%和ADX
 atr_pct = 0
 adx = 0
+atr_value = 0  # ATR绝对值
 if '15m' in data_dict:
-    atr_pct = data_dict['15m']['atr_pct'].iloc[-1]
-    adx = data_dict['15m']['adx'].iloc[-1]
+    df_15m = data_dict['15m']
+    atr_series = df_15m['atr']
+    if not atr_series.empty:
+        atr_value = atr_series.iloc[-1]
+    atr_pct = df_15m['atr_pct'].iloc[-1]
+    adx = df_15m['adx'].iloc[-1]
 
 # 计算预期胜率（基于五层）
 win_prob = calculate_win_probability(total_score, layer_scores, atr_pct, adx)
@@ -465,6 +492,9 @@ elif final_dir != 0 and ai_prob > 50:
 else:
     signal_dir = 0
     combined_win = 0
+
+# 生成交易计划
+stop_loss, take_profit, risk_reward = generate_trade_plan(signal_dir, current_price, atr_value, ai_prob)
 
 # 仓位建议
 suggested_leverage, base_risk, _ = suggest_position(total_score, combined_win, atr_pct, account_balance, risk_per_trade)
@@ -560,6 +590,18 @@ with col_right:
             <p>建议杠杆: {suggested_leverage:.1f}x | 风险: {base_risk:.1f}%</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # 显示交易计划（止损止盈）
+        if stop_loss and take_profit:
+            st.markdown(f"""
+            <div class="trade-plan">
+                <h4>📋 AI交易计划</h4>
+                <p>入场价: <span style="color:#00F5A0">${current_price:.2f}</span></p>
+                <p>止损价: <span style="color:#FF5555">${stop_loss:.2f}</span> (亏损 {abs(current_price-stop_loss)/current_price*100:.2f}%)</p>
+                <p>止盈价: <span style="color:#00F5A0">${take_profit:.2f}</span> (盈亏比 {risk_reward:.2f})</p>
+                <p>ATR(14): {atr_value:.2f}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.metric("当前价格", f"${current_price:.2f}" if current_price else "N/A")
 
@@ -629,6 +671,8 @@ with col_right:
         AI预测胜率：{ai_prob:.1f}%
         建议杠杆：{suggested_leverage:.1f}x
         """
+        if stop_loss and take_profit:
+            plan_text += f"\n止损价：${stop_loss:.2f}\n止盈价：${take_profit:.2f}\n盈亏比：{risk_reward:.2f}"
         st.code(plan_text)
         st.info("请手动复制以上计划")
 
