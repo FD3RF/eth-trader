@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 量化交易终端 · 资本曲线驱动版（修复币种切换）
-市场环境｜多因子强度｜动态风险｜资本监控｜头寸管理
+🚀 合约终极终端 · 三模式自适应版
+稳健｜无敌｜神级 —— 恐惧贪婪驱动 + 多因子过滤 + 动态仓位
 """
 
 import streamlit as st
@@ -22,19 +22,14 @@ from collections import Counter
 
 warnings.filterwarnings('ignore')
 
-# ==================== 全局配置 ====================
+# ==================== 全局配置（固定）====================
 SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
-R_BASE = 0.01                         # 基础风险 1%
-MAX_LEVERAGE = 20.0                   # 最大杠杆
-STOP_ATR = 1.5                        # 止损倍数
-TAKE_ATR = 3.0                        # 止盈倍数
-CONSECUTIVE_LOSS_LIMIT = 3            # 连亏刹车阈值
-CONSECUTIVE_STOP_HOURS = 24           # 连亏暂停小时数
-MAX_DRAWDOWN = 20.0                    # 最大回撤警戒线
-DAILY_LOSS_LIMIT = 300.0               # 日亏损限额
-MIN_ATR_PCT = 0.8                      # 最小波动率要求
+BASE_RISK = 0.01                     # 基础风险 1%
+MAX_LEVERAGE_GLOBAL = 100.0          # 全局最大杠杆（实盘限制）
+DAILY_LOSS_LIMIT = 300.0             # 日亏损限额
+MIN_ATR_PCT = 0.5                    # 最小波动率（低于此值风险减半，不禁止）
 
-# ==================== 免费数据获取器（增强容错）====================
+# ==================== 免费数据获取器（同前）====================
 class FreeDataFetcherV5:
     def __init__(self, symbols=None):
         if symbols is None:
@@ -45,12 +40,10 @@ class FreeDataFetcherV5:
         self.timeout = 10
         self.exchange = ccxt.mexc({'enableRateLimit': True, 'timeout': 30000})
         self.fng_url = "https://api.alternative.me/fng/"
-        # 模拟链上数据（若真实API失败则用此值）
-        self.default_chain_netflow = 5234
-        self.default_chain_whale = 128
+        self.chain_netflow = 5234  # 模拟值
+        self.chain_whale = 128
 
     def fetch_kline(self, symbol, timeframe):
-        """获取单个币种K线，失败返回None"""
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=self.limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -59,7 +52,6 @@ class FreeDataFetcherV5:
                 df[col] = df[col].astype(float)
             return df, "MEXC"
         except Exception as e:
-            # 静默失败，由上层处理
             return None, None
 
     def fetch_fear_greed(self):
@@ -70,7 +62,7 @@ class FreeDataFetcherV5:
                 return int(data['data'][0]['value'])
         except:
             pass
-        return 50  # 默认中性
+        return 50
 
     def fetch_all(self):
         all_data = {}
@@ -86,25 +78,23 @@ class FreeDataFetcherV5:
                     price_sources.append(src)
                 else:
                     data_ok = False
-                    # 记录错误，但继续尝试其他周期
             if data_ok and data_dict:
                 all_data[symbol] = {
                     "data_dict": data_dict,
                     "current_price": data_dict['15m']['close'].iloc[-1] if '15m' in data_dict else None,
                     "source": price_sources[0] if price_sources else "MEXC",
                     "fear_greed": fear_greed,
-                    "chain_netflow": self.default_chain_netflow,
-                    "chain_whale": self.default_chain_whale,
+                    "chain_netflow": self.chain_netflow,
+                    "chain_whale": self.chain_whale,
                 }
             else:
-                # 数据不全时，仍然存入一个占位，但标记为无效
                 all_data[symbol] = {
                     "data_dict": None,
                     "current_price": None,
                     "source": "不可用",
                     "fear_greed": fear_greed,
-                    "chain_netflow": self.default_chain_netflow,
-                    "chain_whale": self.default_chain_whale,
+                    "chain_netflow": self.chain_netflow,
+                    "chain_whale": self.chain_whale,
                 }
         return all_data
 
@@ -127,6 +117,48 @@ class FreeDataFetcherV5:
         df['adx'] = adx.adx()
         return df
 
+
+# ==================== 策略模式配置 ====================
+def get_mode_config(mode):
+    """返回各策略模式的参数"""
+    if mode == "稳健":
+        return {
+            'min_five_score': 60,          # 最小多因子强度
+            'fear_threshold': 20,           # 最大恐惧指数（低于此值考虑入场）
+            'netflow_required': 5000,       # 净流入要求
+            'whale_required': 100,           # 大额转账要求
+            'stop_atr': 1.8,                 # 止损倍数
+            'tp_min_ratio': 2.5,              # 最小止盈盈亏比
+            'max_leverage': 3.0,               # 最大杠杆
+            'position_pct': lambda fear: 0.6 if fear <= 10 else (0.3 if fear <= 20 else 0.0),  # 仓位百分比
+            'trailing_stop': None,              # 不使用追踪止损
+        }
+    elif mode == "无敌":
+        return {
+            'min_five_score': 70,
+            'fear_threshold': 15,
+            'netflow_required': 6000,
+            'whale_required': 120,
+            'stop_atr': 2.0,
+            'tp_min_ratio': 3.0,
+            'max_leverage': 5.0,
+            'position_pct': lambda fear: 1.0 if fear <= 10 else (0.5 if fear <= 20 else 0.0),
+            'trailing_stop': 0.05,  # 5% 追踪止损
+        }
+    elif mode == "神级":
+        return {
+            'min_five_score': 80,
+            'fear_threshold': 8,
+            'netflow_required': 8000,
+            'whale_required': 150,
+            'stop_atr': 2.5,
+            'tp_min_ratio': 4.0,
+            'max_leverage': 10.0,
+            'position_pct': lambda fear: 1.0 if fear <= 8 else (0.8 if fear <= 15 else 0.0),
+            'trailing_stop': 0.10,  # 10% 追踪止损
+        }
+    else:
+        return get_mode_config("稳健")
 
 # ==================== 市场环境层 ====================
 def evaluate_market(df_dict):
@@ -256,45 +288,28 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     return final_dir, total_score, layer_scores
 
 
-# ==================== 入场信号（独立） ====================
-def generate_entry_signal(df_dict, market_mode):
-    if df_dict is None or '15m' not in df_dict:
+# ==================== 入场信号（结合策略模式）====================
+def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, config):
+    """根据策略配置判断是否入场"""
+    if five_total < config['min_five_score']:
         return 0
-    df = df_dict['15m']
-    if df.empty:
+    if fear_greed > config['fear_threshold']:
         return 0
-    last = df.iloc[-1]
-
-    if market_mode == "趋势":
-        ema20 = last['ema20']
-        ema50 = last['ema50']
-        if (ema20 > ema50 and 
-            last['close'] >= ema20 * 0.99 and 
-            last['rsi'] < 70 and last['rsi'] > 40):
-            return 1
-        elif (ema20 < ema50 and 
-              last['close'] <= ema20 * 1.01 and 
-              last['rsi'] > 30 and last['rsi'] < 60):
-            return -1
-        else:
-            return 0
-    elif market_mode == "震荡":
-        bb_upper = last['bb_high']
-        bb_lower = last['bb_low']
-        if last['close'] <= bb_lower * 1.01 and last['rsi'] < 30:
-            return 1
-        elif last['close'] >= bb_upper * 0.99 and last['rsi'] > 70:
-            return -1
-        else:
-            return 0
-    else:
+    if netflow < config['netflow_required']:
         return 0
+    if whale_tx < config['whale_required']:
+        return 0
+    # 方向必须为多（假设只做多）
+    if five_dir != 1:
+        return 0
+    return 1  # 做多信号
 
 
 # ==================== 风险控制 ====================
-def calculate_stops(entry_price, side, atr_value):
-    stop_distance = STOP_ATR * atr_value
-    take_distance = TAKE_ATR * atr_value
+def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
+    stop_distance = stop_atr * atr_value
+    # 止盈按最小盈亏比计算，实际可更高
+    take_distance = stop_distance * tp_min_ratio
     if side == 1:
         stop = entry_price - stop_distance
         take = entry_price + take_distance
@@ -304,47 +319,13 @@ def calculate_stops(entry_price, side, atr_value):
     return stop, take, take_distance/stop_distance
 
 
-# ==================== 风险因子计算 ====================
-def calculate_risk_factors(five_total, atr_pct, drawdown, consecutive_losses):
-    F_score = five_total / 100.0
-    F_score = max(0.1, min(1.0, F_score))
-
-    if atr_pct < 0.8:
-        F_vol = 0.5
-    elif atr_pct <= 2.5:
-        F_vol = 1.0
-    else:
-        F_vol = 0.7
-
-    if drawdown < 10:
-        F_dd = 1.0
-    elif drawdown <= 20:
-        F_dd = 0.5
-    else:
-        F_dd = 0.3
-
-    if consecutive_losses < 3:
-        F_loss = 1.0
-    elif consecutive_losses <= 4:
-        F_loss = 0.5
-    else:
-        F_loss = 0.2
-
-    R_final = R_BASE * F_score * F_vol * F_dd * F_loss
-    R_final = max(0.001, min(0.02, R_final))
-    return R_final, F_score, F_vol, F_dd, F_loss
-
-
-# ==================== 仓位计算 ====================
-def calculate_position_size(balance, entry_price, stop_price, R_final):
-    risk_amount = balance * R_final
-    stop_distance = abs(entry_price - stop_price)
-    if stop_distance == 0:
-        return 0.0
-    position_value = risk_amount / stop_distance * entry_price
-    max_position = balance * MAX_LEVERAGE
-    position_value = min(position_value, max_position)
-    quantity = position_value / entry_price
+# ==================== 仓位计算（含杠杆）====================
+def calculate_position_size(balance, entry_price, stop_price, leverage, position_pct):
+    """根据账户余额、杠杆和仓位百分比计算合约数量"""
+    risk_amount = balance * position_pct
+    # 杠杆放大名义本金
+    nominal = risk_amount * leverage
+    quantity = nominal / entry_price
     return round(quantity, 3)
 
 
@@ -354,14 +335,8 @@ def init_risk_state():
         st.session_state.consecutive_losses = 0
     if 'peak_balance' not in st.session_state:
         st.session_state.peak_balance = 10000.0
-    if 'mode_switch_time' not in st.session_state:
-        st.session_state.mode_switch_time = None
-    if 'trading_paused_until' not in st.session_state:
-        st.session_state.trading_paused_until = None
     if 'daily_loss_triggered' not in st.session_state:
         st.session_state.daily_loss_triggered = False
-    if 'last_mode' not in st.session_state:
-        st.session_state.last_mode = None
     if 'account_balance' not in st.session_state:
         st.session_state.account_balance = 10000.0
     if 'daily_pnl' not in st.session_state:
@@ -379,7 +354,7 @@ def init_risk_state():
     if 'signal_history' not in st.session_state:
         st.session_state.signal_history = []
 
-def update_risk_state(trade_result, current_balance, current_mode, last_kline_time, daily_pnl):
+def update_risk_state(trade_result, current_balance, daily_pnl):
     if trade_result < 0:
         st.session_state.consecutive_losses += 1
     else:
@@ -389,23 +364,13 @@ def update_risk_state(trade_result, current_balance, current_mode, last_kline_ti
         st.session_state.peak_balance = current_balance
     drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100.0
 
-    if st.session_state.last_mode is not None and current_mode != st.session_state.last_mode:
-        st.session_state.mode_switch_time = last_kline_time
-    st.session_state.last_mode = current_mode
-
     if daily_pnl < -DAILY_LOSS_LIMIT:
         st.session_state.daily_loss_triggered = True
 
-    paused = False
-    if st.session_state.daily_loss_triggered:
-        paused = True
+    return drawdown
 
-    return paused, drawdown
-
-def can_trade(current_time):
-    if st.session_state.daily_loss_triggered:
-        return False
-    return True
+def can_trade():
+    return not st.session_state.daily_loss_triggered
 
 
 # ==================== 辅助函数 ====================
@@ -416,84 +381,8 @@ def calculate_liquidation_price(entry_price, side, leverage):
         return entry_price * (1 + 1.0/leverage)
 
 
-def run_backtest(df_dict, market_func, signal_func, five_func, initial_balance=10000.0, lookback_days=30):
-    if df_dict is None:
-        return {"胜率": "N/A", "总收益": "N/A", "最大回撤": "N/A", "盈亏比": "N/A", "交易次数": 0}
-    df = df_dict.get('15m')
-    if df is None or df.empty:
-        return {"胜率": "N/A", "总收益": "N/A", "最大回撤": "N/A", "盈亏比": "N/A", "交易次数": 0}
-    df = df.copy()
-    lookback = lookback_days * 96
-    df = df.iloc[-lookback:] if len(df) > lookback else df
-
-    balance = initial_balance
-    peak = balance
-    trades = 0
-    wins = 0
-    losses = 0
-    total_profit = 0.0
-    total_loss = 0.0
-    max_drawdown = 0.0
-
-    position = None
-    entry_price = 0.0
-
-    for i in range(len(df)):
-        row = df.iloc[i]
-        # 简化回测，使用当前数据，但不考虑多周期
-        temp_dict = {'15m': df.iloc[:i+1], '1h': None, '4h': None, '1d': None}
-        market_mode, _, _ = market_func(temp_dict)
-        signal = signal_func(temp_dict, market_mode)
-
-        if market_mode in ["异常波动", "不明朗", "数据不足"]:
-            continue
-
-        if position is None:
-            if signal == 1:
-                position = 'long'
-                entry_price = row['close']
-            elif signal == -1:
-                position = 'short'
-                entry_price = row['close']
-        else:
-            if (position == 'long' and signal <= 0) or (position == 'short' and signal >= 0):
-                exit_price = row['close']
-                if position == 'long':
-                    pnl = (exit_price - entry_price) / entry_price * 100.0
-                else:
-                    pnl = (entry_price - exit_price) / entry_price * 100.0
-                trades += 1
-                if pnl > 0:
-                    wins += 1
-                    total_profit += pnl
-                else:
-                    losses += 1
-                    total_loss += abs(pnl)
-                balance *= (1.0 + pnl/100.0)
-                if balance > peak:
-                    peak = balance
-                else:
-                    dd = (peak - balance) / peak * 100.0
-                    if dd > max_drawdown:
-                        max_drawdown = dd
-                position = None
-        if balance > peak:
-            peak = balance
-
-    win_rate = wins / trades if trades > 0 else 0.0
-    total_return = (balance - initial_balance) / initial_balance * 100.0
-    profit_factor = total_profit / total_loss if total_loss > 0 else 0.0
-    return {
-        '胜率': f"{win_rate*100:.1f}%" if trades > 0 else "N/A",
-        '总收益': f"{total_return:.1f}%" if trades > 0 else "N/A",
-        '最大回撤': f"{max_drawdown:.1f}%",
-        '盈亏比': f"{profit_factor:.2f}" if total_loss > 0 else "N/A",
-        '交易次数': trades
-    }
-
-
 # ==================== 主界面 ====================
-st.set_page_config(page_title="量化终端 · 资本曲线驱动", layout="wide")
+st.set_page_config(page_title="合约终极终端 · 三模式自适应", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -513,11 +402,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 量化交易终端 · 资本曲线驱动版")
-st.caption("市场环境｜多因子强度｜动态风险｜资本监控｜头寸管理")
+st.title("📈 合约终极终端 · 三模式自适应版")
+st.caption("稳健｜无敌｜神级 —— 恐惧贪婪驱动 + 多因子过滤 + 动态杠杆")
 
 init_risk_state()
-ai_model = None
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
@@ -530,40 +418,24 @@ with st.sidebar:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
 
     st.markdown("---")
-    st.subheader("📊 风险参数")
-    base_risk_display = st.slider("基础风险(%)", min_value=0.5, max_value=3.0, value=R_BASE*100, step=0.5) / 100.0
-    # 实际可使用 base_risk_display 覆盖 R_BASE，此处暂不实现
-    st.markdown("_因子将自动调节_")
+    st.subheader("🧬 策略模式")
+    mode = st.selectbox("选择模式", ["稳健", "无敌", "神级"], index=0)
+    config = get_mode_config(mode)
+    st.markdown(f"""
+    - 最小多因子强度: {config['min_five_score']}
+    - 最大恐惧指数: {config['fear_threshold']}
+    - 止损倍数: {config['stop_atr']}×ATR
+    - 最小盈亏比: {config['tp_min_ratio']}
+    - 最大杠杆: {config['max_leverage']}x
+    - 追踪止损: {config['trailing_stop'] if config['trailing_stop'] else '无'}
+    """)
 
     st.markdown("---")
-    st.subheader("📈 回测工具")
-    backtest_days = st.slider("回测天数", min_value=7, max_value=90, value=30, step=1)
-    if st.button("运行回测"):
-        with st.spinner("回测中..."):
-            fetcher = FreeDataFetcherV5(symbols=[selected_symbol])
-            backtest_data = fetcher.fetch_all()
-            # 获取当前币种的数据
-            if backtest_data and selected_symbol in backtest_data:
-                data_dict = backtest_data[selected_symbol]["data_dict"]
-                bt_result = run_backtest(
-                    data_dict,
-                    evaluate_market,
-                    generate_entry_signal,
-                    five_layer_score,
-                    initial_balance=st.session_state.account_balance,
-                    lookback_days=backtest_days
-                )
-                st.success("回测完成")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("胜率", bt_result['胜率'])
-                    st.metric("总收益", bt_result['总收益'])
-                    st.metric("最大回撤", bt_result['最大回撤'])
-                with col2:
-                    st.metric("盈亏比", bt_result['盈亏比'])
-                    st.metric("交易次数", bt_result['交易次数'])
-            else:
-                st.error("当前品种数据不可用，无法回测")
+    st.subheader("📊 风险参数")
+    account_balance = st.number_input("账户余额 (USDT)", value=st.session_state.account_balance, step=1000.0, format="%.2f")
+    st.session_state.account_balance = account_balance
+    daily_loss_limit = st.number_input("日亏损限额 (USDT)", value=DAILY_LOSS_LIMIT, step=50.0, format="%.2f")
+    st.session_state.daily_loss_limit = daily_loss_limit
 
 # ==================== 获取数据 ====================
 with st.spinner("获取市场数据..."):
@@ -576,70 +448,69 @@ cols = st.columns(len(SYMBOLS))
 for i, sym in enumerate(SYMBOLS):
     if sym in all_data and all_data[sym]["data_dict"] is not None:
         df_dict = all_data[sym]["data_dict"]
-        mode, _, _ = evaluate_market(df_dict)
-        signal = generate_entry_signal(df_dict, mode)
-        dir_icon = {1: "🟢 多", -1: "🔴 空", 0: "⚪ 观"}[signal]
-        btn_text = f"{sym}\n{dir_icon}\n{mode}"
+        fear = all_data[sym]["fear_greed"]
+        netflow = all_data[sym]["chain_netflow"]
+        whale = all_data[sym]["chain_whale"]
+        five_dir, five_total, _ = five_layer_score(df_dict, fear, netflow, whale)
+        signal = "⚪ 观"
+        if five_total >= config['min_five_score'] and fear <= config['fear_threshold'] and netflow >= config['netflow_required'] and whale >= config['whale_required']:
+            signal = "🟢 多" if five_dir == 1 else "🔴 空"
+        with cols[i]:
+            if st.button(f"{sym}\n{signal}\n强度:{five_total}", key=f"card_{sym}"):
+                st.session_state.selected_symbol = sym
+                st.rerun()
     else:
-        btn_text = f"{sym}\n⚪ 数据不可用"
-    with cols[i]:
-        if st.button(btn_text, key=f"card_{sym}"):
-            st.session_state.selected_symbol = sym
-            st.rerun()
+        with cols[i]:
+            st.button(f"{sym}\n⚪ 数据不可用", key=f"card_{sym}")
 
 # ==================== 当前品种数据 ====================
-if selected_symbol not in all_data:
-    selected_symbol = SYMBOLS[0]
+if selected_symbol not in all_data or all_data[selected_symbol]["data_dict"] is None:
+    st.error(f"❌ 品种 {selected_symbol} 数据不可用，请稍后重试")
+    st.stop()
+
 data = all_data[selected_symbol]
-
-# 检查数据是否有效
-if data["data_dict"] is None:
-    st.error(f"❌ 品种 {selected_symbol} 数据不可用，请稍后重试或切换其他品种")
-    st.stop()  # 停止后续渲染，避免错误
-
 data_dict = data["data_dict"]
 current_price = data["current_price"]
 fear_greed = data["fear_greed"]
 source_display = data["source"]
-chain_netflow = data["chain_netflow"]
-chain_whale = data["chain_whale"]
+netflow = data["chain_netflow"]
+whale = data["chain_whale"]
 
 # 多因子强度
-five_dir, five_total, layer_scores = five_layer_score(data_dict, fear_greed, chain_netflow, chain_whale)
-st.session_state.five_total = five_total
+five_dir, five_total, layer_scores = five_layer_score(data_dict, fear_greed, netflow, whale)
 
 # 市场环境
 market_mode, atr_pct, adx = evaluate_market(data_dict)
 
 # 入场信号
-entry_signal = generate_entry_signal(data_dict, market_mode)
+entry_signal = generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale, config)
 
 # ATR值
 atr_value = data_dict['15m']['atr'].iloc[-1] if '15m' in data_dict else 0.0
 
-# 更新风控并计算因子
-current_balance = st.session_state.account_balance + st.session_state.daily_pnl
-drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100.0 if st.session_state.peak_balance > 0 else 0.0
+# 仓位百分比（根据恐惧指数）
+position_pct = config['position_pct'](fear_greed)
 
-consecutive_losses = st.session_state.consecutive_losses
-R_final, F_score, F_vol, F_dd, F_loss = calculate_risk_factors(five_total, atr_pct, drawdown, consecutive_losses)
+# 建议杠杆（取模式最大杠杆，可优化）
+leverage = config['max_leverage']
 
 # 交易计划
 stop_loss = take_profit = risk_reward = None
 position_size = 0.0
 if entry_signal != 0 and atr_value > 0:
-    stop_loss, take_profit, risk_reward = calculate_stops(current_price, entry_signal, atr_value)
+    stop_loss, take_profit, risk_reward = calculate_stops(current_price, entry_signal, atr_value, config['stop_atr'], config['tp_min_ratio'])
     position_size = calculate_position_size(
         st.session_state.account_balance,
         current_price,
         stop_loss,
-        R_final
+        leverage,
+        position_pct
     )
 
-# 生存保护检查
-now = datetime.now()
-paused, _ = update_risk_state(0.0, current_balance, market_mode, now, st.session_state.daily_pnl)
-can_trade_flag = can_trade(now)
+# 更新风控
+current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+drawdown = update_risk_state(0.0, current_balance, st.session_state.daily_pnl)
+can_trade_flag = can_trade()
 
 # ==================== 顶部状态 ====================
 st.markdown(f"""
@@ -652,7 +523,7 @@ st.markdown(f"""
 if not can_trade_flag:
     st.error("🚨 交易暂停：日亏损超限")
 
-# ==================== 主布局：两列 ====================
+# ==================== 主布局 ====================
 col_left, col_right = st.columns([2.2, 1.3])
 
 with col_left:
@@ -710,10 +581,22 @@ with col_left:
         st.warning("K线数据不可用")
 
 with col_right:
-    # 交易信号面板
     st.subheader("📡 交易信号")
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 观望"}
     st.markdown(f'<div class="ai-box">{dir_map[entry_signal]}<br>多因子强度: {five_total}/100</div>', unsafe_allow_html=True)
+
+    # 入场条件状态
+    st.markdown("#### 入场铁律")
+    cond1 = "✅" if five_total >= config['min_five_score'] else "❌"
+    cond2 = "✅" if fear_greed <= config['fear_threshold'] else "❌"
+    cond3 = "✅" if netflow >= config['netflow_required'] else "❌"
+    cond4 = "✅" if whale >= config['whale_required'] else "❌"
+    st.markdown(f"""
+    - {cond1} 多因子强度 ≥ {config['min_five_score']}
+    - {cond2} 恐惧指数 ≤ {config['fear_threshold']}
+    - {cond3} 净流入 ≥ {config['netflow_required']} ETH
+    - {cond4} 大额转账 ≥ {config['whale_required']} 笔
+    """)
 
     # 风险因子面板
     st.markdown("""
@@ -722,12 +605,12 @@ with col_right:
     """, unsafe_allow_html=True)
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        st.metric("质量因子", f"{F_score:.2f}")
-        st.metric("波动因子", f"{F_vol:.2f}")
+        st.metric("质量因子", f"{five_total/100:.2f}")
+        st.metric("波动因子", f"{1.0 if atr_pct>0.8 else 0.5:.2f}")
     with col_f2:
-        st.metric("回撤因子", f"{F_dd:.2f}")
-        st.metric("连亏因子", f"{F_loss:.2f}")
-    st.markdown(f"<p><strong>最终风险系数: {R_final*100:.3f}%</strong></p>", unsafe_allow_html=True)
+        st.metric("回撤因子", f"{1.0 if drawdown<10 else 0.5:.2f}")
+        st.metric("连亏因子", f"{1.0 if st.session_state.consecutive_losses<3 else 0.5:.2f}")
+    st.markdown(f"<p><strong>建议杠杆: {leverage:.1f}x</strong></p>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     # 交易计划
@@ -757,32 +640,26 @@ with col_right:
             st.metric("连续亏损", st.session_state.consecutive_losses)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # 资金数据面板（模拟）
-    with st.expander("💰 资金数据", expanded=False):
-        st.write("资金费率: **暂缺（模拟）**")
-        st.write("未平仓合约变化: **暂缺（模拟）**")
-        st.write("多空比: **暂缺（模拟）**")
-
     # 链上情绪
     with st.expander("🔗 链上情绪", expanded=False):
-        st.write(f"交易所净流入: **{chain_netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
-        st.write(f"大额转账: **{chain_whale}** 笔 (模拟)")
+        st.write(f"交易所净流入: **{netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
+        st.write(f"大额转账: **{whale}** 笔 (模拟)")
         st.write(f"恐惧贪婪指数: **{fear_greed}**")
 
-    # 自动策略测试
+    # 策略自动化
     st.markdown("---")
     st.subheader("🤖 策略自动化")
     auto_enabled = st.checkbox("启用模拟自动跟随", value=st.session_state.auto_enabled)
     st.session_state.auto_enabled = auto_enabled
 
-    # 自动交易逻辑（与原版本相同，此处为占位，需完整实现）
+    now = datetime.now()
     if auto_enabled and can_trade_flag and entry_signal != 0:
         if st.session_state.auto_position is None:
             st.session_state.auto_position = {
                 'side': 'long' if entry_signal == 1 else 'short',
                 'entry': current_price,
-                'time': datetime.now(),
-                'leverage': MAX_LEVERAGE,
+                'time': now,
+                'leverage': leverage,
                 'stop': stop_loss,
                 'take': take_profit,
                 'size': position_size
@@ -790,22 +667,22 @@ with col_right:
             st.success(f"✅ 自动开{st.session_state.auto_position['side']}仓 @ {current_price:.2f}")
         else:
             pos = st.session_state.auto_position
+            # 检查止损止盈或反向信号
             if (pos['side'] == 'long' and (current_price <= pos['stop'] or current_price >= pos['take'])) or \
                (pos['side'] == 'short' and (current_price >= pos['stop'] or current_price <= pos['take'])) or \
                (entry_signal == -1 and pos['side'] == 'long') or \
                (entry_signal == 1 and pos['side'] == 'short'):
                 if pos['side'] == 'long':
-                    pnl = (current_price - pos['entry']) * pos['leverage']
+                    pnl = (current_price - pos['entry']) * pos['size']
                 else:
-                    pnl = (pos['entry'] - current_price) * pos['leverage']
-                pnl_pct = pnl / pos['entry'] * 100.0
-                update_risk_state(pnl, st.session_state.account_balance + st.session_state.daily_pnl,
-                                  market_mode, now, st.session_state.daily_pnl)
+                    pnl = (pos['entry'] - current_price) * pos['size']
+                pnl_pct = pnl / (pos['entry'] * pos['size']) * 100.0
+                update_risk_state(pnl, st.session_state.account_balance + st.session_state.daily_pnl, st.session_state.daily_pnl)
                 st.session_state.trade_log.append({
                     '开仓时间': pos['time'].strftime('%H:%M'),
                     '方向': pos['side'],
                     '开仓价': f"{pos['entry']:.2f}",
-                    '平仓时间': datetime.now().strftime('%H:%M'),
+                    '平仓时间': now.strftime('%H:%M'),
                     '平仓价': f"{current_price:.2f}",
                     '盈亏': f"{pnl:.2f}",
                     '盈亏%': f"{pnl_pct:.1f}%"
@@ -816,8 +693,8 @@ with col_right:
 
     if st.session_state.auto_position:
         pos = st.session_state.auto_position
-        pnl = (current_price - pos['entry']) * (1.0 if pos['side']=='long' else -1.0) * pos['leverage']
-        pnl_pct = (current_price - pos['entry']) / pos['entry'] * pos['leverage'] * 100.0 * (1.0 if pos['side']=='long' else -1.0)
+        pnl = (current_price - pos['entry']) * (1.0 if pos['side']=='long' else -1.0) * pos['size']
+        pnl_pct = (current_price - pos['entry']) / pos['entry'] * 100.0 * (1.0 if pos['side']=='long' else -1.0)
         liq_price = calculate_liquidation_price(pos['entry'], "多单" if pos['side']=='long' else "空单", pos['leverage'])
         distance = abs(current_price - liq_price) / current_price * 100.0
         color_class = "profit" if pnl >= 0 else "loss"
@@ -832,17 +709,16 @@ with col_right:
         """, unsafe_allow_html=True)
         if st.button("手动平仓", key="auto_close"):
             if pos['side'] == 'long':
-                pnl = (current_price - pos['entry']) * pos['leverage']
+                pnl = (current_price - pos['entry']) * pos['size']
             else:
-                pnl = (pos['entry'] - current_price) * pos['leverage']
-            pnl_pct = pnl / pos['entry'] * 100.0
-            update_risk_state(pnl, st.session_state.account_balance + st.session_state.daily_pnl,
-                              market_mode, now, st.session_state.daily_pnl)
+                pnl = (pos['entry'] - current_price) * pos['size']
+            pnl_pct = pnl / (pos['entry'] * pos['size']) * 100.0
+            update_risk_state(pnl, st.session_state.account_balance + st.session_state.daily_pnl, st.session_state.daily_pnl)
             st.session_state.trade_log.append({
                 '开仓时间': pos['time'].strftime('%H:%M'),
                 '方向': pos['side'],
                 '开仓价': f"{pos['entry']:.2f}",
-                '平仓时间': datetime.now().strftime('%H:%M'),
+                '平仓时间': now.strftime('%H:%M'),
                 '平仓价': f"{current_price:.2f}",
                 '盈亏': f"{pnl:.2f}",
                 '盈亏%': f"{pnl_pct:.1f}%"
@@ -870,7 +746,7 @@ with col_right:
         current_dir = "多" if entry_signal == 1 else "空"
         if not st.session_state.signal_history or st.session_state.signal_history[-1]['方向'] != current_dir:
             st.session_state.signal_history.append({
-                '时间': datetime.now().strftime("%H:%M"),
+                '时间': now.strftime("%H:%M"),
                 '方向': current_dir,
                 '市场': market_mode,
                 '多因子强度': five_total
