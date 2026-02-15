@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约量化终端 · 紧凑神境版
+🚀 合约量化终端 · 紧凑神境版（多空双向）
 恐惧卡片｜强平预警｜成交量｜市场状态｜多因子强度｜资本监控｜自动策略切换
+支持做多/做空双向信号
 """
 
 import streamlit as st
@@ -35,7 +36,7 @@ LEVERAGE_MODES = {
     "高倍神级 (50-125x)": (50, 125)
 }
 
-# ==================== 数据获取器（同前）====================
+# ==================== 免费数据获取器 ====================
 class FreeDataFetcherV5:
     def __init__(self, symbols=None):
         if symbols is None:
@@ -46,7 +47,7 @@ class FreeDataFetcherV5:
         self.timeout = 10
         self.exchange = ccxt.mexc({'enableRateLimit': True, 'timeout': 30000})
         self.fng_url = "https://api.alternative.me/fng/"
-        self.chain_netflow = 5234
+        self.chain_netflow = 5234  # 模拟值
         self.chain_whale = 128
 
     def fetch_kline(self, symbol, timeframe):
@@ -286,6 +287,7 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     return final_dir, total_score, layer_scores
 
 
+# ==================== 入场信号（双向） ====================
 def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, config):
     if five_total < config['min_five_score']:
         return 0
@@ -295,9 +297,9 @@ def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, c
         return 0
     if whale_tx < config['whale_required']:
         return 0
-    if five_dir != 1:
+    if five_dir == 0:
         return 0
-    return 1
+    return five_dir  # 返回实际方向（1多/-1空）
 
 
 def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
@@ -366,8 +368,8 @@ def can_trade():
     return not st.session_state.daily_loss_triggered
 
 
-# ==================== 主界面（紧凑优化）====================
-st.set_page_config(page_title="合约量化终端 · 紧凑神境", layout="wide")
+# ==================== 主界面 ====================
+st.set_page_config(page_title="合约量化终端 · 多空双向", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; font-size: 0.9rem; }
@@ -389,8 +391,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 合约量化终端 · 紧凑神境版")
-st.caption("恐惧卡片｜强平预警｜成交量｜紧凑布局")
+st.title("📊 合约量化终端 · 多空双向版")
+st.caption("恐惧卡片｜强平预警｜成交量｜多空信号｜紧凑布局")
 
 init_risk_state()
 
@@ -436,8 +438,9 @@ for i, sym in enumerate(SYMBOLS):
         netflow = all_data[sym]["chain_netflow"]
         whale = all_data[sym]["chain_whale"]
         five_dir, five_total, _ = five_layer_score(df_dict, fear, netflow, whale)
+        dir_icon = {1: "🟢", -1: "🔴", 0: "⚪"}[five_dir]
         with cols[i]:
-            st.markdown(f"<div class='card'><b>{sym}</b><br>强度 {five_total}<br>{'🟢' if five_dir==1 else '⚪'}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='card'><b>{sym}</b><br>强度 {five_total}<br>{dir_icon}</div>", unsafe_allow_html=True)
     else:
         with cols[i]:
             st.markdown(f"<div class='card'><b>{sym}</b><br>数据不可用</div>", unsafe_allow_html=True)
@@ -492,13 +495,12 @@ if entry_signal != 0 and atr_value > 0:
         position_pct
     )
 
-liq_price_long = liquidation_price(current_price, 1, suggested_leverage) if entry_signal == 1 else None
-liq_price_short = liquidation_price(current_price, -1, suggested_leverage) if entry_signal == -1 else None
+# 强平价格计算
 if entry_signal == 1:
-    liq_price = liq_price_long
+    liq_price = liquidation_price(current_price, 1, suggested_leverage)
     distance_to_liq = (current_price - liq_price) / current_price * 100
 elif entry_signal == -1:
-    liq_price = liq_price_short
+    liq_price = liquidation_price(current_price, -1, suggested_leverage)
     distance_to_liq = (liq_price - current_price) / current_price * 100
 else:
     liq_price = None
@@ -525,7 +527,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ==================== 主布局：两列（紧凑）====================
+# ==================== 主布局：两列 ====================
 col_left, col_right = st.columns([1.7, 1.3])
 
 with col_left:
@@ -538,7 +540,7 @@ with col_left:
     with col_state3:
         st.metric("趋势强度(ADX)", f"{adx:.1f}")
 
-    # 多因子强度热力图（紧凑）
+    # 多因子强度热力图
     st.markdown("#### 📊 多因子强度")
     cols = st.columns(5)
     layer_names = list(layer_scores.keys())
@@ -555,7 +557,7 @@ with col_left:
             </div>
             """, unsafe_allow_html=True)
 
-    # K线图 + 成交量（三行，高度400）
+    # K线图 + 成交量
     st.markdown(f"#### 📉 {selected_symbol} K线 ({main_period}) + 成交量")
     if main_period in data_dict:
         df = data_dict[main_period].tail(100).copy()
@@ -593,18 +595,20 @@ with col_right:
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 观望"}
     st.markdown(f'<div class="ai-box">{dir_map[entry_signal]}<br>强度 {five_total}/100</div>', unsafe_allow_html=True)
 
-    # 入场条件（带图标）
+    # 入场条件
     st.markdown("#### 🔍 入场条件")
     cond1 = "✅" if five_total >= config['min_five_score'] else "❌"
     cond2 = "✅" if fear_greed <= config['fear_threshold'] else "❌"
     cond3 = "✅" if netflow >= config['netflow_required'] else "❌"
     cond4 = "✅" if whale >= config['whale_required'] else "❌"
+    dir_icon = "✅" if five_dir != 0 else "❌"
     st.markdown(f"""
     <div style="font-size:0.85rem; line-height:1.4;">
         {cond1} 强度 ≥ {config['min_five_score']}<br>
         {cond2} 恐惧 ≤ {config['fear_threshold']}<br>
         {cond3} 净流入 ≥ {config['netflow_required']} ETH<br>
-        {cond4} 大额转账 ≥ {config['whale_required']} 笔
+        {cond4} 大额转账 ≥ {config['whale_required']} 笔<br>
+        {dir_icon} 方向明确 ({'多' if five_dir==1 else '空' if five_dir==-1 else '无'})
     </div>
     """, unsafe_allow_html=True)
 
@@ -647,7 +651,7 @@ with col_right:
             st.metric("连续亏损", st.session_state.consecutive_losses)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 链上情绪（可折叠）
+    # 链上情绪
     with st.expander("🔗 链上情绪", expanded=False):
         st.write(f"交易所净流入: **{netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
         st.write(f"大额转账: **{whale}** 笔 (模拟)")
@@ -660,16 +664,95 @@ with col_right:
     st.session_state.auto_enabled = auto_enabled
 
     now = datetime.now()
-    # ... 自动交易逻辑同上一版，此处省略（保持原有完整功能）...
-    # 因篇幅限制，自动交易部分可复用上一版代码，请确保完整粘贴。
+    # 自动交易逻辑（与原版相同，已支持双向）
+    if auto_enabled and can_trade_flag and entry_signal != 0:
+        if st.session_state.auto_position is None:
+            st.session_state.auto_position = {
+                'side': 'long' if entry_signal == 1 else 'short',
+                'entry': current_price,
+                'time': now,
+                'leverage': suggested_leverage,
+                'stop': stop_loss,
+                'take': take_profit,
+                'size': position_size
+            }
+            st.success(f"✅ 自动开{st.session_state.auto_position['side']}仓 @ {current_price:.2f}")
+        else:
+            pos = st.session_state.auto_position
+            if (pos['side'] == 'long' and (current_price <= pos['stop'] or current_price >= pos['take'])) or \
+               (pos['side'] == 'short' and (current_price >= pos['stop'] or current_price <= pos['take'])) or \
+               (entry_signal == -1 and pos['side'] == 'long') or \
+               (entry_signal == 1 and pos['side'] == 'short'):
+                if pos['side'] == 'long':
+                    pnl = (current_price - pos['entry']) * pos['size']
+                else:
+                    pnl = (pos['entry'] - current_price) * pos['size']
+                pnl_pct = pnl / (pos['entry'] * pos['size']) * 100.0
+                update_risk_state(pnl, st.session_state.account_balance + st.session_state.daily_pnl, st.session_state.daily_pnl)
+                st.session_state.trade_log.append({
+                    '开仓时间': pos['time'].strftime('%H:%M'),
+                    '方向': pos['side'],
+                    '开仓价': f"{pos['entry']:.2f}",
+                    '平仓时间': now.strftime('%H:%M'),
+                    '平仓价': f"{current_price:.2f}",
+                    '盈亏': f"{pnl:.2f}",
+                    '盈亏%': f"{pnl_pct:.1f}%"
+                })
+                st.session_state.balance_history.append(st.session_state.account_balance + st.session_state.daily_pnl)
+                st.info(f"📉 平仓 {pos['side']}，盈亏: ${pnl:.2f}")
+                st.session_state.auto_position = None
 
-    # 交易日誌和信号历史（可折叠）
+    if st.session_state.auto_position:
+        pos = st.session_state.auto_position
+        pnl = (current_price - pos['entry']) * (1.0 if pos['side']=='long' else -1.0) * pos['size']
+        pnl_pct = (current_price - pos['entry']) / pos['entry'] * 100.0 * (1.0 if pos['side']=='long' else -1.0)
+        liq_price_auto = liquidation_price(pos['entry'], 1 if pos['side']=='long' else -1, pos['leverage'])
+        distance_auto = abs(current_price - liq_price_auto) / current_price * 100.0
+        color_class = "profit" if pnl >= 0 else "loss"
+        st.markdown(f"""
+        <div class="metric" style="padding:8px;">
+            <h4 style="font-size:1rem;">自动模拟持仓</h4>
+            <p style="font-size:0.9rem;">方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']:.1f}x</p>
+            <p style="font-size:0.9rem;">开仓: ${pos['entry']:.2f} ({pos['time'].strftime('%H:%M')})</p>
+            <p style="font-size:1rem;" class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
+            <p style="font-size:0.9rem;">强平价: <span class="warning">${liq_price_auto:.2f}</span> (距 {distance_auto:.1f}%)</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("手动平仓", key="auto_close"):
+            if pos['side'] == 'long':
+                pnl = (current_price - pos['entry']) * pos['size']
+            else:
+                pnl = (pos['entry'] - current_price) * pos['size']
+            pnl_pct = pnl / (pos['entry'] * pos['size']) * 100.0
+            update_risk_state(pnl, st.session_state.account_balance + st.session_state.daily_pnl, st.session_state.daily_pnl)
+            st.session_state.trade_log.append({
+                '开仓时间': pos['time'].strftime('%H:%M'),
+                '方向': pos['side'],
+                '开仓价': f"{pos['entry']:.2f}",
+                '平仓时间': now.strftime('%H:%M'),
+                '平仓价': f"{current_price:.2f}",
+                '盈亏': f"{pnl:.2f}",
+                '盈亏%': f"{pnl_pct:.1f}%"
+            })
+            st.session_state.balance_history.append(st.session_state.account_balance + st.session_state.daily_pnl)
+            st.success(f"平仓，盈亏: ${pnl:.2f}")
+            st.session_state.auto_position = None
+            st.rerun()
+    else:
+        if auto_enabled:
+            if can_trade_flag:
+                st.info("等待信号开仓")
+            else:
+                st.warning("交易暂停中")
+
+    # 交易日誌
     with st.expander("📋 交易日誌", expanded=False):
         if st.session_state.trade_log:
             st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True, height=150)
         else:
             st.info("暂无交易记录")
 
+    # 信号历史
     if entry_signal != 0:
         current_dir = "多" if entry_signal == 1 else "空"
         if not st.session_state.signal_history or st.session_state.signal_history[-1]['方向'] != current_dir:
