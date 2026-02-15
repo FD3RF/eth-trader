@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极神级版（AI交易计划+自动策略测试）
-五层共振 + AI决策 + 动态止损止盈 + 自动模拟交易 + 多币种 + 历史信号
+🚀 合约智能监控中心 · 终极神级版（五大神级功能）
+五层共振 + AI决策 + 动态止损止盈 + 自动模拟交易 + 多币种卡片 + 资金曲线 + 回测 + 交易日志 + 风险预警
 """
 
 import streamlit as st
@@ -326,6 +326,14 @@ def init_risk_state():
         st.session_state.consecutive_losses = 0
     if 'last_date' not in st.session_state:
         st.session_state.last_date = datetime.now().date()
+    if 'balance_history' not in st.session_state:
+        st.session_state.balance_history = []
+    if 'trade_log' not in st.session_state:
+        st.session_state.trade_log = []
+    if 'auto_enabled' not in st.session_state:
+        st.session_state.auto_enabled = False
+    if 'auto_position' not in st.session_state:
+        st.session_state.auto_position = None
 
 def update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage):
     today = datetime.now().date()
@@ -344,6 +352,22 @@ def update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leve
     drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100
     return drawdown
 
+def check_risk_alerts():
+    """风险预警检查"""
+    alerts = []
+    # 连续亏损检查
+    if st.session_state.consecutive_losses >= 3:
+        alerts.append("🚨 连续3笔亏损，建议暂停交易！")
+    # 日亏损检查
+    if st.session_state.daily_pnl < -st.session_state.daily_loss_limit:
+        alerts.append("🚨 当日亏损超限，建议停止交易！")
+    # 回撤检查
+    current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+    drawdown = (st.session_state.peak_balance - current_balance) / st.session_state.peak_balance * 100
+    if drawdown > 20:
+        alerts.append("🚨 账户回撤超过20%，请注意风险！")
+    return alerts
+
 
 # ==================== 强平价格计算 ====================
 def calculate_liquidation_price(entry_price, side, leverage):
@@ -353,8 +377,105 @@ def calculate_liquidation_price(entry_price, side, leverage):
         return entry_price * (1 + 1/leverage)
 
 
+# ==================== 简易回测模块 ====================
+def run_backtest(data_dict, long_th, short_th, initial_balance=10000, lookback_days=30):
+    """
+    简单回测：根据历史K线模拟交易
+    返回：胜率、总收益、最大回撤、盈亏比、交易次数
+    """
+    df = data_dict['15m'].copy()
+    # 取最近lookback_days的数据（假设15m周期）
+    lookback = lookback_days * 96  # 每天96根15m K线
+    df = df.iloc[-lookback:] if len(df) > lookback else df
+    
+    balance = initial_balance
+    peak = balance
+    trades = 0
+    wins = 0
+    losses = 0
+    total_profit = 0
+    total_loss = 0
+    max_drawdown = 0
+    
+    # 模拟持仓
+    position = None
+    entry_price = 0
+    entry_side = None
+    
+    for i in range(len(df)):
+        # 计算当前分数（简化版，用当时的指标）
+        row = df.iloc[i]
+        # 简单分数：基于当时指标（这里仅用RSI和均线示意，实际可用更多特征）
+        score = 0
+        if row['adx'] > 25:
+            score += 30
+        if row['close'] > row['ma60']:
+            score += 15
+        if row['rsi'] > 55 and row['macd'] > row['macd_signal']:
+            score += 15
+        if row['rsi'] < 45 and row['macd'] < row['macd_signal']:
+            score -= 15
+        
+        signal = 0
+        if score >= long_th:
+            signal = 1
+        elif score <= short_th:
+            signal = -1
+        
+        # 交易逻辑
+        if position is None:
+            if signal == 1:
+                position = 'long'
+                entry_price = row['close']
+            elif signal == -1:
+                position = 'short'
+                entry_price = row['close']
+        else:
+            # 平仓条件：信号消失或反向了
+            if (position == 'long' and signal <= 0) or (position == 'short' and signal >= 0):
+                exit_price = row['close']
+                if position == 'long':
+                    pnl = (exit_price - entry_price) / entry_price * 100
+                else:
+                    pnl = (entry_price - exit_price) / entry_price * 100
+                trades += 1
+                if pnl > 0:
+                    wins += 1
+                    total_profit += pnl
+                else:
+                    losses += 1
+                    total_loss += abs(pnl)
+                balance *= (1 + pnl/100)
+                if balance > peak:
+                    peak = balance
+                else:
+                    dd = (peak - balance) / peak * 100
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+                position = None
+        
+        # 更新峰值
+        if balance > peak:
+            peak = balance
+    
+    # 计算指标
+    win_rate = wins / trades if trades > 0 else 0
+    total_return = (balance - initial_balance) / initial_balance * 100
+    avg_win = total_profit / wins if wins > 0 else 0
+    avg_loss = total_loss / losses if losses > 0 else 0
+    profit_factor = total_profit / total_loss if total_loss > 0 else 0
+    
+    return {
+        '胜率': f"{win_rate*100:.1f}%",
+        '总收益': f"{total_return:.1f}%",
+        '最大回撤': f"{max_drawdown:.1f}%",
+        '盈亏比': f"{profit_factor:.2f}",
+        '交易次数': trades
+    }
+
+
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合约智能监控·终极神级版+自动测试", layout="wide")
+st.set_page_config(page_title="合约智能监控·五大神级功能", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -369,11 +490,13 @@ st.markdown("""
 .info-box { background: #1A2A3A; border-left: 6px solid #00F5A0; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
 .trade-plan { background: #232734; padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 6px solid #FFAA00; }
 .dashboard { background: #1A1D27; padding: 15px; border-radius: 8px; border-left: 6px solid #00F5A0; margin-bottom: 10px; }
+.card { background: #1A1D27; border-radius: 5px; padding: 10px; text-align: center; cursor: pointer; }
+.card:hover { background: #2A2D37; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极神级版（AI交易计划+自动测试）")
-st.caption("五层共振 + AI决策 + 动态止损止盈 + 自动模拟交易 + 多币种 + 历史信号")
+st.title("🧠 合约智能监控中心 · 五大神级功能版")
+st.caption("多币种卡片｜资金曲线｜简易回测｜交易日志｜风险预警")
 
 # 初始化
 init_risk_state()
@@ -383,7 +506,7 @@ ai_model = load_ai_model()
 with st.sidebar:
     st.header("⚙️ 控制面板")
     
-    # 币种选择
+    # 币种选择（保留）
     selected_symbol = st.selectbox("主交易对", SYMBOLS, index=0, key="selected_symbol")
     
     main_period = st.selectbox("主图周期", ["15m", "1h", "4h", "1d"], index=0)
@@ -408,11 +531,31 @@ with st.sidebar:
     st.session_state.account_balance = account_balance
     st.session_state.daily_loss_limit = daily_loss_limit
     
-    # ========== 信号阈值设置 ==========
+    # 信号阈值设置
     st.markdown("---")
     st.subheader("🎛️ 信号阈值")
     long_threshold = st.slider("做多信号阈值 (总分)", 50, 95, 80, key="long_threshold")
     short_threshold = st.slider("做空信号阈值 (总分)", 5, 50, 20, key="short_threshold")
+    
+    # ========== 简易回测模块 ==========
+    st.markdown("---")
+    st.subheader("📊 简易回测")
+    backtest_days = st.slider("回测天数", 7, 90, 30)
+    if st.button("运行回测"):
+        with st.spinner("回测中..."):
+            # 获取当前币种的历史数据（复用已获取的数据）
+            fetcher = FreeDataFetcherV5(symbols=[selected_symbol])
+            backtest_data = fetcher.fetch_all()
+            if backtest_data and selected_symbol in backtest_data:
+                bt_result = run_backtest(
+                    backtest_data[selected_symbol]["data_dict"],
+                    long_threshold, short_threshold,
+                    initial_balance=account_balance,
+                    lookback_days=backtest_days
+                )
+                st.success("回测完成")
+                for k, v in bt_result.items():
+                    st.metric(k, v)
 
 # 获取数据
 with st.spinner("获取全市场数据..."):
@@ -421,6 +564,7 @@ with st.spinner("获取全市场数据..."):
 
 # 计算所有币种的五层共振分数
 all_scores = {}
+all_dirs = {}
 for sym, data in all_data.items():
     data_dict = data["data_dict"]
     fear_greed = data["fear_greed"]
@@ -428,7 +572,21 @@ for sym, data in all_data.items():
     chain_whale = data["chain_whale"]
     final_dir, total_score, layer_scores = five_layer_score(data_dict, fear_greed, chain_netflow, chain_whale)
     all_scores[sym] = total_score
+    all_dirs[sym] = final_dir
 st.session_state.all_scores = all_scores
+
+# 多币种实时卡片
+st.markdown("### 🔥 多币种实时信号")
+cols = st.columns(len(SYMBOLS))
+for i, sym in enumerate(SYMBOLS):
+    if sym in all_scores:
+        score = all_scores[sym]
+        dir_ = all_dirs.get(sym, 0)
+        dir_icon = {1: "🟢 多", -1: "🔴 空", 0: "⚪ 观"}[dir_]
+        with cols[i]:
+            if st.button(f"{sym}\n{dir_icon}\n{score}", key=f"card_{sym}"):
+                st.session_state.selected_symbol = sym
+                st.rerun()
 
 # 当前选中的币种数据
 if selected_symbol not in all_data:
@@ -443,7 +601,7 @@ chain_whale = data["chain_whale"]
 
 # 计算当前币种的五层共振
 final_dir, total_score, layer_scores = five_layer_score(data_dict, fear_greed, chain_netflow, chain_whale)
-st.session_state.total_score = total_score   # 用于下单按钮
+st.session_state.total_score = total_score
 
 # 检测市场模式
 market_mode = detect_market_mode(data_dict)
@@ -451,7 +609,7 @@ market_mode = detect_market_mode(data_dict)
 # 计算ATR%和ADX
 atr_pct = 0
 adx = 0
-atr_value = 0  # ATR绝对值
+atr_value = 0
 if '15m' in data_dict:
     df_15m = data_dict['15m']
     atr_series = df_15m['atr']
@@ -460,7 +618,7 @@ if '15m' in data_dict:
     atr_pct = df_15m['atr_pct'].iloc[-1]
     adx = df_15m['adx'].iloc[-1]
 
-# 计算预期胜率（基于五层）
+# 计算预期胜率
 win_prob = calculate_win_probability(total_score, layer_scores, atr_pct, adx)
 
 # AI预测
@@ -504,6 +662,11 @@ drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, s
 
 # 创建热力图
 heatmap_df = create_heatmap_data(layer_scores, final_dir)
+
+# 风险预警
+alerts = check_risk_alerts()
+for alert in alerts:
+    st.error(alert)
 
 # ========== 显示数据源状态 ==========
 if source_display != "无":
@@ -621,6 +784,10 @@ with col_right:
         if suggested_leverage > 0:
             st.markdown(f"<h3 style='color:#00F5A0; text-align:center;'>建议杠杆：{suggested_leverage:.1f}x</h3>", unsafe_allow_html=True)
         
+        # 资金曲线图
+        if st.session_state.balance_history:
+            st.line_chart(st.session_state.balance_history)
+        
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ========== 资金面快照 ==========
@@ -680,33 +847,58 @@ with col_right:
     st.markdown("---")
     st.subheader("🧪 策略自动测试")
     
-    # 初始化自动持仓
-    if 'auto_position' not in st.session_state:
-        st.session_state.auto_position = None
-    
-    auto_enabled = st.checkbox("启用自动跟随信号（模拟）")
+    auto_enabled = st.checkbox("启用自动跟随信号（模拟）", value=st.session_state.auto_enabled)
+    st.session_state.auto_enabled = auto_enabled
     
     if auto_enabled:
         # 自动交易逻辑
         if signal_dir != 0:
-            # 有信号
             if st.session_state.auto_position is None:
                 # 无持仓，开仓
                 st.session_state.auto_position = {
                     'side': 'long' if signal_dir == 1 else 'short',
                     'entry': current_price,
                     'time': datetime.now(),
-                    'leverage': 10  # 固定10倍
+                    'leverage': 10
                 }
                 st.success(f"✅ 自动开{st.session_state.auto_position['side']}仓 @ {current_price:.2f}")
+                # 记录开仓
             else:
-                # 已有持仓，检查方向是否一致
                 current_side = 'long' if signal_dir == 1 else 'short'
                 if st.session_state.auto_position['side'] != current_side:
-                    # 方向不一致，先平仓再开新仓
+                    # 平仓旧仓位
                     old = st.session_state.auto_position
-                    pnl = (current_price - old['entry']) * (1 if old['side']=='long' else -1) * old['leverage']
+                    exit_price = current_price
+                    if old['side'] == 'long':
+                        pnl = (exit_price - old['entry']) * old['leverage']
+                    else:
+                        pnl = (old['entry'] - exit_price) * old['leverage']
+                    pnl_pct = pnl / old['entry'] * 100
+                    
+                    # 更新连续亏损计数
+                    if pnl < 0:
+                        st.session_state.consecutive_losses += 1
+                    else:
+                        st.session_state.consecutive_losses = 0
+                    
+                    # 记录交易日志
+                    st.session_state.trade_log.append({
+                        '开仓时间': old['time'].strftime('%H:%M'),
+                        '方向': old['side'],
+                        '开仓价': f"{old['entry']:.2f}",
+                        '平仓时间': datetime.now().strftime('%H:%M'),
+                        '平仓价': f"{exit_price:.2f}",
+                        '盈亏': f"{pnl:.2f}",
+                        '盈亏%': f"{pnl_pct:.1f}%"
+                    })
+                    
+                    # 更新余额历史
+                    current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+                    st.session_state.balance_history.append(current_balance)
+                    
                     st.info(f"📉 信号变化，平仓 {old['side']}，盈亏: ${pnl:.2f}")
+                    
+                    # 开新仓
                     st.session_state.auto_position = {
                         'side': current_side,
                         'entry': current_price,
@@ -715,10 +907,34 @@ with col_right:
                     }
                     st.success(f"✅ 自动开{current_side}仓 @ {current_price:.2f}")
         else:
-            # 无信号，如果有持仓则平仓
             if st.session_state.auto_position is not None:
+                # 平仓
                 old = st.session_state.auto_position
-                pnl = (current_price - old['entry']) * (1 if old['side']=='long' else -1) * old['leverage']
+                exit_price = current_price
+                if old['side'] == 'long':
+                    pnl = (exit_price - old['entry']) * old['leverage']
+                else:
+                    pnl = (old['entry'] - exit_price) * old['leverage']
+                pnl_pct = pnl / old['entry'] * 100
+                
+                if pnl < 0:
+                    st.session_state.consecutive_losses += 1
+                else:
+                    st.session_state.consecutive_losses = 0
+                
+                st.session_state.trade_log.append({
+                    '开仓时间': old['time'].strftime('%H:%M'),
+                    '方向': old['side'],
+                    '开仓价': f"{old['entry']:.2f}",
+                    '平仓时间': datetime.now().strftime('%H:%M'),
+                    '平仓价': f"{exit_price:.2f}",
+                    '盈亏': f"{pnl:.2f}",
+                    '盈亏%': f"{pnl_pct:.1f}%"
+                })
+                
+                current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+                st.session_state.balance_history.append(current_balance)
+                
                 st.info(f"⏸️ 信号消失，平仓 {old['side']}，盈亏: ${pnl:.2f}")
                 st.session_state.auto_position = None
     
@@ -740,7 +956,31 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
         if st.button("手动平仓", key="auto_close"):
-            pnl = (current_price - pos['entry']) * (1 if pos['side']=='long' else -1) * pos['leverage']
+            # 平仓逻辑
+            if pos['side'] == 'long':
+                pnl = (current_price - pos['entry']) * pos['leverage']
+            else:
+                pnl = (pos['entry'] - current_price) * pos['leverage']
+            pnl_pct = pnl / pos['entry'] * 100
+            
+            if pnl < 0:
+                st.session_state.consecutive_losses += 1
+            else:
+                st.session_state.consecutive_losses = 0
+            
+            st.session_state.trade_log.append({
+                '开仓时间': pos['time'].strftime('%H:%M'),
+                '方向': pos['side'],
+                '开仓价': f"{pos['entry']:.2f}",
+                '平仓时间': datetime.now().strftime('%H:%M'),
+                '平仓价': f"{current_price:.2f}",
+                '盈亏': f"{pnl:.2f}",
+                '盈亏%': f"{pnl_pct:.1f}%"
+            })
+            
+            current_balance = st.session_state.account_balance + st.session_state.daily_pnl
+            st.session_state.balance_history.append(current_balance)
+            
             st.success(f"平仓，盈亏: ${pnl:.2f}")
             st.session_state.auto_position = None
             st.rerun()
@@ -750,11 +990,17 @@ with col_right:
         else:
             st.info("启用自动跟随以测试策略")
 
+    # ========== 交易日志表格 ==========
+    with st.expander("📋 交易日志"):
+        if st.session_state.trade_log:
+            st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True)
+        else:
+            st.info("暂无交易记录")
+
     # ========== 历史信号记录 ==========
     if 'signal_history' not in st.session_state:
         st.session_state.signal_history = []
 
-    # 检测新信号（与上次记录的信号不同）
     if total_score >= st.session_state.long_threshold or total_score <= st.session_state.short_threshold:
         current_dir = "多" if total_score >= st.session_state.long_threshold else "空" if total_score <= st.session_state.short_threshold else "观望"
         if not st.session_state.signal_history or st.session_state.signal_history[-1]['方向'] != current_dir:
