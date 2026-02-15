@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 机构量化终端 · 融合版
+🚀 机构量化终端 · 融合版（完整版）
 环境 → 规则 → 信号 → 风险 → 资本 → 监控
-加入入场条件、链上情绪、增强图表
+入场条件 | 链上情绪 | 增强图表 | 自动交易 | Telegram通知
 """
 
 import streamlit as st
@@ -35,6 +35,12 @@ LEVERAGE_MODES = {
     "中倍试炼 (20-50x)": (20, 50),
     "高倍神级 (50-125x)": (50, 125)
 }
+
+# Telegram 初始配置（从session_state读取）
+if 'telegram_token' not in st.session_state:
+    st.session_state.telegram_token = ""
+if 'telegram_chat_id' not in st.session_state:
+    st.session_state.telegram_chat_id = ""
 
 # ==================== 免费数据获取器 ====================
 class FreeDataFetcherV5:
@@ -327,6 +333,17 @@ def liquidation_price(entry_price, side, leverage):
         return entry_price * (1 + 1.0/leverage)
 
 
+def send_telegram_message(message):
+    """发送Telegram通知"""
+    if st.session_state.telegram_token and st.session_state.telegram_chat_id:
+        url = f"https://api.telegram.org/bot{st.session_state.telegram_token}/sendMessage"
+        data = {"chat_id": st.session_state.telegram_chat_id, "text": message, "parse_mode": "HTML"}
+        try:
+            requests.post(url, json=data, timeout=5)
+        except:
+            pass
+
+
 def init_risk_state():
     if 'consecutive_losses' not in st.session_state:
         st.session_state.consecutive_losses = 0
@@ -390,7 +407,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏛️ 机构量化终端 · 融合版")
-st.caption("环境 → 规则 → 信号 → 风险 → 资本 → 监控 · 入场条件 | 链上情绪 | 增强图表")
+st.caption("环境 → 规则 → 信号 → 风险 → 资本 → 监控 · 入场条件 | 链上情绪 | 增强图表 | 自动交易 | Telegram通知")
 
 init_risk_state()
 
@@ -421,6 +438,22 @@ with st.sidebar:
     st.session_state.account_balance = account_balance
     daily_loss_limit = st.number_input("日亏损限额 (USDT)", value=DAILY_LOSS_LIMIT, step=50.0, format="%.2f")
     st.session_state.daily_loss_limit = daily_loss_limit
+
+    # ====== 新增 Telegram 配置 ======
+    st.markdown("---")
+    st.subheader("📲 Telegram通知")
+    use_telegram = st.checkbox("启用Telegram通知", value=False)
+    if use_telegram:
+        bot_token = st.text_input("Bot Token", type="password", key="telegram_bot_token_input")
+        chat_id = st.text_input("Chat ID", key="telegram_chat_id_input")
+        if bot_token and chat_id:
+            st.session_state.telegram_token = bot_token
+            st.session_state.telegram_chat_id = chat_id
+        else:
+            st.warning("请输入Token和Chat ID")
+    else:
+        st.session_state.telegram_token = ""
+        st.session_state.telegram_chat_id = ""
 
 # ==================== 获取数据 ====================
 with st.spinner("获取市场数据..."):
@@ -624,20 +657,6 @@ with col_left:
     st.table(df_monitor)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ⑦ 执行日志（折叠）
-    with st.expander("⑦ 执行日志"):
-        tab1, tab2 = st.tabs(["交易记录", "信号历史"])
-        with tab1:
-            if st.session_state.trade_log:
-                st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True, height=150)
-            else:
-                st.info("暂无交易记录")
-        with tab2:
-            if st.session_state.signal_history:
-                st.dataframe(pd.DataFrame(st.session_state.signal_history), use_container_width=True, height=150)
-            else:
-                st.info("暂无历史信号")
-
 with col_right:
     # 图表：K线 + 成交量 + RSI（增强版）
     st.subheader(f"📈 {selected_symbol} K线 ({main_period})")
@@ -683,7 +702,27 @@ with col_right:
     else:
         st.warning("K线数据不可用")
 
-# ==================== 自动交易逻辑（保留原样，但不在主界面显示，仅用于日志）====================
+    # ====== 自动化控制（新增） ======
+    st.markdown("---")
+    st.subheader("🤖 自动化")
+    auto_enabled = st.checkbox("启用模拟自动跟随", value=st.session_state.auto_enabled)
+    st.session_state.auto_enabled = auto_enabled
+
+    # ====== 执行日志（折叠） ======
+    with st.expander("⑦ 执行日志"):
+        tab1, tab2 = st.tabs(["交易记录", "信号历史"])
+        with tab1:
+            if st.session_state.trade_log:
+                st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True, height=150)
+            else:
+                st.info("暂无交易记录")
+        with tab2:
+            if st.session_state.signal_history:
+                st.dataframe(pd.DataFrame(st.session_state.signal_history), use_container_width=True, height=150)
+            else:
+                st.info("暂无历史信号")
+
+# ==================== 自动交易逻辑（放在底部，不影响界面）====================
 now = datetime.now()
 if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_signal != 0:
     if st.session_state.auto_position is None:
@@ -696,12 +735,17 @@ if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_sign
             'take': take_profit,
             'size': position_size
         }
+        # 记录信号历史
         st.session_state.signal_history.append({
             '时间': now.strftime("%H:%M"),
             '方向': '多' if entry_signal == 1 else '空',
             '市场': market_mode,
             '多因子强度': five_total
         })
+        # 发送Telegram通知（如果启用）
+        if st.session_state.telegram_token and st.session_state.telegram_chat_id:
+            msg = f"🚀 <b>开仓信号</b>\n品种: {selected_symbol}\n方向: {'多' if entry_signal==1 else '空'}\n价格: ${current_price:.2f}\n杠杆: {suggested_leverage:.1f}x"
+            send_telegram_message(msg)
     else:
         pos = st.session_state.auto_position
         if (pos['side'] == 'long' and (current_price <= pos['stop'] or current_price >= pos['take'])) or \
@@ -725,3 +769,7 @@ if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_sign
             })
             st.session_state.balance_history.append(st.session_state.account_balance + st.session_state.daily_pnl)
             st.session_state.auto_position = None
+            # 发送Telegram平仓通知
+            if st.session_state.telegram_token and st.session_state.telegram_chat_id:
+                msg = f"🔔 <b>平仓</b>\n品种: {selected_symbol}\n方向: {pos['side']}\n平仓价: ${current_price:.2f}\n盈亏: ${pnl:.2f} ({pnl_pct:.1f}%)"
+                send_telegram_message(msg)
