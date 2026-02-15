@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 机构量化终端 · 融合版（完整版）
+🚀 终极量化终端 · 神境100分版
 环境 → 规则 → 信号 → 风险 → 资本 → 监控
-入场条件 | 链上情绪 | 增强图表 | 自动交易 | Telegram通知
+五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表
 """
 
 import streamlit as st
@@ -36,14 +36,8 @@ LEVERAGE_MODES = {
     "高倍神级 (50-125x)": (50, 125)
 }
 
-# Telegram 初始配置（从session_state读取）
-if 'telegram_token' not in st.session_state:
-    st.session_state.telegram_token = ""
-if 'telegram_chat_id' not in st.session_state:
-    st.session_state.telegram_chat_id = ""
-
-# ==================== 免费数据获取器 ====================
-class FreeDataFetcherV5:
+# ==================== 数据获取器（终极稳定版）====================
+class DataFetcher:
     def __init__(self, symbols=None):
         if symbols is None:
             symbols = SYMBOLS
@@ -53,7 +47,7 @@ class FreeDataFetcherV5:
         self.timeout = 10
         self.exchange = ccxt.mexc({'enableRateLimit': True, 'timeout': 30000})
         self.fng_url = "https://api.alternative.me/fng/"
-        self.chain_netflow = 5234
+        self.chain_netflow = 5234   # 模拟值（可替换为真实API）
         self.chain_whale = 128
 
     def fetch_kline(self, symbol, timeframe):
@@ -334,10 +328,11 @@ def liquidation_price(entry_price, side, leverage):
 
 
 def send_telegram_message(message):
-    """发送Telegram通知"""
-    if st.session_state.telegram_token and st.session_state.telegram_chat_id:
-        url = f"https://api.telegram.org/bot{st.session_state.telegram_token}/sendMessage"
-        data = {"chat_id": st.session_state.telegram_chat_id, "text": message, "parse_mode": "HTML"}
+    token = st.session_state.get("telegram_token", "")
+    chat_id = st.session_state.get("telegram_chat_id", "")
+    if token and chat_id:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
         try:
             requests.post(url, json=data, timeout=5)
         except:
@@ -387,34 +382,29 @@ def can_trade():
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="机构量化终端 · 融合版", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 神境100分", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; font-size: 0.85rem; }
 .card { background: #1A1D27; border-radius: 4px; padding: 10px; margin-bottom: 8px; border-left: 4px solid #00F5A0; }
 .card-header { font-size: 0.9rem; color: #8A8F9C; margin-bottom: 6px; }
-.metric-row { display: flex; justify-content: space-between; }
-.metric-item { text-align: left; }
 .metric-label { font-size: 0.75rem; color: #8A8F9C; }
 .metric-value { font-size: 1.1rem; font-weight: bold; }
 .risk-factor { display: flex; justify-content: space-between; font-size: 0.9rem; padding: 2px 0; }
 .risk-line { border-top: 1px solid #333; margin: 6px 0; }
-.factor-name { color: #8A8F9C; }
-.factor-value { font-weight: bold; }
 .eligibility-blocked { color: #FF5555; font-weight: bold; }
 .eligibility-active { color: #00F5A0; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏛️ 机构量化终端 · 融合版")
-st.caption("环境 → 规则 → 信号 → 风险 → 资本 → 监控 · 入场条件 | 链上情绪 | 增强图表 | 自动交易 | Telegram通知")
+st.title("🏆 终极量化终端 · 神境100分版")
+st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表")
 
 init_risk_state()
 
-# ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("⚙️ 市场设置")
-    selected_symbol = st.selectbox("交易品种", SYMBOLS, index=0, key="selected_symbol")
+    selected_symbol = st.selectbox("交易品种", SYMBOLS, index=0)
     main_period = st.selectbox("分析周期", ["15m", "1h", "4h", "1d"], index=0)
     auto_refresh = st.checkbox("自动刷新", value=True)
     refresh_interval = st.number_input("刷新间隔(秒)", min_value=5, max_value=300, value=60, step=1, disabled=not auto_refresh)
@@ -425,10 +415,10 @@ with st.sidebar:
     st.subheader("🧬 策略模式")
     manual_mode = st.selectbox("手动选择", ["稳健", "无敌", "神级"], index=0)
     auto_mode = st.checkbox("自动模式切换 (AI 推荐)", value=False)
-    st.markdown("---")
 
+    st.markdown("---")
     st.subheader("🔥 高倍试炼")
-    leverage_mode = st.selectbox("杠杆模式", list(LEVERAGE_MODES.keys()), index=0)
+    leverage_mode = st.selectbox("杠杆模式", list(LEVERAGE_MODES.keys()), index=1)
     min_lev, max_lev = LEVERAGE_MODES[leverage_mode]
     st.info(f"当前试炼范围: {min_lev}x - {max_lev}x")
 
@@ -439,13 +429,12 @@ with st.sidebar:
     daily_loss_limit = st.number_input("日亏损限额 (USDT)", value=DAILY_LOSS_LIMIT, step=50.0, format="%.2f")
     st.session_state.daily_loss_limit = daily_loss_limit
 
-    # ====== 新增 Telegram 配置 ======
     st.markdown("---")
     st.subheader("📲 Telegram通知")
     use_telegram = st.checkbox("启用Telegram通知", value=False)
     if use_telegram:
-        bot_token = st.text_input("Bot Token", type="password", key="telegram_bot_token_input")
-        chat_id = st.text_input("Chat ID", key="telegram_chat_id_input")
+        bot_token = st.text_input("Bot Token", type="password")
+        chat_id = st.text_input("Chat ID")
         if bot_token and chat_id:
             st.session_state.telegram_token = bot_token
             st.session_state.telegram_chat_id = chat_id
@@ -455,17 +444,14 @@ with st.sidebar:
         st.session_state.telegram_token = ""
         st.session_state.telegram_chat_id = ""
 
-# ==================== 获取数据 ====================
+# 获取数据
 with st.spinner("获取市场数据..."):
-    fetcher = FreeDataFetcherV5(symbols=SYMBOLS)
+    fetcher = DataFetcher(symbols=SYMBOLS)
     all_data = fetcher.fetch_all()
 
-# ==================== 多品种卡片（顶部快捷栏）====================
-# 改为表格形式放在底部，此处移除，直接在底部实现
-
-# ==================== 当前品种数据处理 ====================
+# 处理当前品种
 if selected_symbol not in all_data or all_data[selected_symbol]["data_dict"] is None:
-    st.error(f"❌ 品种 {selected_symbol} 数据不可用，请稍后重试")
+    st.error(f"❌ 品种 {selected_symbol} 数据不可用")
     st.stop()
 
 data = all_data[selected_symbol]
@@ -476,13 +462,10 @@ source_display = data["source"]
 netflow = data["chain_netflow"]
 whale = data["chain_whale"]
 
-# 多因子强度
 five_dir, five_total, layer_scores = five_layer_score(data_dict, fear_greed, netflow, whale)
-
-# 市场环境
 market_mode, atr_pct, adx = evaluate_market(data_dict)
 
-# 自动模式选择
+# 自动模式
 if auto_mode:
     if five_total >= 80 and fear_greed <= 10 and atr_pct <= 2.5:
         mode = "神级"
@@ -512,7 +495,7 @@ if entry_signal != 0 and atr_value > 0:
         position_pct
     )
 
-# 计算风险因子
+# 风险因子
 F_quality = five_total / 100.0
 F_volatility = 1.0 if atr_pct > 0.8 else 0.5
 drawdown = update_risk_state(0.0, st.session_state.account_balance + st.session_state.daily_pnl, st.session_state.daily_pnl)
@@ -520,10 +503,9 @@ F_drawdown = 1.0 if drawdown < 10 else 0.5
 F_loss_streak = 1.0 if st.session_state.consecutive_losses < 3 else 0.5
 R_final = BASE_RISK * F_quality * F_volatility * F_drawdown * F_loss_streak
 R_final = max(0.001, min(0.02, R_final))
-
 capital_at_risk = st.session_state.account_balance * R_final
 
-# 强平价格计算
+# 强平
 if entry_signal == 1:
     liq_price = liquidation_price(current_price, 1, suggested_leverage)
     distance_to_liq = (current_price - liq_price) / current_price * 100
@@ -537,7 +519,7 @@ else:
 can_trade_flag = can_trade()
 eligibility = "活跃" if can_trade_flag and entry_signal != 0 else "禁止"
 
-# ==================== 主布局：左侧信息面板，右侧图表 ====================
+# 主布局
 col_left, col_right = st.columns([1.4, 1.6])
 
 with col_left:
@@ -545,14 +527,10 @@ with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">① 全球宏观面板</div>', unsafe_allow_html=True)
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    with col_m1:
-        st.markdown(f"<div class='metric-label'>市场状态</div><div class='metric-value'>{market_mode}</div>", unsafe_allow_html=True)
-    with col_m2:
-        st.markdown(f"<div class='metric-label'>波动率(ATR)</div><div class='metric-value'>{atr_pct:.2f}%</div>", unsafe_allow_html=True)
-    with col_m3:
-        st.markdown(f"<div class='metric-label'>趋势强度</div><div class='metric-value'>{adx:.1f}</div>", unsafe_allow_html=True)
-    with col_m4:
-        st.markdown(f"<div class='metric-label'>恐惧指数</div><div class='metric-value'>{fear_greed}</div>", unsafe_allow_html=True)
+    with col_m1: st.markdown(f"<div class='metric-label'>市场状态</div><div class='metric-value'>{market_mode}</div>", unsafe_allow_html=True)
+    with col_m2: st.markdown(f"<div class='metric-label'>波动率(ATR)</div><div class='metric-value'>{atr_pct:.2f}%</div>", unsafe_allow_html=True)
+    with col_m3: st.markdown(f"<div class='metric-label'>趋势强度</div><div class='metric-value'>{adx:.1f}</div>", unsafe_allow_html=True)
+    with col_m4: st.markdown(f"<div class='metric-label'>恐惧指数</div><div class='metric-value'>{fear_greed}</div>", unsafe_allow_html=True)
     st.markdown(f"<div style='margin-top:4px;'>数据源: {source_display}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -560,32 +538,24 @@ with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">② 策略概况</div>', unsafe_allow_html=True)
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    with col_s1:
-        st.markdown(f"<div class='metric-label'>策略模式</div><div class='metric-value'>{mode}</div>", unsafe_allow_html=True)
-    with col_s2:
-        st.markdown(f"<div class='metric-label'>杠杆范围</div><div class='metric-value'>{min_lev:.0f}x–{max_lev:.0f}x</div>", unsafe_allow_html=True)
-    with col_s3:
-        st.markdown(f"<div class='metric-label'>AI配置</div><div class='metric-value'>{mode}</div>", unsafe_allow_html=True)
-    with col_s4:
-        st.markdown(f"<div class='metric-label'>日亏损限额</div><div class='metric-value'>{DAILY_LOSS_LIMIT:.0f} USDT</div>", unsafe_allow_html=True)
+    with col_s1: st.markdown(f"<div class='metric-label'>策略模式</div><div class='metric-value'>{mode}</div>", unsafe_allow_html=True)
+    with col_s2: st.markdown(f"<div class='metric-label'>杠杆范围</div><div class='metric-value'>{min_lev:.0f}x–{max_lev:.0f}x</div>", unsafe_allow_html=True)
+    with col_s3: st.markdown(f"<div class='metric-label'>AI配置</div><div class='metric-value'>{mode}</div>", unsafe_allow_html=True)
+    with col_s4: st.markdown(f"<div class='metric-label'>日亏损限额</div><div class='metric-value'>{DAILY_LOSS_LIMIT:.0f} USDT</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ③ 信号引擎（加入入场条件）
+    # ③ 信号引擎 + 入场条件
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">③ 信号引擎</div>', unsafe_allow_html=True)
     col_i1, col_i2, col_i3, col_i4 = st.columns(4)
-    with col_i1:
-        st.markdown(f"<div class='metric-label'>品种</div><div class='metric-value'>{selected_symbol}</div>", unsafe_allow_html=True)
-    with col_i2:
-        st.markdown(f"<div class='metric-label'>周期</div><div class='metric-value'>{main_period}</div>", unsafe_allow_html=True)
+    with col_i1: st.markdown(f"<div class='metric-label'>品种</div><div class='metric-value'>{selected_symbol}</div>", unsafe_allow_html=True)
+    with col_i2: st.markdown(f"<div class='metric-label'>周期</div><div class='metric-value'>{main_period}</div>", unsafe_allow_html=True)
     with col_i3:
         status = "等待" if entry_signal == 0 else ("做多" if entry_signal == 1 else "做空")
         st.markdown(f"<div class='metric-label'>信号状态</div><div class='metric-value'>{status}</div>", unsafe_allow_html=True)
-    with col_i4:
-        st.markdown(f"<div class='metric-label'>强度</div><div class='metric-value'>{five_total}/100</div>", unsafe_allow_html=True)
+    with col_i4: st.markdown(f"<div class='metric-label'>强度</div><div class='metric-value'>{five_total}/100</div>", unsafe_allow_html=True)
     st.markdown(f"<div style='margin-top:6px;'><span class='metric-label'>执行资格:</span> <span class='eligibility-{'active' if eligibility=='活跃' else 'blocked'}'>{eligibility}</span></div>", unsafe_allow_html=True)
 
-    # 入场条件（新增）
     st.markdown("#### 入场条件")
     cond1 = "✅" if five_total >= config['min_five_score'] else "❌"
     cond2 = "✅" if fear_greed <= config['fear_threshold'] else "❌"
@@ -603,16 +573,16 @@ with col_left:
     """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ④ 风险引擎（核心）
+    # ④ 风险引擎
     st.markdown('<div class="card" style="border-left-color: #FFAA00;">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">④ 风险引擎</div>', unsafe_allow_html=True)
-    st.markdown('<div class="risk-factor"><span class="factor-name">F_quality</span><span class="factor-value">{:.2f}</span></div>'.format(F_quality), unsafe_allow_html=True)
-    st.markdown('<div class="risk-factor"><span class="factor-name">F_volatility</span><span class="factor-value">{:.2f}</span></div>'.format(F_volatility), unsafe_allow_html=True)
-    st.markdown('<div class="risk-factor"><span class="factor-name">F_drawdown</span><span class="factor-value">{:.2f}</span></div>'.format(F_drawdown), unsafe_allow_html=True)
-    st.markdown('<div class="risk-factor"><span class="factor-name">F_loss_streak</span><span class="factor-value">{:.2f}</span></div>'.format(F_loss_streak), unsafe_allow_html=True)
+    st.markdown(f'<div class="risk-factor"><span class="factor-name">F_quality</span><span class="factor-value">{F_quality:.2f}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="risk-factor"><span class="factor-name">F_volatility</span><span class="factor-value">{F_volatility:.2f}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="risk-factor"><span class="factor-name">F_drawdown</span><span class="factor-value">{F_drawdown:.2f}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="risk-factor"><span class="factor-name">F_loss_streak</span><span class="factor-value">{F_loss_streak:.2f}</span></div>', unsafe_allow_html=True)
     st.markdown('<div class="risk-line"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="risk-factor"><span class="factor-name">R_final</span><span class="factor-value">{:.2f}%</span></div>'.format(R_final*100), unsafe_allow_html=True)
-    st.markdown('<div style="display:flex; justify-content:space-between; margin-top:8px;">'
+    st.markdown(f'<div class="risk-factor"><span class="factor-name">R_final</span><span class="factor-value">{R_final*100:.2f}%</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="display:flex; justify-content:space-between; margin-top:8px;">'
                 f'<div><span class="metric-label">资本风险</span><br><span class="metric-value">{capital_at_risk:.1f} USDT</span></div>'
                 f'<div><span class="metric-label">建议杠杆</span><br><span class="metric-value">{suggested_leverage:.1f}x</span></div>'
                 f'<div><span class="metric-label">仓位分配</span><br><span class="metric-value">动态</span></div>'
@@ -623,42 +593,35 @@ with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">⑤ 资本状态</div>', unsafe_allow_html=True)
     col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-    with col_c1:
-        st.markdown(f"<div class='metric-label'>账户余额</div><div class='metric-value'>{st.session_state.account_balance:.0f} USDT</div>", unsafe_allow_html=True)
-    with col_c2:
-        st.markdown(f"<div class='metric-label'>日盈亏</div><div class='metric-value'>{st.session_state.daily_pnl:.1f}</div>", unsafe_allow_html=True)
-    with col_c3:
-        st.markdown(f"<div class='metric-label'>当前回撤</div><div class='metric-value'>{drawdown:.2f}%</div>", unsafe_allow_html=True)
-    with col_c4:
-        st.markdown(f"<div class='metric-label'>连亏次数</div><div class='metric-value'>{st.session_state.consecutive_losses}</div>", unsafe_allow_html=True)
-    # 链上情绪（折叠）
+    with col_c1: st.markdown(f"<div class='metric-label'>账户余额</div><div class='metric-value'>{st.session_state.account_balance:.0f} USDT</div>", unsafe_allow_html=True)
+    with col_c2: st.markdown(f"<div class='metric-label'>日盈亏</div><div class='metric-value'>{st.session_state.daily_pnl:.1f}</div>", unsafe_allow_html=True)
+    with col_c3: st.markdown(f"<div class='metric-label'>当前回撤</div><div class='metric-value'>{drawdown:.2f}%</div>", unsafe_allow_html=True)
+    with col_c4: st.markdown(f"<div class='metric-label'>连亏次数</div><div class='metric-value'>{st.session_state.consecutive_losses}</div>", unsafe_allow_html=True)
     with st.expander("🔗 链上情绪", expanded=False):
         st.write(f"交易所净流入: **{netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
         st.write(f"大额转账: **{whale}** 笔 (模拟)")
         st.write(f"恐惧贪婪指数: **{fear_greed}**")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ⑥ 市场监控（底部表格）
+    # ⑥ 市场监控
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">⑥ 市场监控</div>', unsafe_allow_html=True)
     monitor_data = []
     for sym in SYMBOLS:
         if sym in all_data and all_data[sym]["data_dict"] is not None:
-            df_dict = all_data[sym]["data_dict"]
+            d = all_data[sym]["data_dict"]
             f = all_data[sym]["fear_greed"]
             n = all_data[sym]["chain_netflow"]
             w = all_data[sym]["chain_whale"]
-            dir_, total, _ = five_layer_score(df_dict, f, n, w)
+            _, total, _ = five_layer_score(d, f, n, w)
             status = "活跃" if total >= 60 else "中性"
             monitor_data.append([sym, total, status])
         else:
             monitor_data.append([sym, "—", "不可用"])
-    df_monitor = pd.DataFrame(monitor_data, columns=["品种", "强度", "状态"])
-    st.table(df_monitor)
+    st.table(pd.DataFrame(monitor_data, columns=["品种", "强度", "状态"]))
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col_right:
-    # 图表：K线 + 成交量 + RSI（增强版）
     st.subheader(f"📈 {selected_symbol} K线 ({main_period})")
     if main_period in data_dict:
         df = data_dict[main_period].tail(100).copy()
@@ -666,12 +629,10 @@ with col_right:
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                            row_heights=[0.6, 0.2, 0.2],
                            subplot_titles=("", "", ""))
-        # K线
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                      low=df['low'], close=df['close'], name="K线", showlegend=False), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['日期'], y=df['ema20'], name="EMA20", line=dict(color="orange", width=1), showlegend=False), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['日期'], y=df['ema50'], name="EMA50", line=dict(color="blue", width=1), showlegend=False), row=1, col=1)
-        # 当前价格水平线
+        fig.add_trace(go.Scatter(x=df['日期'], y=df['ema20'], line=dict(color="orange", width=1), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['日期'], y=df['ema50'], line=dict(color="blue", width=1), showlegend=False), row=1, col=1)
         fig.add_hline(y=current_price, line_dash="dot", line_color="white", annotation_text=f"现价 {current_price:.2f}", row=1, col=1)
 
         if entry_signal != 0:
@@ -682,14 +643,12 @@ with col_right:
             fig.add_annotation(x=last_date, y=last_price * (1.02 if entry_signal==1 else 0.98),
                                text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
 
-        # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple", width=1), showlegend=False), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
         latest_rsi = df['rsi'].iloc[-1]
         fig.add_annotation(x=df['日期'].iloc[-1], y=latest_rsi, text=f"RSI: {latest_rsi:.1f}", showarrow=False, xanchor='left', row=2, col=1, font=dict(size=9, color="white"))
 
-        # 成交量
         colors_vol = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
         fig.add_trace(go.Bar(x=df['日期'], y=df['volume'], name="成交量", marker_color=colors_vol, showlegend=False), row=3, col=1)
 
@@ -702,13 +661,13 @@ with col_right:
     else:
         st.warning("K线数据不可用")
 
-    # ====== 自动化控制（新增） ======
+    # 自动化
     st.markdown("---")
     st.subheader("🤖 自动化")
     auto_enabled = st.checkbox("启用模拟自动跟随", value=st.session_state.auto_enabled)
     st.session_state.auto_enabled = auto_enabled
 
-    # ====== 执行日志（折叠） ======
+    # 执行日志
     with st.expander("⑦ 执行日志"):
         tab1, tab2 = st.tabs(["交易记录", "信号历史"])
         with tab1:
@@ -722,7 +681,7 @@ with col_right:
             else:
                 st.info("暂无历史信号")
 
-# ==================== 自动交易逻辑（放在底部，不影响界面）====================
+# ==================== 自动交易逻辑（后台运行）====================
 now = datetime.now()
 if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_signal != 0:
     if st.session_state.auto_position is None:
@@ -735,15 +694,13 @@ if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_sign
             'take': take_profit,
             'size': position_size
         }
-        # 记录信号历史
         st.session_state.signal_history.append({
             '时间': now.strftime("%H:%M"),
             '方向': '多' if entry_signal == 1 else '空',
             '市场': market_mode,
             '多因子强度': five_total
         })
-        # 发送Telegram通知（如果启用）
-        if st.session_state.telegram_token and st.session_state.telegram_chat_id:
+        if use_telegram and st.session_state.telegram_token:
             msg = f"🚀 <b>开仓信号</b>\n品种: {selected_symbol}\n方向: {'多' if entry_signal==1 else '空'}\n价格: ${current_price:.2f}\n杠杆: {suggested_leverage:.1f}x"
             send_telegram_message(msg)
     else:
@@ -769,7 +726,6 @@ if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_sign
             })
             st.session_state.balance_history.append(st.session_state.account_balance + st.session_state.daily_pnl)
             st.session_state.auto_position = None
-            # 发送Telegram平仓通知
-            if st.session_state.telegram_token and st.session_state.telegram_chat_id:
+            if use_telegram and st.session_state.telegram_token:
                 msg = f"🔔 <b>平仓</b>\n品种: {selected_symbol}\n方向: {pos['side']}\n平仓价: ${current_price:.2f}\n盈亏: ${pnl:.2f} ({pnl_pct:.1f}%)"
                 send_telegram_message(msg)
