@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合約智能監控中心 · 終極驅動版（五層權重 + 生存保護增強）
-市場環境層 | 五層共振（驅動倉位） | 風險控制 | 資金管理 | 生存保護（連虧降級/回撤保護/波動驟停）
+🚀 合約智能監控中心 · 終極資金曲線版（風險因子驅動）
+市場環境層 | 信號層 | 風險因子層 | 資金管理層 | 生存保護層
 多幣種卡片｜資金曲線｜簡易回測｜交易日誌｜風險預警
 """
 
@@ -25,7 +25,7 @@ warnings.filterwarnings('ignore')
 
 # ==================== 全域配置 ====================
 SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
-RISK_PCT = 0.01                     # 單筆風險 1%
+R_BASE = 0.01                       # 基礎風險 1%
 MAX_LEVERAGE = 20.0                 # 最大槓桿
 STOP_ATR = 1.5                      # 止損倍數
 TAKE_ATR = 3.0                      # 止盈倍數
@@ -33,7 +33,7 @@ CONSECUTIVE_LOSS_LIMIT = 3          # 連虧煞車閾值
 CONSECUTIVE_STOP_HOURS = 24         # 連虧暫停小時數
 MAX_DRAWDOWN = 20.0                  # 最大回撤警戒線
 DAILY_LOSS_LIMIT = 300.0             # 日虧損限額
-MIN_ATR_PCT = 0.8                    # 最小波動率要求（低於此值禁止交易）
+MIN_ATR_PCT = 0.8                    # 最小波動率要求（低於此值風險減半，但不禁止交易）
 
 # ==================== 免費數據獲取器（支援多幣種）====================
 class FreeDataFetcherV5:
@@ -114,11 +114,37 @@ class FreeDataFetcherV5:
         return df
 
 
-# ==================== 五層共振評分（驅動核心）====================
+# ==================== 市場環境層 ====================
+def evaluate_market(df_dict):
+    """判斷市場狀態：趨勢/震盪/禁止交易（僅供參考，不強制禁止）"""
+    if '15m' not in df_dict:
+        return "未知", 0.0, 0.0
+    df = df_dict['15m']
+    last = df.iloc[-1]
+
+    ema20 = last['ema20']
+    ema50 = last['ema50']
+    adx = last['adx']
+    atr_pct = last['atr_pct']
+
+    # 異常波動檢測（僅警告，不禁止）
+    body = abs(last['close'] - last['open'])
+    if body > 3 * last['atr']:
+        return "異常波動", atr_pct, adx
+
+    if ema20 > ema50 and adx > 20:
+        return "趨勢", atr_pct, adx
+    elif adx < 25:
+        return "震盪", atr_pct, adx
+    else:
+        return "不明確", atr_pct, adx
+
+
+# ==================== 五層共振評分（用於風險因子）====================
 def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     """
     五層共振評分，每層20分，總分0-100
-    返回：(方向: 1多/-1空/0觀望, 總分, 各層分數)
+    返回：(方向, 總分, 各層分數) 方向保留供參考，不影響信號
     """
     if not df_dict or '15m' not in df_dict or '1h' not in df_dict or '4h' not in df_dict or '1d' not in df_dict:
         return 0, 0, {}
@@ -165,7 +191,6 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     # 3. 資金面層 (20分) - 模擬
     fund_score = 0
     fund_dir = 0
-    # 可預留未來接入真實數據，目前給0分
 
     # 4. 鏈上/情緒層 (20分)
     chain_score = 0
@@ -200,7 +225,7 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
 
     total_score = trend_score + multi_score + fund_score + chain_score + momentum_score
 
-    # 最終方向：各層方向投票
+    # 最終方向（僅供參考）
     dirs = [trend_dir, multi_dir, fund_dir, chain_dir, momentum_dir]
     dirs = [d for d in dirs if d != 0]
     if len(dirs) >= 3:
@@ -219,63 +244,42 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     return final_dir, total_score, layer_scores
 
 
-# ==================== 市場環境層（硬過濾）====================
-def evaluate_market(df_dict):
-    """判斷市場狀態：趨勢/震盪/禁止交易（加入ATR%硬性過濾）"""
+# ==================== 入場信號層（獨立於五層評分）====================
+def generate_entry_signal(df_dict, market_mode):
+    """根據市場模式生成入場信號，不依賴五層評分"""
     if '15m' not in df_dict:
-        return "禁止交易", 0.0, 0.0
+        return 0
     df = df_dict['15m']
     last = df.iloc[-1]
 
-    ema20 = last['ema20']
-    ema50 = last['ema50']
-    adx = last['adx']
-    atr_pct = last['atr_pct']
-
-    # 異常波動檢測
-    body = abs(last['close'] - last['open'])
-    if body > 3 * last['atr']:
-        return "禁止交易", atr_pct, adx
-
-    # 波動率不足強制禁止
-    if atr_pct < MIN_ATR_PCT:
-        return "禁止交易", atr_pct, adx
-
-    if ema20 > ema50 and adx > 20:
-        return "趨勢", atr_pct, adx
-    elif adx < 25:
-        return "震盪", atr_pct, adx
-    else:
-        return "禁止交易", atr_pct, adx
-
-
-# ==================== 入場信號層（結合五層共振）====================
-def generate_entry_signal(df_dict, market_mode, five_dir, five_total):
-    """
-    基於市場環境和五層方向生成最終信號
-    規則：
-    - 市場禁止交易 → 無信號
-    - 五層總分 < 60 → 無信號
-    - 五層方向與市場基本方向一致 → 採用五層方向，否則觀望
-    """
-    if market_mode == "禁止交易":
-        return 0
-    if five_total < 60:
-        return 0
-
-    # 市場隱含方向（粗略判斷）
     if market_mode == "趨勢":
-        df = df_dict['15m']
-        last = df.iloc[-1]
-        trend_dir = 1 if last['ema20'] > last['ema50'] else -1
-        if five_dir == trend_dir:
-            return five_dir
+        ema20 = last['ema20']
+        ema50 = last['ema50']
+        # 趨勢多：EMA20 > EMA50 且 價格回踩EMA20 且 RSI未過熱
+        if (ema20 > ema50 and 
+            last['close'] >= ema20 * 0.99 and 
+            last['rsi'] < 70 and last['rsi'] > 40):
+            return 1
+        # 趨勢空：EMA20 < EMA50 且 價格反彈至EMA20 且 RSI未超賣
+        elif (ema20 < ema50 and 
+              last['close'] <= ema20 * 1.01 and 
+              last['rsi'] > 30 and last['rsi'] < 60):
+            return -1
         else:
             return 0
     elif market_mode == "震盪":
-        # 震盪市不分方向，只看五層方向
-        return five_dir
+        bb_upper = last['bb_high']
+        bb_lower = last['bb_low']
+        # 下軌買
+        if last['close'] <= bb_lower * 1.01 and last['rsi'] < 30:
+            return 1
+        # 上軌賣
+        elif last['close'] >= bb_upper * 0.99 and last['rsi'] > 70:
+            return -1
+        else:
+            return 0
     else:
+        # 其他狀態（異常波動、不明確）不開倉
         return 0
 
 
@@ -292,17 +296,51 @@ def calculate_stops(entry_price, side, atr_value):
     return stop, take, take_distance/stop_distance
 
 
-# ==================== 資金管理層（動態風險）====================
-def calculate_position_size(balance, entry_price, stop_price, five_total, risk_multiplier=1.0, risk_pct=RISK_PCT, max_leverage=MAX_LEVERAGE):
+# ==================== 風險因子計算 ====================
+def calculate_risk_factors(five_total, atr_pct, drawdown, consecutive_losses):
     """
-    根據五層總分調整風險百分比
-    five_total: 0-100
+    計算最終風險係數 R_final = R_base * F_score * F_vol * F_dd * F_loss
+    限制在 [0.001, 0.02] 之間
     """
-    # 五層得分影響：得分越高，承擔風險越大（0.5倍～1.5倍基礎風險）
-    score_factor = 0.5 + (five_total / 100.0) * 1.0  # 範圍0.5-1.5
-    adjusted_risk_pct = risk_pct * score_factor * risk_multiplier
+    # 1. 質量因子 F_score = five_total / 100
+    F_score = five_total / 100.0
+    F_score = max(0.1, min(1.0, F_score))  # 限制範圍
 
-    risk_amount = balance * adjusted_risk_pct
+    # 2. 波動因子 F_vol 分檔
+    if atr_pct < 0.8:
+        F_vol = 0.5
+    elif atr_pct <= 2.5:
+        F_vol = 1.0
+    else:  # >2.5%
+        F_vol = 0.7
+
+    # 3. 回撤因子 F_dd
+    if drawdown < 10:
+        F_dd = 1.0
+    elif drawdown <= 20:
+        F_dd = 0.5
+    else:
+        F_dd = 0.3
+
+    # 4. 連虧因子 F_loss
+    if consecutive_losses < 3:
+        F_loss = 1.0
+    elif consecutive_losses <= 4:
+        F_loss = 0.5
+    else:
+        F_loss = 0.2
+
+    # 計算最終風險
+    R_final = R_BASE * F_score * F_vol * F_dd * F_loss
+    # 限制範圍
+    R_final = max(0.001, min(0.02, R_final))
+    return R_final, F_score, F_vol, F_dd, F_loss
+
+
+# ==================== 資金管理層 ====================
+def calculate_position_size(balance, entry_price, stop_price, R_final, max_leverage=MAX_LEVERAGE):
+    """根據最終風險比例計算倉位"""
+    risk_amount = balance * R_final
     stop_distance = abs(entry_price - stop_price)
     if stop_distance == 0:
         return 0.0
@@ -313,9 +351,9 @@ def calculate_position_size(balance, entry_price, stop_price, five_total, risk_m
     return round(quantity, 3)
 
 
-# ==================== 生存保護層（增強版）====================
+# ==================== 生存保護層（連虧、回撤、日虧損）====================
 class SurvivalProtection:
-    """生存保護：連虧降級、回撤保護、波動驟停"""
+    """生存保護：記錄連續虧損、回撤、日虧損，並提供因子計算所需數據"""
     def __init__(self):
         self.consecutive_losses = 0
         self.peak_balance = 10000.0
@@ -324,8 +362,6 @@ class SurvivalProtection:
         self.daily_loss_triggered = False
         self.last_mode = None
         self.daily_pnl = 0.0
-        self.original_risk_pct = RISK_PCT
-        self.current_risk_multiplier = 1.0
 
     def update(self, trade_result, current_balance, current_mode, last_kline_time, daily_pnl):
         if trade_result < 0:
@@ -344,48 +380,20 @@ class SurvivalProtection:
         if daily_pnl < -DAILY_LOSS_LIMIT:
             self.daily_loss_triggered = True
 
-        # 連虧降級
-        if self.consecutive_losses >= 2:
-            self.current_risk_multiplier = max(0.2, 1.0 - (self.consecutive_losses - 1) * 0.25)
-        else:
-            self.current_risk_multiplier = 1.0
-
-        # 回撤動態降級
-        if drawdown > 10:
-            self.current_risk_multiplier *= max(0.5, 1.0 - (drawdown - 10) / 20.0)
-        if drawdown > MAX_DRAWDOWN:
-            self.current_risk_multiplier = 0.0
-
-        # 檢查暫停
+        # 檢查是否暫停交易（僅日虧損超限時）
         paused = False
-        if self.consecutive_losses >= CONSECUTIVE_LOSS_LIMIT:
-            paused = True
-            if self.trading_paused_until is None:
-                self.trading_paused_until = last_kline_time + timedelta(hours=CONSECUTIVE_STOP_HOURS)
-        if drawdown > MAX_DRAWDOWN:
-            paused = True
-            if self.trading_paused_until is None:
-                self.trading_paused_until = last_kline_time + timedelta(hours=24)
         if self.daily_loss_triggered:
             paused = True
 
         return paused, drawdown
 
-    def get_risk_multiplier(self, atr_pct_change=None):
-        multiplier = self.current_risk_multiplier
-        if atr_pct_change is not None and atr_pct_change > 50:  # ATR%增幅超過50%
-            multiplier *= 0.5
-        return max(multiplier, 0.0)
-
     def can_trade(self, current_time):
-        if self.trading_paused_until and current_time < self.trading_paused_until:
-            return False
         if self.daily_loss_triggered:
             return False
         return True
 
 
-# ==================== 其他輔助函數 ====================
+# ==================== 強平價格計算 ====================
 def calculate_liquidation_price(entry_price, side, leverage):
     if side == "多單":
         return entry_price * (1 - 1.0/leverage)
@@ -393,8 +401,9 @@ def calculate_liquidation_price(entry_price, side, leverage):
         return entry_price * (1 + 1.0/leverage)
 
 
-def run_backtest(df_dict, market_func, five_func, signal_func, initial_balance=10000.0, lookback_days=30):
-    """簡易回測（適配新邏輯）"""
+# ==================== 簡易回測（適配新邏輯）====================
+def run_backtest(df_dict, market_func, signal_func, five_func, initial_balance=10000.0, lookback_days=30):
+    """簡易回測（忽略風險因子，僅用信號方向測試）"""
     df = df_dict['15m'].copy()
     lookback = lookback_days * 96
     df = df.iloc[-lookback:] if len(df) > lookback else df
@@ -413,13 +422,12 @@ def run_backtest(df_dict, market_func, five_func, signal_func, initial_balance=1
 
     for i in range(len(df)):
         row = df.iloc[i]
-        # 簡化：僅用15m，且用當前fear_greed和鏈上模擬值
         temp_dict = {'15m': df.iloc[:i+1], '1h': None, '4h': None, '1d': None}
         market_mode, _, _ = market_func(temp_dict)
-        five_dir, five_total, _ = five_func(temp_dict, 50, 5000, 100)  # 用默認值
-        signal = signal_func(temp_dict, market_mode, five_dir, five_total)
+        # 信號不依賴五層評分，但五層評分仍需計算（此處用默認值）
+        signal = signal_func(temp_dict, market_mode)
 
-        if market_mode == "禁止交易":
+        if market_mode in ["異常波動", "不明確"]:
             continue
 
         if position is None:
@@ -513,7 +521,7 @@ def update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leve
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合約智能監控·終極驅動版", layout="wide")
+st.set_page_config(page_title="合約智能監控·終極資金曲線版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -533,8 +541,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合約智能監控中心 · 終極驅動版（五層權重+生存保護）")
-st.caption("五層驅動倉位｜硬性波動過濾｜連虧降級｜回撤保護｜波動驟停")
+st.title("🧠 合約智能監控中心 · 終極資金曲線版")
+st.caption("市場環境｜獨立信號｜五層風險因子｜波動分級｜回撤保護｜連虧降級")
 
 init_session_state()
 ai_model = None
@@ -560,7 +568,7 @@ with st.sidebar:
     st.subheader("💰 風控設置")
     account_balance = st.number_input("初始資金 (USDT)", value=st.session_state.account_balance, step=1000.0, format="%.2f")
     daily_loss_limit = st.number_input("日虧損限額 (USDT)", value=DAILY_LOSS_LIMIT, step=50.0, format="%.2f")
-    risk_per_trade = st.slider("單筆風險 (%)", min_value=0.5, max_value=3.0, value=RISK_PCT*100, step=0.5) / 100.0
+    risk_per_trade_display = st.slider("基礎單筆風險 (%)", min_value=0.5, max_value=3.0, value=R_BASE*100, step=0.5) / 100.0
     st.session_state.account_balance = account_balance
 
     st.markdown("---")
@@ -574,8 +582,8 @@ with st.sidebar:
                 bt_result = run_backtest(
                     backtest_data[selected_symbol]["data_dict"],
                     evaluate_market,
-                    five_layer_score,
                     generate_entry_signal,
+                    five_layer_score,  # 回測中五層評分未被使用，僅佔位
                     initial_balance=account_balance,
                     lookback_days=backtest_days
                 )
@@ -602,8 +610,7 @@ for i, sym in enumerate(SYMBOLS):
     if sym in all_data:
         df_dict = all_data[sym]["data_dict"]
         mode, _, _ = evaluate_market(df_dict)
-        five_dir, five_total, _ = five_layer_score(df_dict, all_data[sym]["fear_greed"], all_data[sym]["chain_netflow"], all_data[sym]["chain_whale"])
-        signal = generate_entry_signal(df_dict, mode, five_dir, five_total)
+        signal = generate_entry_signal(df_dict, mode)
         dir_icon = {1: "🟢 多", -1: "🔴 空", 0: "⚪ 觀"}[signal]
         with cols[i]:
             if st.button(f"{sym}\n{dir_icon}\n{mode}", key=f"card_{sym}"):
@@ -621,37 +628,36 @@ source_display = data["source"]
 chain_netflow = data["chain_netflow"]
 chain_whale = data["chain_whale"]
 
-# 五層共振
+# 五層共振評分
 five_dir, five_total, layer_scores = five_layer_score(data_dict, fear_greed, chain_netflow, chain_whale)
 st.session_state.five_total = five_total
 
-# 市場環境
+# 市場環境評估
 market_mode, atr_pct, adx = evaluate_market(data_dict)
 
-# 最終信號
-entry_signal = generate_entry_signal(data_dict, market_mode, five_dir, five_total)
+# 入場信號（獨立）
+entry_signal = generate_entry_signal(data_dict, market_mode)
 
 # ATR值
 atr_value = data_dict['15m']['atr'].iloc[-1] if '15m' in data_dict else 0.0
 
-# 交易計劃
+# 計算風險因子和最終風險比例
+drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage)
+consecutive_losses = st.session_state.protection.consecutive_losses
+R_final, F_score, F_vol, F_dd, F_loss = calculate_risk_factors(five_total, atr_pct, drawdown, consecutive_losses)
+
+# 交易計劃（僅在有信號時）
 stop_loss = take_profit = risk_reward = None
 position_size = 0.0
 if entry_signal != 0 and atr_value > 0:
     stop_loss, take_profit, risk_reward = calculate_stops(current_price, entry_signal, atr_value)
-    # 獲取風險乘數
-    risk_mult = st.session_state.protection.get_risk_multiplier()  # 可傳入ATR變化
+    # 用 R_final 計算倉位
     position_size = calculate_position_size(
         st.session_state.account_balance,
         current_price,
         stop_loss,
-        five_total,
-        risk_mult,
-        risk_pct=risk_per_trade
+        R_final
     )
-
-# 更新風控
-drawdown = update_risk_stats(current_price, sim_entry, sim_side, sim_quantity, sim_leverage)
 
 # 生存保護層檢查
 protection = st.session_state.protection
@@ -670,12 +676,8 @@ st.markdown(f"""
 
 if not can_trade:
     reason = []
-    if protection.consecutive_losses >= CONSECUTIVE_LOSS_LIMIT:
-        reason.append(f"連續{protection.consecutive_losses}筆虧損")
     if protection.daily_loss_triggered:
         reason.append("日虧損超限")
-    if drawdown_protect > MAX_DRAWDOWN:
-        reason.append("回撤超過20%")
     st.error(f"🚨 交易暫停: {', '.join(reason)}")
 
 # 主布局
@@ -685,7 +687,7 @@ with col_left:
     st.markdown(f"<h5>市場狀態: <span style='color:green;'>{market_mode}</span> | ADX: {adx:.1f} | ATR%: {atr_pct:.2f}% | 五層總分: {five_total}</h5>", unsafe_allow_html=True)
 
     # 五層熱力圖
-    st.subheader("🔥 五層權重（驅動倉位）")
+    st.subheader("🔥 五層權重（風險因子）")
     cols = st.columns(5)
     layer_names = list(layer_scores.keys())
     layer_values = list(layer_scores.values())
@@ -733,6 +735,19 @@ with col_right:
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 觀望"}
     st.markdown(f'<div class="ai-box">{dir_map[entry_signal]}<br>五層總分: {five_total}/100</div>', unsafe_allow_html=True)
 
+    # 顯示風險因子
+    st.markdown(f"""
+    <div style="background:#1A1D27; padding:15px; border-radius:8px; margin:10px 0;">
+        <h4>⚖️ 風險因子</h4>
+        <p>基礎風險: {R_BASE*100:.1f}%</p>
+        <p>質量因子 (F_score): {F_score:.2f}</p>
+        <p>波動因子 (F_vol): {F_vol:.2f}</p>
+        <p>回撤因子 (F_dd): {F_dd:.2f}</p>
+        <p>連虧因子 (F_loss): {F_loss:.2f}</p>
+        <p><strong>最終風險: {R_final*100:.3f}%</strong></p>
+    </div>
+    """, unsafe_allow_html=True)
+
     if entry_signal != 0 and stop_loss and take_profit:
         st.markdown(f"""
         <div class="trade-plan">
@@ -757,6 +772,7 @@ with col_right:
         with col_r2:
             st.metric("當前回撤", f"{drawdown:.2f}%")
             st.metric("日虧損剩餘", f"${daily_loss_limit + st.session_state.daily_pnl:.2f}")
+            st.metric("連續虧損", consecutive_losses)
         if st.session_state.balance_history:
             st.line_chart(st.session_state.balance_history)
         st.markdown('</div>', unsafe_allow_html=True)
