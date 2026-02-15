@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约终极终端 · 三模式自适应版
-稳健｜无敌｜神级 —— 恐惧贪婪驱动 + 多因子过滤 + 动态仓位
+🚀 高杠杆合约终极终端 · 三模式自适应版
+稳健｜无敌｜神级 —— 恐惧贪婪驱动 + 多因子过滤 + 动态仓位 + 生存保护
+数据源：MEXC + Alternative.me + 模拟链上（可替换为真实API）
 """
 
 import streamlit as st
@@ -22,14 +23,14 @@ from collections import Counter
 
 warnings.filterwarnings('ignore')
 
-# ==================== 全局配置（固定）====================
+# ==================== 全局配置 ====================
 SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
 BASE_RISK = 0.01                     # 基础风险 1%
-MAX_LEVERAGE_GLOBAL = 100.0          # 全局最大杠杆（实盘限制）
+MAX_LEVERAGE_GLOBAL = 100.0          # 全局最大杠杆
 DAILY_LOSS_LIMIT = 300.0             # 日亏损限额
 MIN_ATR_PCT = 0.5                    # 最小波动率（低于此值风险减半，不禁止）
 
-# ==================== 免费数据获取器（同前）====================
+# ==================== 免费数据获取器（修复版）====================
 class FreeDataFetcherV5:
     def __init__(self, symbols=None):
         if symbols is None:
@@ -120,18 +121,17 @@ class FreeDataFetcherV5:
 
 # ==================== 策略模式配置 ====================
 def get_mode_config(mode):
-    """返回各策略模式的参数"""
     if mode == "稳健":
         return {
-            'min_five_score': 60,          # 最小多因子强度
-            'fear_threshold': 20,           # 最大恐惧指数（低于此值考虑入场）
-            'netflow_required': 5000,       # 净流入要求
-            'whale_required': 100,           # 大额转账要求
-            'stop_atr': 1.8,                 # 止损倍数
-            'tp_min_ratio': 2.5,              # 最小止盈盈亏比
-            'max_leverage': 3.0,               # 最大杠杆
-            'position_pct': lambda fear: 0.6 if fear <= 10 else (0.3 if fear <= 20 else 0.0),  # 仓位百分比
-            'trailing_stop': None,              # 不使用追踪止损
+            'min_five_score': 60,
+            'fear_threshold': 20,
+            'netflow_required': 5000,
+            'whale_required': 100,
+            'stop_atr': 1.8,
+            'tp_min_ratio': 2.5,
+            'max_leverage': 3.0,
+            'position_pct': lambda fear: 0.6 if fear <= 10 else (0.3 if fear <= 20 else 0.0),
+            'trailing_stop': None,
         }
     elif mode == "无敌":
         return {
@@ -143,7 +143,7 @@ def get_mode_config(mode):
             'tp_min_ratio': 3.0,
             'max_leverage': 5.0,
             'position_pct': lambda fear: 1.0 if fear <= 10 else (0.5 if fear <= 20 else 0.0),
-            'trailing_stop': 0.05,  # 5% 追踪止损
+            'trailing_stop': 0.05,
         }
     elif mode == "神级":
         return {
@@ -155,10 +155,11 @@ def get_mode_config(mode):
             'tp_min_ratio': 4.0,
             'max_leverage': 10.0,
             'position_pct': lambda fear: 1.0 if fear <= 8 else (0.8 if fear <= 15 else 0.0),
-            'trailing_stop': 0.10,  # 10% 追踪止损
+            'trailing_stop': 0.10,
         }
     else:
         return get_mode_config("稳健")
+
 
 # ==================== 市场环境层 ====================
 def evaluate_market(df_dict):
@@ -290,7 +291,6 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
 
 # ==================== 入场信号（结合策略模式）====================
 def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, config):
-    """根据策略配置判断是否入场"""
     if five_total < config['min_five_score']:
         return 0
     if fear_greed > config['fear_threshold']:
@@ -299,16 +299,14 @@ def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, c
         return 0
     if whale_tx < config['whale_required']:
         return 0
-    # 方向必须为多（假设只做多）
     if five_dir != 1:
         return 0
-    return 1  # 做多信号
+    return 1
 
 
 # ==================== 风险控制 ====================
 def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
     stop_distance = stop_atr * atr_value
-    # 止盈按最小盈亏比计算，实际可更高
     take_distance = stop_distance * tp_min_ratio
     if side == 1:
         stop = entry_price - stop_distance
@@ -321,9 +319,7 @@ def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
 
 # ==================== 仓位计算（含杠杆）====================
 def calculate_position_size(balance, entry_price, stop_price, leverage, position_pct):
-    """根据账户余额、杠杆和仓位百分比计算合约数量"""
     risk_amount = balance * position_pct
-    # 杠杆放大名义本金
     nominal = risk_amount * leverage
     quantity = nominal / entry_price
     return round(quantity, 3)
@@ -403,7 +399,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 合约终极终端 · 三模式自适应版")
-st.caption("稳健｜无敌｜神级 —— 恐惧贪婪驱动 + 多因子过滤 + 动态杠杆")
+st.caption("稳健｜无敌｜神级 —— 恐惧贪婪驱动 + 多因子过滤 + 动态杠杆 + 生存保护")
 
 init_risk_state()
 
@@ -491,7 +487,7 @@ atr_value = data_dict['15m']['atr'].iloc[-1] if '15m' in data_dict else 0.0
 # 仓位百分比（根据恐惧指数）
 position_pct = config['position_pct'](fear_greed)
 
-# 建议杠杆（取模式最大杠杆，可优化）
+# 建议杠杆
 leverage = config['max_leverage']
 
 # 交易计划
@@ -667,7 +663,6 @@ with col_right:
             st.success(f"✅ 自动开{st.session_state.auto_position['side']}仓 @ {current_price:.2f}")
         else:
             pos = st.session_state.auto_position
-            # 检查止损止盈或反向信号
             if (pos['side'] == 'long' and (current_price <= pos['stop'] or current_price >= pos['take'])) or \
                (pos['side'] == 'short' and (current_price >= pos['stop'] or current_price <= pos['take'])) or \
                (entry_signal == -1 and pos['side'] == 'long') or \
