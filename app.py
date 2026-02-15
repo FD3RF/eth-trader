@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境100分版
+🚀 终极量化终端 · 神境100分版（含交易计划）
 环境 → 规则 → 信号 → 风险 → 资本 → 监控
-五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表
+五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表｜止损止盈
 """
 
 import streamlit as st
@@ -36,7 +36,7 @@ LEVERAGE_MODES = {
     "高倍神级 (50-125x)": (50, 125)
 }
 
-# ==================== 数据获取器（终极稳定版）====================
+# ==================== 数据获取器 ====================
 class DataFetcher:
     def __init__(self, symbols=None):
         if symbols is None:
@@ -47,7 +47,7 @@ class DataFetcher:
         self.timeout = 10
         self.exchange = ccxt.mexc({'enableRateLimit': True, 'timeout': 30000})
         self.fng_url = "https://api.alternative.me/fng/"
-        self.chain_netflow = 5234   # 模拟值（可替换为真实API）
+        self.chain_netflow = 5234   # 模拟值
         self.chain_whale = 128
 
     def fetch_kline(self, symbol, timeframe):
@@ -394,11 +394,12 @@ st.markdown("""
 .risk-line { border-top: 1px solid #333; margin: 6px 0; }
 .eligibility-blocked { color: #FF5555; font-weight: bold; }
 .eligibility-active { color: #00F5A0; font-weight: bold; }
+.trade-plan { background: #232734; padding: 8px; border-radius: 4px; margin-top: 8px; border-left: 4px solid #FFAA00; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏆 终极量化终端 · 神境100分版")
-st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表")
+st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表｜止损止盈")
 
 init_risk_state()
 
@@ -571,6 +572,18 @@ with col_left:
         {dir_icon} 方向明确 ({'多' if five_dir==1 else '空' if five_dir==-1 else '无'})
     </div>
     """, unsafe_allow_html=True)
+
+    # 新增：交易计划（仅在有信号时显示）
+    if entry_signal != 0 and stop_loss and take_profit:
+        st.markdown("#### 📝 交易计划")
+        st.markdown(f"""
+        <div class="trade-plan">
+            <p>入场价: <span style="color:#00F5A0;">${current_price:.2f}</span></p>
+            <p>止损价: <span style="color:#FF5555;">${stop_loss:.2f}</span> (亏损 {abs(current_price-stop_loss)/current_price*100:.2f}%)</p>
+            <p>止盈价: <span style="color:#00F5A0;">${take_profit:.2f}</span> (盈亏比 {risk_reward:.2f})</p>
+            <p>建议仓位: {position_size} {selected_symbol.split('/')[0]}</p>
+        </div>
+        """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ④ 风险引擎
@@ -629,11 +642,18 @@ with col_right:
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                            row_heights=[0.6, 0.2, 0.2],
                            subplot_titles=("", "", ""))
+        # K线
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                      low=df['low'], close=df['close'], name="K线", showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ema20'], line=dict(color="orange", width=1), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ema50'], line=dict(color="blue", width=1), showlegend=False), row=1, col=1)
+        # 当前价格水平线
         fig.add_hline(y=current_price, line_dash="dot", line_color="white", annotation_text=f"现价 {current_price:.2f}", row=1, col=1)
+
+        # 如果有信号，添加止损止盈线
+        if entry_signal != 0 and stop_loss and take_profit:
+            fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"止损 {stop_loss:.2f}", row=1, col=1)
+            fig.add_hline(y=take_profit, line_dash="dash", line_color="green", annotation_text=f"止盈 {take_profit:.2f}", row=1, col=1)
 
         if entry_signal != 0:
             last_date = df['日期'].iloc[-1]
@@ -643,12 +663,14 @@ with col_right:
             fig.add_annotation(x=last_date, y=last_price * (1.02 if entry_signal==1 else 0.98),
                                text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
 
+        # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple", width=1), showlegend=False), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
         latest_rsi = df['rsi'].iloc[-1]
         fig.add_annotation(x=df['日期'].iloc[-1], y=latest_rsi, text=f"RSI: {latest_rsi:.1f}", showarrow=False, xanchor='left', row=2, col=1, font=dict(size=9, color="white"))
 
+        # 成交量
         colors_vol = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
         fig.add_trace(go.Bar(x=df['日期'], y=df['volume'], name="成交量", marker_color=colors_vol, showlegend=False), row=3, col=1)
 
