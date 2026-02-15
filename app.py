@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约智能监控中心 · 终极神级版（多币种+AI交易计划）
-五层共振 + AI决策 + 动态止损止盈 + 历史信号
+🚀 合约智能监控中心 · 终极神级版（AI交易计划+自动策略测试）
+五层共振 + AI决策 + 动态止损止盈 + 自动模拟交易 + 多币种 + 历史信号
 """
 
 import streamlit as st
@@ -354,7 +354,7 @@ def calculate_liquidation_price(entry_price, side, leverage):
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合约智能监控·终极神级版+交易计划", layout="wide")
+st.set_page_config(page_title="合约智能监控·终极神级版+自动测试", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -372,8 +372,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 合约智能监控中心 · 终极神级版（AI交易计划）")
-st.caption("五层共振 + AI决策 + 动态止损止盈 + 历史信号")
+st.title("🧠 合约智能监控中心 · 终极神级版（AI交易计划+自动测试）")
+st.caption("五层共振 + AI决策 + 动态止损止盈 + 自动模拟交易 + 多币种 + 历史信号")
 
 # 初始化
 init_risk_state()
@@ -675,6 +675,80 @@ with col_right:
             plan_text += f"\n止损价：${stop_loss:.2f}\n止盈价：${take_profit:.2f}\n盈亏比：{risk_reward:.2f}"
         st.code(plan_text)
         st.info("请手动复制以上计划")
+
+    # ========== 自动策略测试 ==========
+    st.markdown("---")
+    st.subheader("🧪 策略自动测试")
+    
+    # 初始化自动持仓
+    if 'auto_position' not in st.session_state:
+        st.session_state.auto_position = None
+    
+    auto_enabled = st.checkbox("启用自动跟随信号（模拟）")
+    
+    if auto_enabled:
+        # 自动交易逻辑
+        if signal_dir != 0:
+            # 有信号
+            if st.session_state.auto_position is None:
+                # 无持仓，开仓
+                st.session_state.auto_position = {
+                    'side': 'long' if signal_dir == 1 else 'short',
+                    'entry': current_price,
+                    'time': datetime.now(),
+                    'leverage': 10  # 固定10倍
+                }
+                st.success(f"✅ 自动开{st.session_state.auto_position['side']}仓 @ {current_price:.2f}")
+            else:
+                # 已有持仓，检查方向是否一致
+                current_side = 'long' if signal_dir == 1 else 'short'
+                if st.session_state.auto_position['side'] != current_side:
+                    # 方向不一致，先平仓再开新仓
+                    old = st.session_state.auto_position
+                    pnl = (current_price - old['entry']) * (1 if old['side']=='long' else -1) * old['leverage']
+                    st.info(f"📉 信号变化，平仓 {old['side']}，盈亏: ${pnl:.2f}")
+                    st.session_state.auto_position = {
+                        'side': current_side,
+                        'entry': current_price,
+                        'time': datetime.now(),
+                        'leverage': 10
+                    }
+                    st.success(f"✅ 自动开{current_side}仓 @ {current_price:.2f}")
+        else:
+            # 无信号，如果有持仓则平仓
+            if st.session_state.auto_position is not None:
+                old = st.session_state.auto_position
+                pnl = (current_price - old['entry']) * (1 if old['side']=='long' else -1) * old['leverage']
+                st.info(f"⏸️ 信号消失，平仓 {old['side']}，盈亏: ${pnl:.2f}")
+                st.session_state.auto_position = None
+    
+    # 显示当前自动持仓
+    if st.session_state.auto_position:
+        pos = st.session_state.auto_position
+        pnl = (current_price - pos['entry']) * (1 if pos['side']=='long' else -1) * pos['leverage']
+        pnl_pct = (current_price - pos['entry']) / pos['entry'] * pos['leverage'] * 100 * (1 if pos['side']=='long' else -1)
+        liq_price = calculate_liquidation_price(pos['entry'], "多单" if pos['side']=='long' else "空单", pos['leverage'])
+        distance = abs(current_price - liq_price) / current_price * 100
+        color_class = "profit" if pnl >= 0 else "loss"
+        st.markdown(f"""
+        <div class="metric">
+            <h4>自动模拟持仓</h4>
+            <p>方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']}x</p>
+            <p>开仓: ${pos['entry']:.2f} ({pos['time'].strftime('%H:%M')})</p>
+            <p class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
+            <p>强平价: <span class="warning">${liq_price:.2f}</span> (距 {distance:.1f}%)</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("手动平仓", key="auto_close"):
+            pnl = (current_price - pos['entry']) * (1 if pos['side']=='long' else -1) * pos['leverage']
+            st.success(f"平仓，盈亏: ${pnl:.2f}")
+            st.session_state.auto_position = None
+            st.rerun()
+    else:
+        if auto_enabled:
+            st.info("等待信号开仓")
+        else:
+            st.info("启用自动跟随以测试策略")
 
     # ========== 历史信号记录 ==========
     if 'signal_history' not in st.session_state:
