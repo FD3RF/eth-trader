@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约量化终端 · 专业重构版
-市场状态｜多因子强度｜风险敞口｜资本监控｜自动策略切换
+🚀 合约量化终端 · 神境冲刺版
+市场状态｜多因子强度｜恐惧卡片｜强平预警｜成交量｜资本监控｜自动策略切换
 """
 
 import streamlit as st
@@ -25,9 +25,16 @@ warnings.filterwarnings('ignore')
 # ==================== 全局配置 ====================
 SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
 BASE_RISK = 0.01
-MAX_LEVERAGE_GLOBAL = 100.0
+MAX_LEVERAGE_GLOBAL = 125.0
 DAILY_LOSS_LIMIT = 300.0
 MIN_ATR_PCT = 0.5
+
+# 杠杆试炼模式
+LEVERAGE_MODES = {
+    "低倍试炼 (3-10x)": (3, 10),
+    "中倍试炼 (20-50x)": (20, 50),
+    "高倍神级 (50-125x)": (50, 125)
+}
 
 # ==================== 免费数据获取器 ====================
 class FreeDataFetcherV5:
@@ -128,9 +135,7 @@ def get_mode_config(mode):
             'whale_required': 100,
             'stop_atr': 1.8,
             'tp_min_ratio': 2.5,
-            'max_leverage': 3.0,
             'position_pct': lambda fear: 0.6 if fear <= 10 else (0.3 if fear <= 20 else 0.0),
-            'trailing_stop': None,
         }
     elif mode == "无敌":
         return {
@@ -140,9 +145,7 @@ def get_mode_config(mode):
             'whale_required': 120,
             'stop_atr': 2.0,
             'tp_min_ratio': 3.0,
-            'max_leverage': 5.0,
             'position_pct': lambda fear: 1.0 if fear <= 10 else (0.5 if fear <= 20 else 0.0),
-            'trailing_stop': 0.05,
         }
     elif mode == "神级":
         return {
@@ -152,9 +155,7 @@ def get_mode_config(mode):
             'whale_required': 150,
             'stop_atr': 2.5,
             'tp_min_ratio': 4.0,
-            'max_leverage': 10.0,
             'position_pct': lambda fear: 1.0 if fear <= 8 else (0.8 if fear <= 15 else 0.0),
-            'trailing_stop': 0.10,
         }
     else:
         return get_mode_config("稳健")
@@ -324,6 +325,14 @@ def calculate_position_size(balance, entry_price, stop_price, leverage, position
     return round(quantity, 3)
 
 
+# ==================== 强平价格计算 ====================
+def liquidation_price(entry_price, side, leverage):
+    if side == 1:
+        return entry_price * (1 - 1.0/leverage)
+    else:
+        return entry_price * (1 + 1.0/leverage)
+
+
 # ==================== 生存保护状态管理 ====================
 def init_risk_state():
     if 'consecutive_losses' not in st.session_state:
@@ -368,16 +377,8 @@ def can_trade():
     return not st.session_state.daily_loss_triggered
 
 
-# ==================== 辅助函数 ====================
-def calculate_liquidation_price(entry_price, side, leverage):
-    if side == "多单":
-        return entry_price * (1 - 1.0/leverage)
-    else:
-        return entry_price * (1 + 1.0/leverage)
-
-
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合约量化终端 · 专业重构版", layout="wide")
+st.set_page_config(page_title="合约量化终端 · 神境冲刺版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; }
@@ -394,11 +395,13 @@ st.markdown("""
 .dashboard { background: #1A1D27; padding: 12px; border-radius: 6px; border-left: 4px solid #00F5A0; margin-bottom: 8px; }
 .card { background: #1A1D27; border-radius: 4px; padding: 8px; text-align: center; cursor: pointer; }
 .card:hover { background: #2A2D37; }
+.fear-card { background: #8B0000; color: white; padding: 12px; border-radius: 8px; text-align: center; animation: blink 1s infinite; }
+@keyframes blink { 50% { background-color: #B22222; } }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 合约量化终端 · 专业重构版")
-st.caption("市场状态｜多因子强度｜风险敞口｜资本监控｜自动策略切换")
+st.title("📊 合约量化终端 · 神境冲刺版")
+st.caption("恐惧卡片｜强平预警｜成交量｜市场状态｜多因子强度｜资本监控｜自动策略切换")
 
 init_risk_state()
 
@@ -418,6 +421,12 @@ with st.sidebar:
     auto_mode = st.checkbox("自动模式切换 (AI 推荐)", value=False)
     st.markdown("---")
 
+    st.subheader("🔥 高倍试炼")
+    leverage_mode = st.selectbox("杠杆模式", list(LEVERAGE_MODES.keys()), index=0)
+    min_lev, max_lev = LEVERAGE_MODES[leverage_mode]
+    st.info(f"当前试炼范围: {min_lev}x - {max_lev}x")
+
+    st.markdown("---")
     st.subheader("📊 风险参数")
     account_balance = st.number_input("账户余额 (USDT)", value=st.session_state.account_balance, step=1000.0, format="%.2f")
     st.session_state.account_balance = account_balance
@@ -438,7 +447,6 @@ for i, sym in enumerate(SYMBOLS):
         netflow = all_data[sym]["chain_netflow"]
         whale = all_data[sym]["chain_whale"]
         five_dir, five_total, _ = five_layer_score(df_dict, fear, netflow, whale)
-        # 简单信号显示
         with cols[i]:
             st.markdown(f"<div class='card'><b>{sym}</b><br>强度 {five_total}<br>{'🟢' if five_dir==1 else '⚪'}</div>", unsafe_allow_html=True)
     else:
@@ -486,7 +494,9 @@ atr_value = data_dict['15m']['atr'].iloc[-1] if '15m' in data_dict else 0.0
 
 # 仓位百分比（根据恐惧指数）
 position_pct = config['position_pct'](fear_greed)
-leverage = config['max_leverage']
+
+# 建议杠杆（在试炼范围内取中间值）
+suggested_leverage = (min_lev + max_lev) / 2
 
 # 交易计划
 stop_loss = take_profit = risk_reward = None
@@ -497,25 +507,47 @@ if entry_signal != 0 and atr_value > 0:
         st.session_state.account_balance,
         current_price,
         stop_loss,
-        leverage,
+        suggested_leverage,
         position_pct
     )
+
+# 强平价格计算
+liq_price_long = liquidation_price(current_price, 1, suggested_leverage) if entry_signal == 1 else None
+liq_price_short = liquidation_price(current_price, -1, suggested_leverage) if entry_signal == -1 else None
+if entry_signal == 1:
+    liq_price = liq_price_long
+    distance_to_liq = (current_price - liq_price) / current_price * 100
+elif entry_signal == -1:
+    liq_price = liq_price_short
+    distance_to_liq = (liq_price - current_price) / current_price * 100
+else:
+    liq_price = None
+    distance_to_liq = None
 
 # 更新风控
 current_balance = st.session_state.account_balance + st.session_state.daily_pnl
 drawdown = update_risk_state(0.0, current_balance, st.session_state.daily_pnl)
 can_trade_flag = can_trade()
 
-# ==================== 顶部状态 ====================
+# ==================== 顶部恐惧贪婪卡片 ====================
+fear_card_style = "fear-card" if fear_greed <= 10 else "info-box"
+st.markdown(f"""
+<div class="{fear_card_style}" style="margin-bottom:10px;">
+    <h2 style="display:inline;">😨 恐惧贪婪指数: {fear_greed}</h2> 
+    <span style="margin-left:20px;">{'🚨 极度恐惧 — 神底信号' if fear_greed <= 10 else '😐 正常范围'}</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ==================== 顶部状态信息 ====================
 st.markdown(f"""
 <div class="info-box">
-    ✅ 数据源：{source_display} | 恐惧贪婪指数：{fear_greed} | 市场环境：{market_mode} | 多因子强度：{five_total}
+    ✅ 数据源：{source_display} | 市场环境：{market_mode} | 多因子强度：{five_total}
     <br>⚠️ 链上数据为模拟值 | { '🔴 交易暂停' if not can_trade_flag else '' }
 </div>
 """, unsafe_allow_html=True)
 
 # ==================== 主布局：两列 ====================
-col_left, col_right = st.columns([1.8, 1.2])  # 左列稍宽，右列紧凑
+col_left, col_right = st.columns([1.8, 1.2])
 
 with col_left:
     # 市场状态卡片（三指标）
@@ -544,14 +576,15 @@ with col_left:
             </div>
             """, unsafe_allow_html=True)
 
-    # K线图（缩小高度）
-    st.subheader(f"📉 {selected_symbol} K线 ({main_period})")
+    # K线图 + 成交量（三行）
+    st.subheader(f"📉 {selected_symbol} K线 ({main_period}) + 成交量")
     if main_period in data_dict:
         df = data_dict[main_period].tail(100).copy()
         df['日期'] = df['timestamp']
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                           row_heights=[0.7, 0.3],
-                           subplot_titles=(f"{selected_symbol} {main_period}", "RSI"))
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                           row_heights=[0.6, 0.2, 0.2],
+                           subplot_titles=(f"{selected_symbol} {main_period}", "RSI", "成交量"))
+        # K线
         fig.add_trace(go.Candlestick(x=df['日期'], open=df['open'], high=df['high'],
                                      low=df['low'], close=df['close'], name="K线"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ema20'], name="EMA20", line=dict(color="orange", width=1)), row=1, col=1)
@@ -563,10 +596,14 @@ with col_left:
             arrow_color = "green" if entry_signal == 1 else "red"
             fig.add_annotation(x=last_date, y=last_price * (1.02 if entry_signal==1 else 0.98),
                                text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
+        # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple", width=1)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
-        fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=400, margin=dict(l=20, r=20, t=30, b=20))
+        # 成交量柱状图
+        colors_vol = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
+        fig.add_trace(go.Bar(x=df['日期'], y=df['volume'], name="成交量", marker_color=colors_vol), row=3, col=1)
+        fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=450, margin=dict(l=20, r=20, t=30, b=20))
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("K线数据不可用")
@@ -577,7 +614,7 @@ with col_right:
     dir_map = {1: "🔴 做多", -1: "🔵 做空", 0: "⚪ 观望"}
     st.markdown(f'<div class="ai-box">{dir_map[entry_signal]}<br>强度 {five_total}/100</div>', unsafe_allow_html=True)
 
-    # 入场铁律状态（紧凑列表）
+    # 入场铁律状态
     st.markdown("#### 入场条件")
     cond1 = "✅" if five_total >= config['min_five_score'] else "❌"
     cond2 = "✅" if fear_greed <= config['fear_threshold'] else "❌"
@@ -601,7 +638,19 @@ with col_right:
     with col_r2:
         st.metric("回撤因子", f"{1.0 if drawdown<10 else 0.5:.2f}")
         st.metric("连亏因子", f"{1.0 if st.session_state.consecutive_losses<3 else 0.5:.2f}")
-    st.metric("建议杠杆", f"{leverage:.1f}x")
+    st.metric("建议杠杆", f"{suggested_leverage:.1f}x (试炼)")
+
+    # 强平预警卡片
+    if entry_signal != 0 and liq_price is not None:
+        liq_color = "danger" if distance_to_liq < 5 else "warning" if distance_to_liq < 10 else "normal"
+        st.markdown(f"""
+        <div style="background:#232734; padding:10px; border-radius:6px; margin-top:8px;">
+            <h4 style="margin:0;">⚠️ 强平预警</h4>
+            <p>强平价: <span style="color:#FF5555;">${liq_price:.2f}</span></p>
+            <p>当前价差: <span style="color:{'red' if distance_to_liq<5 else 'orange' if distance_to_liq<10 else 'white'};">{distance_to_liq:.2f}%</span></p>
+            <p style="font-size:0.8rem;">{ '🚨 极度危险！' if distance_to_liq < 5 else '⚠️ 注意风险' if distance_to_liq < 10 else '✅ 安全' }</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     # 当前价格
     st.metric("当前价格", f"${current_price:.2f}" if current_price else "N/A")
@@ -619,7 +668,7 @@ with col_right:
             st.metric("连续亏损", st.session_state.consecutive_losses)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 链上情绪（可折叠）
+    # 链上情绪
     with st.expander("🔗 链上情绪", expanded=False):
         st.write(f"交易所净流入: **{netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
         st.write(f"大额转账: **{whale}** 笔 (模拟)")
@@ -638,7 +687,7 @@ with col_right:
                 'side': 'long' if entry_signal == 1 else 'short',
                 'entry': current_price,
                 'time': now,
-                'leverage': leverage,
+                'leverage': suggested_leverage,
                 'stop': stop_loss,
                 'take': take_profit,
                 'size': position_size
@@ -673,8 +722,8 @@ with col_right:
         pos = st.session_state.auto_position
         pnl = (current_price - pos['entry']) * (1.0 if pos['side']=='long' else -1.0) * pos['size']
         pnl_pct = (current_price - pos['entry']) / pos['entry'] * 100.0 * (1.0 if pos['side']=='long' else -1.0)
-        liq_price = calculate_liquidation_price(pos['entry'], "多单" if pos['side']=='long' else "空单", pos['leverage'])
-        distance = abs(current_price - liq_price) / current_price * 100.0
+        liq_price_auto = liquidation_price(pos['entry'], 1 if pos['side']=='long' else -1, pos['leverage'])
+        distance_auto = abs(current_price - liq_price_auto) / current_price * 100.0
         color_class = "profit" if pnl >= 0 else "loss"
         st.markdown(f"""
         <div class="metric" style="padding:8px;">
@@ -682,7 +731,7 @@ with col_right:
             <p style="font-size:0.9rem;">方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']:.1f}x</p>
             <p style="font-size:0.9rem;">开仓: ${pos['entry']:.2f} ({pos['time'].strftime('%H:%M')})</p>
             <p style="font-size:1rem;" class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
-            <p style="font-size:0.9rem;">强平价: <span class="warning">${liq_price:.2f}</span> (距 {distance:.1f}%)</p>
+            <p style="font-size:0.9rem;">强平价: <span class="warning">${liq_price_auto:.2f}</span> (距 {distance_auto:.1f}%)</p>
         </div>
         """, unsafe_allow_html=True)
         if st.button("手动平仓", key="auto_close"):
@@ -712,7 +761,7 @@ with col_right:
             else:
                 st.warning("交易暂停中")
 
-    # 交易日誌和信号历史（可折叠）
+    # 交易日誌和信号历史
     with st.expander("📋 交易日誌", expanded=False):
         if st.session_state.trade_log:
             st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True, height=150)
