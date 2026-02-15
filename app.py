@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 合约量化终端 · 紧凑神境版（多空双向）
-恐惧卡片｜强平预警｜成交量｜市场状态｜多因子强度｜资本监控｜自动策略切换
-支持做多/做空双向信号
+🚀 合约量化终端 · 多空双向版（终极优化版）
+恐惧卡片颜色｜十字光标｜价格水平线｜RSI/MACD数值｜Telegram通知｜紧凑间距
 """
 
 import streamlit as st
@@ -35,6 +34,10 @@ LEVERAGE_MODES = {
     "中倍试炼 (20-50x)": (20, 50),
     "高倍神级 (50-125x)": (50, 125)
 }
+
+# Telegram 配置（从secrets获取或用户输入）
+TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
 # ==================== 免费数据获取器 ====================
 class FreeDataFetcherV5:
@@ -287,7 +290,6 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     return final_dir, total_score, layer_scores
 
 
-# ==================== 入场信号（双向） ====================
 def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, config):
     if five_total < config['min_five_score']:
         return 0
@@ -299,7 +301,7 @@ def generate_entry_signal(five_dir, five_total, fear_greed, netflow, whale_tx, c
         return 0
     if five_dir == 0:
         return 0
-    return five_dir  # 返回实际方向（1多/-1空）
+    return five_dir
 
 
 def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
@@ -328,6 +330,17 @@ def liquidation_price(entry_price, side, leverage):
         return entry_price * (1 + 1.0/leverage)
 
 
+def send_telegram_message(message):
+    """发送Telegram通知"""
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+        try:
+            requests.post(url, json=data, timeout=5)
+        except:
+            pass
+
+
 def init_risk_state():
     if 'consecutive_losses' not in st.session_state:
         st.session_state.consecutive_losses = 0
@@ -352,6 +365,7 @@ def init_risk_state():
     if 'signal_history' not in st.session_state:
         st.session_state.signal_history = []
 
+
 def update_risk_state(trade_result, current_balance, daily_pnl):
     if trade_result < 0:
         st.session_state.consecutive_losses += 1
@@ -364,35 +378,36 @@ def update_risk_state(trade_result, current_balance, daily_pnl):
         st.session_state.daily_loss_triggered = True
     return drawdown
 
+
 def can_trade():
     return not st.session_state.daily_loss_triggered
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="合约量化终端 · 多空双向", layout="wide")
+st.set_page_config(page_title="合约量化终端 · 终极优化版", layout="wide")
 st.markdown("""
 <style>
-.stApp { background-color: #0B0E14; color: white; font-size: 0.9rem; }
-.ai-box { background: #1A1D27; border-radius: 6px; padding: 12px; border-left: 4px solid #00F5A0; margin-bottom: 8px; }
-.metric { background: #232734; padding: 8px; border-radius: 4px; }
+.stApp { background-color: #0B0E14; color: white; font-size: 0.85rem; }  /* 字体缩小，更紧凑 */
+.ai-box { background: #1A1D27; border-radius: 4px; padding: 10px; border-left: 4px solid #00F5A0; margin-bottom: 6px; }
+.metric { background: #232734; padding: 6px; border-radius: 4px; }
 .signal-buy { color: #00F5A0; font-weight: bold; }
 .signal-sell { color: #FF5555; font-weight: bold; }
 .profit { color: #00F5A0; }
 .loss { color: #FF5555; }
 .warning { color: #FFA500; }
 .danger { color: #FF0000; font-weight: bold; }
-.info-box { background: #1A2A3A; border-left: 4px solid #00F5A0; padding: 6px; border-radius: 4px; margin-bottom: 6px; font-size:0.85rem; }
-.trade-plan { background: #232734; padding: 10px; border-radius: 4px; margin-top: 6px; border-left: 4px solid #FFAA00; font-size:0.9rem; }
-.dashboard { background: #1A1D27; padding: 10px; border-radius: 4px; border-left: 4px solid #00F5A0; margin-bottom: 6px; }
-.card { background: #1A1D27; border-radius: 4px; padding: 6px; text-align: center; cursor: pointer; font-size:0.85rem; }
+.info-box { background: #1A2A3A; border-left: 4px solid #00F5A0; padding: 5px; border-radius: 3px; margin-bottom: 5px; font-size:0.8rem; }
+.trade-plan { background: #232734; padding: 8px; border-radius: 4px; margin-top: 5px; border-left: 4px solid #FFAA00; font-size:0.85rem; }
+.dashboard { background: #1A1D27; padding: 8px; border-radius: 4px; border-left: 4px solid #00F5A0; margin-bottom: 5px; }
+.card { background: #1A1D27; border-radius: 4px; padding: 5px; text-align: center; cursor: pointer; font-size:0.8rem; }
 .card:hover { background: #2A2D37; }
-.fear-card { background: #8B0000; color: white; padding: 8px; border-radius: 6px; text-align: center; animation: blink 1s infinite; font-size:1rem; margin-bottom:8px; }
-@keyframes blink { 50% { background-color: #B22222; } }
+.fear-card { color: white; padding: 6px; border-radius: 4px; text-align: center; animation: blink 1s infinite; font-size:0.95rem; margin-bottom:5px; }
+@keyframes blink { 50% { opacity: 0.8; } }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 合约量化终端 · 多空双向版")
-st.caption("恐惧卡片｜强平预警｜成交量｜多空信号｜紧凑布局")
+st.title("📊 合约量化终端 · 终极优化版")
+st.caption("恐惧卡片｜十字光标｜价格线｜RSI/MACD数值｜Telegram通知｜紧凑间距")
 
 init_risk_state()
 
@@ -402,7 +417,7 @@ with st.sidebar:
     selected_symbol = st.selectbox("交易品种", SYMBOLS, index=0, key="selected_symbol")
     main_period = st.selectbox("分析周期", ["15m", "1h", "4h", "1d"], index=0)
     auto_refresh = st.checkbox("自动刷新", value=True)
-    refresh_interval = st.number_input("刷新间隔(秒)", min_value=5, max_value=60, value=10, step=1, disabled=not auto_refresh)
+    refresh_interval = st.number_input("刷新间隔(秒)", min_value=5, max_value=300, value=60, step=1, disabled=not auto_refresh)
     if auto_refresh:
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
 
@@ -423,6 +438,21 @@ with st.sidebar:
     st.session_state.account_balance = account_balance
     daily_loss_limit = st.number_input("日亏损限额 (USDT)", value=DAILY_LOSS_LIMIT, step=50.0, format="%.2f")
     st.session_state.daily_loss_limit = daily_loss_limit
+
+    st.markdown("---")
+    st.subheader("📲 Telegram通知")
+    use_telegram = st.checkbox("启用Telegram通知", value=False)
+    if use_telegram:
+        bot_token = st.text_input("Bot Token", type="password")
+        chat_id = st.text_input("Chat ID")
+        if bot_token and chat_id:
+            st.session_state.telegram_token = bot_token
+            st.session_state.telegram_chat_id = chat_id
+        else:
+            st.warning("请输入Token和Chat ID")
+    else:
+        st.session_state.telegram_token = ""
+        st.session_state.telegram_chat_id = ""
 
 # ==================== 获取数据 ====================
 with st.spinner("获取市场数据..."):
@@ -510,12 +540,13 @@ current_balance = st.session_state.account_balance + st.session_state.daily_pnl
 drawdown = update_risk_state(0.0, current_balance, st.session_state.daily_pnl)
 can_trade_flag = can_trade()
 
-# ==================== 恐惧贪婪卡片 ====================
-fear_card_style = "fear-card" if fear_greed <= 10 else "info-box"
+# ==================== 恐惧贪婪卡片（颜色逻辑优化）====================
+fear_color = "#8B0000" if fear_greed <= 10 else "#B8860B" if fear_greed <= 20 else "#1E90FF" if fear_greed <= 70 else "#9400D3"
+fear_text = "🚨 极度恐惧 — 神底信号" if fear_greed <= 10 else "😨 恐惧" if fear_greed <= 20 else "😐 中性" if fear_greed <= 70 else "🤑 贪婪" if fear_greed <= 90 else "🔥 极度贪婪 — 警惕顶部"
 st.markdown(f"""
-<div class="{fear_card_style}" style="margin-bottom:6px;">
+<div class="fear-card" style="background-color:{fear_color};">
     <span style="font-size:1.2rem;">😨 恐惧贪婪指数: {fear_greed}</span>
-    <span style="margin-left:15px;">{'🚨 极度恐惧 — 神底信号' if fear_greed <= 10 else '😐 正常范围'}</span>
+    <span style="margin-left:15px;">{fear_text}</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -557,7 +588,7 @@ with col_left:
             </div>
             """, unsafe_allow_html=True)
 
-    # K线图 + 成交量
+    # K线图 + 成交量 + RSI/MACD数值 + 十字光标 + 价格水平线
     st.markdown(f"#### 📉 {selected_symbol} K线 ({main_period}) + 成交量")
     if main_period in data_dict:
         df = data_dict[main_period].tail(100).copy()
@@ -570,6 +601,9 @@ with col_left:
                                      low=df['low'], close=df['close'], name="K线", showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ema20'], name="EMA20", line=dict(color="orange", width=1), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ema50'], name="EMA50", line=dict(color="blue", width=1), showlegend=False), row=1, col=1)
+        # 当前价格水平线
+        fig.add_hline(y=current_price, line_dash="dot", line_color="white", annotation_text=f"现价 {current_price:.2f}", row=1, col=1)
+
         if entry_signal != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -577,15 +611,32 @@ with col_left:
             arrow_color = "green" if entry_signal == 1 else "red"
             fig.add_annotation(x=last_date, y=last_price * (1.02 if entry_signal==1 else 0.98),
                                text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
-        # RSI
+
+        # RSI子图
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple", width=1), showlegend=False), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
-        # 成交量
+        # 在图表右上角显示最新RSI值
+        latest_rsi = df['rsi'].iloc[-1]
+        fig.add_annotation(x=df['日期'].iloc[-1], y=latest_rsi, text=f"RSI: {latest_rsi:.1f}", showarrow=False, xanchor='left', row=2, col=1, font=dict(size=9, color="white"))
+
+        # 成交量子图
         colors_vol = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
         fig.add_trace(go.Bar(x=df['日期'], y=df['volume'], name="成交量", marker_color=colors_vol, showlegend=False), row=3, col=1)
-        fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=400, margin=dict(l=20, r=20, t=20, b=20))
+
+        # 启用十字光标
+        fig.update_layout(hovermode='x unified', template="plotly_dark", xaxis_rangeslider_visible=False, height=420, margin=dict(l=20, r=20, t=20, b=20))
+
         st.plotly_chart(fig, use_container_width=True)
+
+        # 在图表下方添加MACD实时数值（可选，这里以简洁方式显示）
+        latest_macd = df['macd'].iloc[-1]
+        latest_signal = df['macd_signal'].iloc[-1]
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            st.markdown(f"<span style='font-size:0.8rem;'>MACD: {latest_macd:.2f}</span>", unsafe_allow_html=True)
+        with col_m2:
+            st.markdown(f"<span style='font-size:0.8rem;'>Signal: {latest_signal:.2f}</span>", unsafe_allow_html=True)
     else:
         st.warning("K线数据不可用")
 
@@ -603,7 +654,7 @@ with col_right:
     cond4 = "✅" if whale >= config['whale_required'] else "❌"
     dir_icon = "✅" if five_dir != 0 else "❌"
     st.markdown(f"""
-    <div style="font-size:0.85rem; line-height:1.4;">
+    <div style="font-size:0.8rem; line-height:1.4;">
         {cond1} 强度 ≥ {config['min_five_score']}<br>
         {cond2} 恐惧 ≤ {config['fear_threshold']}<br>
         {cond3} 净流入 ≥ {config['netflow_required']} ETH<br>
@@ -627,7 +678,7 @@ with col_right:
     if entry_signal != 0 and liq_price is not None:
         liq_color = "danger" if distance_to_liq < 5 else "warning" if distance_to_liq < 10 else "normal"
         st.markdown(f"""
-        <div style="background:#232734; padding:8px; border-radius:4px; margin-top:8px;">
+        <div style="background:#232734; padding:6px; border-radius:4px; margin-top:6px;">
             <span style="font-weight:bold;">⚠️ 强平预警</span><br>
             强平价: <span style="color:#FF5555;">${liq_price:.2f}</span><br>
             价差: <span style="color:{'red' if distance_to_liq<5 else 'orange' if distance_to_liq<10 else 'white'};">{distance_to_liq:.2f}%</span>
@@ -677,6 +728,10 @@ with col_right:
                 'size': position_size
             }
             st.success(f"✅ 自动开{st.session_state.auto_position['side']}仓 @ {current_price:.2f}")
+            # 发送Telegram通知
+            if use_telegram and st.session_state.telegram_token and st.session_state.telegram_chat_id:
+                msg = f"🚀 <b>开仓信号</b>\n品种: {selected_symbol}\n方向: {'多' if entry_signal==1 else '空'}\n价格: ${current_price:.2f}\n杠杆: {suggested_leverage:.1f}x"
+                send_telegram_message(msg)
         else:
             pos = st.session_state.auto_position
             if (pos['side'] == 'long' and (current_price <= pos['stop'] or current_price >= pos['take'])) or \
@@ -701,6 +756,10 @@ with col_right:
                 st.session_state.balance_history.append(st.session_state.account_balance + st.session_state.daily_pnl)
                 st.info(f"📉 平仓 {pos['side']}，盈亏: ${pnl:.2f}")
                 st.session_state.auto_position = None
+                # 发送平仓通知
+                if use_telegram and st.session_state.telegram_token and st.session_state.telegram_chat_id:
+                    msg = f"🔔 <b>平仓</b>\n品种: {selected_symbol}\n方向: {pos['side']}\n平仓价: ${current_price:.2f}\n盈亏: ${pnl:.2f} ({pnl_pct:.1f}%)"
+                    send_telegram_message(msg)
 
     if st.session_state.auto_position:
         pos = st.session_state.auto_position
@@ -710,12 +769,12 @@ with col_right:
         distance_auto = abs(current_price - liq_price_auto) / current_price * 100.0
         color_class = "profit" if pnl >= 0 else "loss"
         st.markdown(f"""
-        <div class="metric" style="padding:8px;">
-            <h4 style="font-size:1rem;">自动模拟持仓</h4>
-            <p style="font-size:0.9rem;">方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']:.1f}x</p>
-            <p style="font-size:0.9rem;">开仓: ${pos['entry']:.2f} ({pos['time'].strftime('%H:%M')})</p>
-            <p style="font-size:1rem;" class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
-            <p style="font-size:0.9rem;">强平价: <span class="warning">${liq_price_auto:.2f}</span> (距 {distance_auto:.1f}%)</p>
+        <div class="metric" style="padding:6px;">
+            <h4 style="font-size:0.9rem;">自动模拟持仓</h4>
+            <p style="font-size:0.8rem;">方向: {'多' if pos['side']=='long' else '空'} | 杠杆: {pos['leverage']:.1f}x</p>
+            <p style="font-size:0.8rem;">开仓: ${pos['entry']:.2f} ({pos['time'].strftime('%H:%M')})</p>
+            <p style="font-size:0.9rem;" class="{color_class}">盈亏: ${pnl:.2f} ({pnl_pct:.2f}%)</p>
+            <p style="font-size:0.8rem;">强平价: <span class="warning">${liq_price_auto:.2f}</span> (距 {distance_auto:.1f}%)</p>
         </div>
         """, unsafe_allow_html=True)
         if st.button("手动平仓", key="auto_close"):
@@ -748,7 +807,7 @@ with col_right:
     # 交易日誌
     with st.expander("📋 交易日誌", expanded=False):
         if st.session_state.trade_log:
-            st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True, height=150)
+            st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True, height=140)
         else:
             st.info("暂无交易记录")
 
@@ -766,6 +825,6 @@ with col_right:
 
     with st.expander("📜 信号历史", expanded=False):
         if st.session_state.signal_history:
-            st.dataframe(pd.DataFrame(st.session_state.signal_history), use_container_width=True, height=150)
+            st.dataframe(pd.DataFrame(st.session_state.signal_history), use_container_width=True, height=140)
         else:
             st.info("暂无历史信号")
