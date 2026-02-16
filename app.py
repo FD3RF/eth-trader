@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境完美版 v4.0
+🚀 终极量化终端 · 神境完美版 v4.0（稳定修复版）
 顺势交易｜风险回报≥1:2｜动态仓位｜多重过滤｜移动止损｜一键平仓｜强度评分
+增加数据验证，修复异常渲染，确保稳定运行
 """
 
 import streamlit as st
@@ -39,7 +40,7 @@ LEVERAGE_MODES = {
 # 重要事件日期（示例）
 EVENT_DATES = ["2026-02-20", "2026-03-15"]
 
-# ==================== 数据获取器 ====================
+# ==================== 数据获取器（增加错误处理）====================
 class DataFetcher:
     def __init__(self, symbols=None):
         if symbols is None:
@@ -56,12 +57,15 @@ class DataFetcher:
     def fetch_kline(self, symbol, timeframe):
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=self.limit)
+            if not ohlcv:
+                return None, None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = df[col].astype(float)
             return df, "MEXC"
         except Exception as e:
+            st.sidebar.warning(f"{symbol} {timeframe} 获取失败: {e}")
             return None, None
 
     def fetch_fear_greed(self):
@@ -83,7 +87,7 @@ class DataFetcher:
             data_ok = True
             for period in self.periods:
                 df, src = self.fetch_kline(symbol, period)
-                if df is not None:
+                if df is not None and not df.empty:
                     data_dict[period] = self._add_indicators(df)
                     price_sources.append(src)
                 else:
@@ -91,7 +95,7 @@ class DataFetcher:
             if data_ok and data_dict:
                 all_data[symbol] = {
                     "data_dict": data_dict,
-                    "current_price": data_dict['15m']['close'].iloc[-1] if '15m' in data_dict else None,
+                    "current_price": float(data_dict['15m']['close'].iloc[-1]) if '15m' in data_dict else None,
                     "source": price_sources[0] if price_sources else "MEXC",
                     "fear_greed": fear_greed,
                     "chain_netflow": self.chain_netflow,
@@ -138,7 +142,7 @@ class DataFetcher:
         return df
 
 
-# ==================== 多周期趋势判断 ====================
+# ==================== 多周期趋势判断（带数据验证）====================
 def check_multiframe_trend(data_dict):
     """
     检查15m、1h、4h趋势是否一致
@@ -149,15 +153,20 @@ def check_multiframe_trend(data_dict):
         if tf not in data_dict:
             continue
         df = data_dict[tf]
-        if df.empty or len(df) < 20:
+        if df is None or df.empty or len(df) < 20:
             continue
         last = df.iloc[-1]
-        if last['close'] > last['ema50'] > last['ema200'] and last['adx'] > 20:
-            trends.append(1)
-        elif last['close'] < last['ema50'] < last['ema200'] and last['adx'] > 20:
-            trends.append(-1)
-        else:
+        try:
+            if last['close'] > last['ema50'] > last['ema200'] and last['adx'] > 20:
+                trends.append(1)
+            elif last['close'] < last['ema50'] < last['ema200'] and last['adx'] > 20:
+                trends.append(-1)
+            else:
+                trends.append(0)
+        except:
             trends.append(0)
+    if len(trends) < 3:
+        return 0
     if all(t == 1 for t in trends):
         return 1
     if all(t == -1 for t in trends):
@@ -167,31 +176,46 @@ def check_multiframe_trend(data_dict):
 
 def is_trend_up(df):
     """严格上升趋势定义：价格 > EMA200 且 MACD 在零轴上且金叉"""
+    if df is None or df.empty:
+        return False
     last = df.iloc[-1]
-    return last['close'] > last['ema200'] and last['macd'] > last['macd_signal'] and last['macd'] > 0
+    try:
+        return last['close'] > last['ema200'] and last['macd'] > last['macd_signal'] and last['macd'] > 0
+    except:
+        return False
 
 def is_trend_down(df):
     """严格下降趋势定义：价格 < EMA200 且 MACD 在零轴下且死叉"""
+    if df is None or df.empty:
+        return False
     last = df.iloc[-1]
-    return last['close'] < last['ema200'] and last['macd'] < last['macd_signal'] and last['macd'] < 0
+    try:
+        return last['close'] < last['ema200'] and last['macd'] < last['macd_signal'] and last['macd'] < 0
+    except:
+        return False
 
 
 def evaluate_market(df_dict):
     if df_dict is None or '15m' not in df_dict:
         return "数据不足", 0.0, 0.0
     df = df_dict['15m']
-    if df.empty:
+    if df is None or df.empty:
         return "数据不足", 0.0, 0.0
     last = df.iloc[-1]
+    try:
+        atr_pct = float(last['atr_pct']) if not np.isnan(last['atr_pct']) else 0.0
+        adx = float(last['adx']) if not np.isnan(last['adx']) else 0.0
+    except:
+        atr_pct, adx = 0.0, 0.0
 
     if is_trend_up(df):
-        return "上升趋势", last['atr_pct'], last['adx']
+        return "上升趋势", atr_pct, adx
     elif is_trend_down(df):
-        return "下降趋势", last['atr_pct'], last['adx']
-    elif last['adx'] < 25:
-        return "震荡", last['atr_pct'], last['adx']
+        return "下降趋势", atr_pct, adx
+    elif adx < 25:
+        return "震荡", atr_pct, adx
     else:
-        return "不明朗", last['atr_pct'], last['adx']
+        return "不明朗", atr_pct, adx
 
 
 def get_mode_config(mode):
@@ -234,6 +258,8 @@ def five_layer_score(df_dict, fear_greed, chain_netflow, chain_whale):
     if df_dict is None or '15m' not in df_dict:
         return 0, 0, {}
     df_15m = df_dict['15m']
+    if df_15m is None or df_15m.empty:
+        return 0, 0, {}
     last = df_15m.iloc[-1]
     trend_score = 20 if is_trend_up(df_15m) else 0
     multi_score = 20 if check_multiframe_trend(df_dict) != 0 else 0
@@ -255,6 +281,8 @@ def generate_entry_signal(data_dict, config, btc_trend=None):
         return 0, 0
 
     df_15m = data_dict['15m']
+    if df_15m is None or df_15m.empty:
+        return 0, 0
     last = df_15m.iloc[-1]
     conditions_met = 0
     total_conditions = 0
@@ -279,20 +307,31 @@ def generate_entry_signal(data_dict, config, btc_trend=None):
     total_conditions += 1
 
     # 3. 波动率足够
-    if last['atr_pct'] >= MIN_ATR_PCT:
-        conditions_met += 1
+    try:
+        atr_pct = float(last['atr_pct'])
+        if atr_pct >= MIN_ATR_PCT:
+            conditions_met += 1
+    except:
+        pass
     total_conditions += 1
 
     # 4. 成交量放量
-    if last['volume_surge']:
-        conditions_met += 1
+    try:
+        if last['volume_surge']:
+            conditions_met += 1
+    except:
+        pass
     total_conditions += 1
 
     # 5. RSI过滤
-    if trend_dir == 1 and last['rsi'] > 50:
-        conditions_met += 1
-    elif trend_dir == -1 and last['rsi'] < 50:
-        conditions_met += 1
+    try:
+        rsi = float(last['rsi'])
+        if trend_dir == 1 and rsi > 50:
+            conditions_met += 1
+        elif trend_dir == -1 and rsi < 50:
+            conditions_met += 1
+    except:
+        pass
     total_conditions += 1
 
     # 6. 大盘BTC同步（如果提供）
@@ -302,7 +341,7 @@ def generate_entry_signal(data_dict, config, btc_trend=None):
             conditions_met += 1
 
     # 计算强度评分
-    strength = int(conditions_met / total_conditions * 100)
+    strength = int(conditions_met / total_conditions * 100) if total_conditions > 0 else 0
 
     # 只有强度 >=70 才发信号
     if strength >= 70:
@@ -530,7 +569,7 @@ with st.spinner("获取市场数据..."):
     all_data = fetcher.fetch_all()
 
 if selected_symbol not in all_data or all_data[selected_symbol]["data_dict"] is None:
-    st.error(f"❌ 品种 {selected_symbol} 数据不可用")
+    st.error(f"❌ 品种 {selected_symbol} 数据不可用，请稍后重试")
     st.stop()
 
 data = all_data[selected_symbol]
@@ -545,8 +584,8 @@ whale = data["chain_whale"]
 btc_data = all_data.get("BTC/USDT")
 btc_trend = None
 if btc_data and btc_data["data_dict"] is not None:
-    btc_df = btc_data["data_dict"]['15m']
-    if not btc_df.empty:
+    btc_df = btc_data["data_dict"].get('15m')
+    if btc_df is not None and not btc_df.empty:
         if is_trend_up(btc_df):
             btc_trend = 1
         elif is_trend_down(btc_df):
@@ -625,10 +664,10 @@ with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">① 全球宏观</div>', unsafe_allow_html=True)
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    with col_m1: st.markdown(f"<div class='metric-label'>市场状态</div><div class='metric-value'>{market_mode}</div>", unsafe_allow_html=True)
-    with col_m2: st.markdown(f"<div class='metric-label'>波动率(ATR)</div><div class='metric-value'>{atr_pct:.2f}%</div>", unsafe_allow_html=True)
-    with col_m3: st.markdown(f"<div class='metric-label'>趋势强度</div><div class='metric-value'>{adx:.1f}</div>", unsafe_allow_html=True)
-    with col_m4: st.markdown(f"<div class='metric-label'>恐惧指数</div><div class='metric-value'>{fear_greed}</div>", unsafe_allow_html=True)
+    with col_m1: st.metric("市场状态", market_mode)
+    with col_m2: st.metric("波动率(ATR%)", f"{atr_pct:.2f}%")
+    with col_m3: st.metric("趋势强度", f"{adx:.1f}")
+    with col_m4: st.metric("恐惧指数", f"{fear_greed}")
     st.markdown(f"<div style='margin-top:4px;'>数据源: {source_display} | 大盘BTC趋势: {'↑' if btc_trend==1 else '↓' if btc_trend==-1 else '↔'}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -636,22 +675,22 @@ with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">② 策略概况</div>', unsafe_allow_html=True)
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    with col_s1: st.markdown(f"<div class='metric-label'>策略模式</div><div class='metric-value'>{mode}</div>", unsafe_allow_html=True)
-    with col_s2: st.markdown(f"<div class='metric-label'>杠杆范围</div><div class='metric-value'>{min_lev:.0f}x–{max_lev:.0f}x</div>", unsafe_allow_html=True)
-    with col_s3: st.markdown(f"<div class='metric-label'>盈亏比</div><div class='metric-value'>1:{TP_MIN_RATIO}</div>", unsafe_allow_html=True)
-    with col_s4: st.markdown(f"<div class='metric-label'>日亏损限额</div><div class='metric-value'>{DAILY_LOSS_LIMIT:.0f} USDT</div>", unsafe_allow_html=True)
+    with col_s1: st.metric("策略模式", mode)
+    with col_s2: st.metric("杠杆范围", f"{min_lev:.0f}x–{max_lev:.0f}x")
+    with col_s3: st.metric("盈亏比", f"1:{TP_MIN_RATIO}")
+    with col_s4: st.metric("日亏损限额", f"{DAILY_LOSS_LIMIT:.0f} USDT")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ③ 信号引擎 + 入场条件 + 强度评分
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">③ 信号引擎</div>', unsafe_allow_html=True)
     col_i1, col_i2, col_i3, col_i4 = st.columns(4)
-    with col_i1: st.markdown(f"<div class='metric-label'>品种</div><div class='metric-value'>{selected_symbol}</div>", unsafe_allow_html=True)
-    with col_i2: st.markdown(f"<div class='metric-label'>周期</div><div class='metric-value'>{main_period}</div>", unsafe_allow_html=True)
+    with col_i1: st.metric("品种", selected_symbol)
+    with col_i2: st.metric("周期", main_period)
     with col_i3:
         status = "等待" if entry_signal == 0 else ("做多" if entry_signal == 1 else "做空")
-        st.markdown(f"<div class='metric-label'>信号状态</div><div class='metric-value'>{status}</div>", unsafe_allow_html=True)
-    with col_i4: st.markdown(f"<div class='metric-label'>强度</div><div class='metric-value'>{signal_strength}/100</div>", unsafe_allow_html=True)
+        st.metric("信号状态", status)
+    with col_i4: st.metric("强度", f"{signal_strength}/100")
     st.markdown(f"<div style='margin-top:6px;'><span class='metric-label'>执行资格:</span> <span class='eligibility-{'active' if eligibility=='活跃' else 'blocked'}'>{eligibility}</span></div>", unsafe_allow_html=True)
 
     # 入场条件明细
@@ -660,7 +699,8 @@ with col_left:
     cond2 = "✅" if check_multiframe_trend(data_dict) != 0 else "❌"
     cond3 = "✅" if atr_pct >= MIN_ATR_PCT else "❌"
     cond4 = "✅" if data_dict['15m'].iloc[-1]['volume_surge'] else "❌"
-    cond5 = "✅" if (entry_signal == 1 and data_dict['15m'].iloc[-1]['rsi'] > 50) or (entry_signal == -1 and data_dict['15m'].iloc[-1]['rsi'] < 50) else "❌"
+    rsi = data_dict['15m'].iloc[-1]['rsi'] if not pd.isna(data_dict['15m'].iloc[-1]['rsi']) else 0
+    cond5 = "✅" if (entry_signal == 1 and rsi > 50) or (entry_signal == -1 and rsi < 50) else "❌"
     cond6 = "✅" if btc_trend == entry_signal else "❌" if btc_trend is not None else "⚪未启用"
     st.markdown(f"""
     <div style="font-size:0.8rem; line-height:1.4;">
@@ -706,10 +746,10 @@ with col_left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">⑤ 资本状态</div>', unsafe_allow_html=True)
     col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-    with col_c1: st.markdown(f"<div class='metric-label'>账户余额</div><div class='metric-value'>{st.session_state.account_balance:.0f} USDT</div>", unsafe_allow_html=True)
-    with col_c2: st.markdown(f"<div class='metric-label'>日盈亏</div><div class='metric-value'>{st.session_state.daily_pnl:.1f}</div>", unsafe_allow_html=True)
-    with col_c3: st.markdown(f"<div class='metric-label'>当前回撤</div><div class='metric-value'>{drawdown:.2f}%</div>", unsafe_allow_html=True)
-    with col_c4: st.markdown(f"<div class='metric-label'>连亏次数</div><div class='metric-value'>{st.session_state.consecutive_losses}</div>", unsafe_allow_html=True)
+    with col_c1: st.metric("账户余额", f"{st.session_state.account_balance:.0f} USDT")
+    with col_c2: st.metric("日盈亏", f"{st.session_state.daily_pnl:.1f}")
+    with col_c3: st.metric("当前回撤", f"{drawdown:.2f}%")
+    with col_c4: st.metric("连亏次数", st.session_state.consecutive_losses)
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ⑥ 链上情绪
@@ -738,7 +778,7 @@ with col_left:
 
 with col_right:
     st.subheader(f"📈 {selected_symbol} K线 ({main_period})")
-    if main_period in data_dict:
+    if main_period in data_dict and data_dict[main_period] is not None and not data_dict[main_period].empty:
         df = data_dict[main_period].tail(100).copy()
         df['日期'] = df['timestamp']
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
@@ -778,7 +818,8 @@ with col_right:
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
         latest_rsi = df['rsi'].iloc[-1]
-        fig.add_annotation(x=df['日期'].iloc[-1], y=latest_rsi, text=f"RSI: {latest_rsi:.1f}", showarrow=False, xanchor='left', row=2, col=1, font=dict(size=9, color="white"))
+        if not pd.isna(latest_rsi):
+            fig.add_annotation(x=df['日期'].iloc[-1], y=latest_rsi, text=f"RSI: {latest_rsi:.1f}", showarrow=False, xanchor='left', row=2, col=1, font=dict(size=9, color="white"))
 
         # 成交量
         colors_vol = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
@@ -789,7 +830,8 @@ with col_right:
 
         latest_macd = df['macd'].iloc[-1]
         latest_signal = df['macd_signal'].iloc[-1]
-        st.markdown(f"<span style='font-size:0.8rem;'>MACD: {latest_macd:.2f} | Signal: {latest_signal:.2f}</span>", unsafe_allow_html=True)
+        if not pd.isna(latest_macd) and not pd.isna(latest_signal):
+            st.markdown(f"<span style='font-size:0.8rem;'>MACD: {latest_macd:.2f} | Signal: {latest_signal:.2f}</span>", unsafe_allow_html=True)
     else:
         st.warning("K线数据不可用")
 
