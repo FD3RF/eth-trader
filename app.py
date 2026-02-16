@@ -10,7 +10,7 @@
 - 完整K线历史信号标注（100%时间戳匹配） + 持仓横线标注
 - 最大回撤统计 + AI胜率显示 + 爆仓价精确预警
 - 详细交易/信号日志 + 极致容错 + NaN/异常全面处理
-- 彻底修复信号历史KeyError（完全兼容所有旧新数据格式）
+- 彻底修复所有bug（包括K线图定义、信号历史兼容等）
 """
 
 import streamlit as st
@@ -97,7 +97,7 @@ class DataFetcher:
         return {
             "data_dict": data_dict,
             "current_price": float(data_dict['15m']['close'].iloc[-1]),
-            "fear_greed": self.fetch_fear_greed()
+            "fear_greed": self.fng_url
         }
 
     def _add_indicators(self, df):
@@ -392,7 +392,46 @@ if st.session_state.auto_position:
 
 drawdown = update_peak_and_drawdown()
 
-# K线图（保持原样，略）
+# K线图
+df_plot = df_15m.tail(120).copy()
+fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5, 0.15, 0.15, 0.2],
+                    vertical_spacing=0.02, subplot_titles=("K线与信号", "RSI", "MACD", "成交量"))
+
+fig.add_trace(go.Candlestick(x=df_plot['timestamp'], open=df_plot['open'], high=df_plot['high'],
+                             low=df_plot['low'], close=df_plot['close'], name="K线"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema50'], line=dict(color="#FFA500", width=1), name="EMA50"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema200'], line=dict(color="#4169E1", width=1), name="EMA200"), row=1, col=1)
+
+if st.session_state.auto_position:
+    pos = st.session_state.auto_position
+    fig.add_hline(y=pos['entry'], line_dash="dot", line_color="yellow", annotation_text=f"入场 {pos['entry']:.2f}")
+    fig.add_hline(y=pos['stop'], line_dash="dash", line_color="red", annotation_text=f"止损 {pos['stop']:.2f}")
+    fig.add_hline(y=pos['take'], line_dash="dash", line_color="green", annotation_text=f"止盈 {pos['take']:.2f}")
+
+# 历史信号标注
+plot_start = df_plot['timestamp'].min()
+plot_end = df_plot['timestamp'].max()
+for sig in st.session_state.signal_history[-50:]:
+    sig_time = sig['timestamp']
+    if plot_start <= sig_time <= plot_end:
+        y_pos = sig['价格'] * (0.99 if sig['direction'] == 1 else 1.01)
+        text = "▲ 多" if sig['direction'] == 1 else "▼ 空"
+        color = "lime" if sig['direction'] == 1 else "red"
+        fig.add_annotation(x=sig_time, y=y_pos, text=text, showarrow=True,
+                           arrowcolor=color, arrowhead=2, font=dict(size=12), row=1, col=1)
+
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['rsi'], line=dict(color="purple")), row=2, col=1)
+fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd'], line=dict(color="cyan")), row=3, col=1)
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd_signal'], line=dict(color="orange")), row=3, col=1)
+fig.add_bar(x=df_plot['timestamp'], y=df_plot['macd'] - df_plot['macd_signal'], marker_color="gray", row=3, col=1)
+
+colors_vol = np.where(df_plot['close'] >= df_plot['open'], 'green', 'red')
+fig.add_trace(go.Bar(x=df_plot['timestamp'], y=df_plot['volume'], marker_color=colors_vol.tolist()), row=4, col=1)
+
+fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
 
 # 主布局
 col1, col2 = st.columns([1, 1.5])
@@ -497,7 +536,7 @@ with st.expander("📋 执行日志与历史", expanded=True):
             # 统一价格列
             if '价格' not in history_df.columns:
                 history_df['价格'] = history_df.get('price', 0).round(2)
-            # 只显示存在的列
+            # 只显示存在的 колон
             display_cols = ['时间', '方向', '强度', '价格']
             available_cols = [col for col in display_cols if col in history_df.columns]
             st.dataframe(history_df[available_cols].tail(30), use_container_width=True)
