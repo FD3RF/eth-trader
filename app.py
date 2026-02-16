@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 最终完美版
-智能AI分析｜严格趋势过滤｜动态仓位｜移动止损｜一键平仓｜Telegram通知
+🚀 终极量化终端 · 极限完美版
+智能AI分析｜完整入场条件｜K线强烈信号｜交易计划｜移动止损｜一键平仓
 数据源：MEXC + Alternative.me + 模拟链上（可替换真实API）
 """
 
@@ -391,7 +391,7 @@ def update_trailing_stop(position, current_price):
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 最终完美版", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 极限完美版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; font-size: 0.85rem; }
@@ -407,8 +407,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏆 终极量化终端 · 最终完美版")
-st.caption("智能AI分析｜严格趋势｜动态仓位｜移动止损｜一键平仓｜Telegram通知")
+st.title("🏆 终极量化终端 · 极限完美版")
+st.caption("智能AI分析｜完整入场条件｜K线强烈信号｜交易计划｜移动止损｜一键平仓")
 
 init_state()
 
@@ -578,7 +578,7 @@ with col_left:
         with cs4: st.metric("日亏损限额", f"{DAILY_LOSS_LIMIT:.0f} USDT")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ③ 信号引擎 + 入场条件
+    # ③ 信号引擎 + 完整入场条件 + AI预测
     with st.container():
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="card-header">③ 信号引擎</div>', unsafe_allow_html=True)
@@ -592,30 +592,36 @@ with col_left:
         st.markdown(f"<div>执行资格: <span class='eligibility-{'active' if eligibility=='活跃' else 'blocked'}'>{eligibility}</span></div>", unsafe_allow_html=True)
 
         if ai_prob is not None:
-            st.markdown(f"<div>AI预测胜率: <span style='color:#FFD700;'>{ai_prob:.1f}%</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div>🤖 AI预测胜率: <span style='color:#FFD700;'>{ai_prob:.1f}%</span></div>", unsafe_allow_html=True)
         else:
-            st.markdown("<div>AI预测: 未启用</div>", unsafe_allow_html=True)
+            st.markdown("<div>🤖 AI预测: 未启用</div>", unsafe_allow_html=True)
 
         st.markdown("#### 入场条件")
+        # 计算每个条件的状态
         c1 = "✅" if is_uptrend(df_15m) or is_downtrend(df_15m) else "❌"
         c2 = "✅" if check_multiframe_trend(data_dict) != 0 else "❌"
         c3 = "✅" if atr_pct >= MIN_ATR_PCT else "❌"
         c4 = "✅" if df_15m.iloc[-1]['volume_surge'] else "❌"
-        rsi = df_15m.iloc[-1]['rsi']
-        c5 = "✅" if (entry_signal == 1 and rsi > 50) or (entry_signal == -1 and rsi < 50) else "❌"
+        rsi = df_15m.iloc[-1]['rsi'] if not pd.isna(df_15m.iloc[-1]['rsi']) else 0
+        if entry_signal == 1:
+            c5 = "✅" if rsi > 50 else "❌"
+        elif entry_signal == -1:
+            c5 = "✅" if rsi < 50 else "❌"
+        else:
+            c5 = "❌"
         c6 = "✅" if btc_trend == entry_signal else "❌" if btc_trend is not None else "⚪未启用"
         st.markdown(f"""
-        <div style="font-size:0.8rem;">
-            {c1} 严格趋势<br>
-            {c2} 多周期一致<br>
+        <div style="font-size:0.8rem; line-height:1.6;">
+            {c1} 严格趋势（价格与EMA200/MACD）<br>
+            {c2} 多周期一致（15m/1h/4h）<br>
             {c3} 波动率 ≥ {MIN_ATR_PCT}%<br>
-            {c4} 成交量放量<br>
-            {c5} RSI方向匹配<br>
+            {c4} 成交量放量（>20日均量1.2倍）<br>
+            {c5} RSI方向匹配（多>50，空<50）<br>
             {c6} 大盘BTC同步
         </div>
         """, unsafe_allow_html=True)
 
-        # 交易计划
+        # 交易计划（只在有信号时显示，否则提示）
         if entry_signal != 0 and stop_loss and take_profit:
             st.markdown("#### 📝 交易计划")
             st.markdown(f"""
@@ -626,6 +632,8 @@ with col_left:
                 <p>建议仓位: {position_size} {selected_symbol.split('/')[0]}</p>
             </div>
             """, unsafe_allow_html=True)
+        else:
+            st.info("⏸️ 当前无满足所有条件的交易计划")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ④ 风险引擎
@@ -669,7 +677,7 @@ with col_left:
         st.write(f"恐惧贪婪指数: **{fear_greed}**")
 
 with col_right:
-    st.subheader(f"📈 {selected_symbol} K线 ({main_period})")
+    st.subheader(f"📈 {selected_symbol} K线 ({main_period}) — 绿色▲=历史做多信号，红色▼=历史做空信号")
     if main_period in data_dict and not data_dict[main_period].empty:
         df = data_dict[main_period].tail(100).copy()
         df['日期'] = df['timestamp']
@@ -682,27 +690,29 @@ with col_right:
         fig.add_trace(go.Scatter(x=df['日期'], y=df['ema200'], line=dict(color="blue", width=1), name="EMA200"), row=1, col=1)
         fig.add_hline(y=current_price, line_dash="dot", line_color="white", annotation_text=f"现价 {current_price:.2f}", row=1, col=1)
 
-        # 止损止盈线
+        # 止损止盈线（仅当有信号时）
         if entry_signal != 0 and stop_loss and take_profit:
             fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"止损 {stop_loss:.2f}", row=1, col=1)
             fig.add_hline(y=take_profit, line_dash="dash", line_color="green", annotation_text=f"止盈 {take_profit:.2f}", row=1, col=1)
 
-        # 历史信号标注
+        # 历史买卖信号标注（强烈进场信号）
         buy = df[df['buy_signal'] == True]
         for _, r in buy.iterrows():
-            fig.add_annotation(x=r['日期'], y=r['low']*0.99, text="▲", showarrow=False, font=dict(size=12, color="#00F5A0"), row=1, col=1)
+            fig.add_annotation(x=r['日期'], y=r['low']*0.99, text="▲", showarrow=False,
+                               font=dict(size=14, color="#00F5A0"), row=1, col=1)
         sell = df[df['sell_signal'] == True]
         for _, r in sell.iterrows():
-            fig.add_annotation(x=r['日期'], y=r['high']*1.01, text="▼", showarrow=False, font=dict(size=12, color="#FF5555"), row=1, col=1)
+            fig.add_annotation(x=r['日期'], y=r['high']*1.01, text="▼", showarrow=False,
+                               font=dict(size=14, color="#FF5555"), row=1, col=1)
 
-        # 当前信号箭头
+        # 当前信号箭头（如果有）
         if entry_signal != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
             arrow_text = "▲ 多" if entry_signal == 1 else "▼ 空"
             arrow_color = "green" if entry_signal == 1 else "red"
             fig.add_annotation(x=last_date, y=last_price*(1.02 if entry_signal==1 else 0.98),
-                               text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
+                               text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=12))
 
         # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], line=dict(color="purple", width=1), showlegend=False), row=2, col=1)
@@ -716,6 +726,7 @@ with col_right:
         fig.update_layout(hovermode='x unified', template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
 
+        # MACD数值
         latest_macd = df['macd'].iloc[-1]
         latest_signal = df['macd_signal'].iloc[-1]
         st.markdown(f"<span style='font-size:0.8rem;'>MACD: {latest_macd:.2f} | Signal: {latest_signal:.2f}</span>", unsafe_allow_html=True)
