@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境100分版（含交易计划）
+🚀 终极量化终端 · 神境满血版
 环境 → 规则 → 信号 → 风险 → 资本 → 监控
-五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表｜止损止盈
+五层共振｜入场条件｜动态风控｜自动交易｜AI预测｜最强标注｜止损止盈
 """
 
 import streamlit as st
@@ -35,6 +35,14 @@ LEVERAGE_MODES = {
     "中倍试炼 (20-50x)": (20, 50),
     "高倍神级 (50-125x)": (50, 125)
 }
+
+# 尝试加载AI模型
+AI_MODEL = None
+if os.path.exists('eth_ai_model.pkl'):
+    try:
+        AI_MODEL = joblib.load('eth_ai_model.pkl')
+    except:
+        pass
 
 # ==================== 数据获取器 ====================
 class DataFetcher:
@@ -122,6 +130,10 @@ class DataFetcher:
         df['atr_pct'] = df['atr'] / df['close'] * 100.0
         adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
         df['adx'] = adx.adx()
+
+        # 生成买卖信号用于最强标注
+        df['buy_signal'] = (df['rsi'] < 30) & (df['close'] > df['ma20']) | (df['rsi'].shift(1) < 30) & (df['close'] > df['ma20'])
+        df['sell_signal'] = (df['rsi'] > 70) & (df['close'] < df['ma60']) | (df['rsi'].shift(1) > 70) & (df['close'] < df['ma60'])
         return df
 
 
@@ -357,7 +369,7 @@ def init_risk_state():
     if 'trade_log' not in st.session_state:
         st.session_state.trade_log = []
     if 'auto_enabled' not in st.session_state:
-        st.session_state.auto_enabled = False
+        st.session_state.auto_enabled = True  # 默认开启
     if 'auto_position' not in st.session_state:
         st.session_state.auto_position = None
     if 'signal_history' not in st.session_state:
@@ -382,7 +394,7 @@ def can_trade():
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 神境100分", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 神境满血版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; font-size: 0.85rem; }
@@ -398,8 +410,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏆 终极量化终端 · 神境100分版")
-st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜入场条件｜动态风控｜自动交易｜Telegram｜增强图表｜止损止盈")
+st.title("🏆 终极量化终端 · 神境满血版")
+st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜AI预测｜最强标注｜默认自动交易")
 
 init_risk_state()
 
@@ -444,6 +456,12 @@ with st.sidebar:
     else:
         st.session_state.telegram_token = ""
         st.session_state.telegram_chat_id = ""
+
+    st.markdown("---")
+    st.subheader("🤖 自动交易")
+    # 默认开启，用户可关闭
+    auto_enabled = st.checkbox("启用自动跟随", value=st.session_state.auto_enabled)
+    st.session_state.auto_enabled = auto_enabled
 
 # 获取数据
 with st.spinner("获取市场数据..."):
@@ -520,6 +538,24 @@ else:
 can_trade_flag = can_trade()
 eligibility = "活跃" if can_trade_flag and entry_signal != 0 else "禁止"
 
+# AI预测（如果模型存在）
+ai_prob = None
+if AI_MODEL is not None and '15m' in data_dict:
+    try:
+        last = data_dict['15m'].iloc[-1]
+        features = [
+            last['rsi'],
+            last['ma20'],
+            last['ma60'],
+            last['macd'],
+            last['macd_signal'],
+            last['atr_pct'],
+            last['adx']
+        ]
+        ai_prob = AI_MODEL.predict_proba([features])[0][1] * 100
+    except:
+        ai_prob = None
+
 # 主布局
 col_left, col_right = st.columns([1.4, 1.6])
 
@@ -545,7 +581,7 @@ with col_left:
     with col_s4: st.markdown(f"<div class='metric-label'>日亏损限额</div><div class='metric-value'>{DAILY_LOSS_LIMIT:.0f} USDT</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ③ 信号引擎 + 入场条件
+    # ③ 信号引擎 + 入场条件 + AI预测
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">③ 信号引擎</div>', unsafe_allow_html=True)
     col_i1, col_i2, col_i3, col_i4 = st.columns(4)
@@ -556,6 +592,12 @@ with col_left:
         st.markdown(f"<div class='metric-label'>信号状态</div><div class='metric-value'>{status}</div>", unsafe_allow_html=True)
     with col_i4: st.markdown(f"<div class='metric-label'>强度</div><div class='metric-value'>{five_total}/100</div>", unsafe_allow_html=True)
     st.markdown(f"<div style='margin-top:6px;'><span class='metric-label'>执行资格:</span> <span class='eligibility-{'active' if eligibility=='活跃' else 'blocked'}'>{eligibility}</span></div>", unsafe_allow_html=True)
+
+    # AI预测
+    if ai_prob is not None:
+        st.markdown(f"<div style='margin-top:4px;'><span class='metric-label'>AI预测胜率:</span> <span style='color:#FFD700;'>{ai_prob:.1f}%</span></div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div style='margin-top:4px;'><span class='metric-label'>AI预测:</span> 未启用</div>", unsafe_allow_html=True)
 
     st.markdown("#### 入场条件")
     cond1 = "✅" if five_total >= config['min_five_score'] else "❌"
@@ -573,7 +615,7 @@ with col_left:
     </div>
     """, unsafe_allow_html=True)
 
-    # 新增：交易计划（仅在有信号时显示）
+    # 交易计划
     if entry_signal != 0 and stop_loss and take_profit:
         st.markdown("#### 📝 交易计划")
         st.markdown(f"""
@@ -655,6 +697,15 @@ with col_right:
             fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"止损 {stop_loss:.2f}", row=1, col=1)
             fig.add_hline(y=take_profit, line_dash="dash", line_color="green", annotation_text=f"止盈 {take_profit:.2f}", row=1, col=1)
 
+        # 最强多空标注
+        buy_signals = df[df['buy_signal'] == True]
+        for idx, row in buy_signals.iterrows():
+            fig.add_annotation(x=row['日期'], y=row['low'] * 0.99, text="▲", showarrow=False, font=dict(size=12, color="#00F5A0"), row=1, col=1)
+        sell_signals = df[df['sell_signal'] == True]
+        for idx, row in sell_signals.iterrows():
+            fig.add_annotation(x=row['日期'], y=row['high'] * 1.01, text="▼", showarrow=False, font=dict(size=12, color="#FF5555"), row=1, col=1)
+
+        # 当前信号箭头
         if entry_signal != 0:
             last_date = df['日期'].iloc[-1]
             last_price = df['close'].iloc[-1]
@@ -683,11 +734,7 @@ with col_right:
     else:
         st.warning("K线数据不可用")
 
-    # 自动化
-    st.markdown("---")
-    st.subheader("🤖 自动化")
-    auto_enabled = st.checkbox("启用模拟自动跟随", value=st.session_state.auto_enabled)
-    st.session_state.auto_enabled = auto_enabled
+    # 自动化开关已在侧边栏，这里不再重复
 
     # 执行日志
     with st.expander("⑦ 执行日志"):
