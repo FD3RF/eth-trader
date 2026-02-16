@@ -30,7 +30,7 @@ from typing import Optional, Dict, List, Tuple, Any
 
 warnings.filterwarnings('ignore')
 
-# ==================== 全局配置（可覆盖） ====================
+# ==================== 全局配置 ====================
 CONFIG = {
     "SYMBOLS": ["ETH/USDT", "BTC/USDT", "SOL/USDT", "BNB/USDT"],
     "BASE_RISK": 0.02,
@@ -54,7 +54,7 @@ CONFIG = {
     "TIMEFRAMES": ['15m', '1h', '4h', '1d'],
     "FETCH_LIMIT": 500,
     "AUTO_REFRESH": 60000,
-    "ANTI_DUPLICATE_SECONDS": 300  # 防重复开仓间隔
+    "ANTI_DUPLICATE_SECONDS": 300
 }
 
 # ==================== 辅助函数 ====================
@@ -116,7 +116,7 @@ def send_telegram(msg: str):
         except Exception:
             pass
 
-# ==================== 数据获取器（极致容错） ====================
+# ==================== 数据获取器 ====================
 class DataFetcher:
     def __init__(self):
         self.periods = CONFIG['TIMEFRAMES']
@@ -178,7 +178,7 @@ class DataFetcher:
         df['volume_surge'] = df['volume'] > df['volume_ma20'] * 1.2
         return df
 
-# ==================== 信号引擎核心函数 ====================
+# ==================== 信号引擎 ====================
 def is_uptrend(last: pd.Series) -> bool:
     return last['close'] > last['ema200'] and last['macd'] > last['macd_signal'] and last['macd'] > 0
 
@@ -264,7 +264,7 @@ def calculate_signal_score_and_details(df_15m: pd.DataFrame, data_dict: dict, bt
     details.append((f"{'✅' if fg_score>0 else 'ℹ️'} 恐慌贪婪加分 ({fear_greed}) +{fg_score}", "✅" if fg_score>0 else "ℹ️", fg_score))
     score += fg_score
 
-    # 8. AI胜率动态加分（最高10分）
+    # 8. AI胜率加分（最高10分）
     if ai_prob is not None:
         ai_score = min(int(ai_prob / 10), 10)
         details.append((f"✅ AI胜率预测 {ai_prob}% +{ai_score}", "✅", ai_score))
