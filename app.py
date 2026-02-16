@@ -111,7 +111,7 @@ class DataFetcher:
         df['atr'] = atr.fillna(atr.mean() if not pd.isna(atr.mean()) else df['close'] * 0.01)
         df['atr_pct'] = (df['atr'] / df['close'] * 100).fillna(0)
         df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14).adx().fillna(20)
-        df['volume_ma20']'] = df['volume'].rolling(20).mean().fillna(df['volume'])
+        df['volume_ma20'] = df['volume'].rolling(20).mean().fillna(df['volume'])
         df['volume_surge'] = df['volume'] > df['volume_ma20'] * 1.2
         return df
 
@@ -359,7 +359,7 @@ ai_prob = None
 if AI_MODEL and symbol == "ETH/USDT":
     try:
         last = df_15m.iloc[-1]
-        features = np.array([[last['rsi'], last['macd'], last['macd_signal'], last['atr_pct'], last['adx']])
+        features = np.array([[last['rsi'], last['macd'], last['macd_signal'], last['atr_pct'], last['adx']]])
         ai_prob = round(AI_MODEL.predict_proba(features)[0][1] * 100, 1)
     except:
         ai_prob = None
@@ -391,7 +391,46 @@ if st.session_state.auto_position:
 
 drawdown = update_peak_and_drawdown()
 
-# K线图（保持原样，略）
+# K线图
+df_plot = df_15m.tail(120).copy()
+fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5, 0.15, 0.15, 0.2],
+                    vertical_spacing=0.02, subplot_titles=("K线与信号", "RSI", "MACD", "成交量"))
+
+fig.add_trace(go.Candlestick(x=df_plot['timestamp'], open=df_plot['open'], high=df_plot['high'],
+                             low=df_plot['low'], close=df_plot['close'], name="K线"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema50'], line=dict(color="#FFA500", width=1), name="EMA50"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema200'], line=dict(color="#4169E1", width=1), name="EMA200"), row=1, col=1)
+
+if st.session_state.auto_position:
+    pos = st.session_state.auto_position
+    fig.add_hline(y=pos['entry'], line_dash="dot", line_color="yellow", annotation_text=f"入场 {pos['entry']:.2f}")
+    fig.add_hline(y=pos['stop'], line_dash="dash", line_color="red", annotation_text=f"止损 {pos['stop']:.2f}")
+    fig.add_hline(y=pos['take'], line_dash="dash", line_color="green", annotation_text=f"止盈 {pos['take']:.2f}")
+
+# 历史信号标注
+plot_start = df_plot['timestamp'].min()
+plot_end = df_plot['timestamp'].max()
+for sig in st.session_state.signal_history[-50:]:
+    sig_time = sig['timestamp']
+    if plot_start <= sig_time <= plot_end:
+        y_pos = sig['price'] * (0.99 if sig['direction'] == 1 else 1.01)
+        text = "▲ 多" if sig['direction'] == 1 else "▼ 空"
+        color = "lime" if sig['direction'] == 1 else "red"
+        fig.add_annotation(x=sig_time, y=y_pos, text=text, showarrow=True,
+                           arrowcolor=color, arrowhead=2, font=dict(size=12), row=1, col=1)
+
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['rsi'], line=dict(color="purple")), row=2, col=1)
+fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd'], line=dict(color="cyan")), row=3, col=1)
+fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd_signal'], line=dict(color="orange")), row=3, col=1)
+fig.add_bar(x=df_plot['timestamp'], y=df_plot['macd'] - df_plot['macd_signal'], marker_color="gray", row=3, col=1)
+
+colors_vol = np.where(df_plot['close'] >= df_plot['open'], 'green', 'red')
+fig.add_trace(go.Bar(x=df_plot['timestamp'], y=df_plot['volume'], marker_color=colors_vol.tolist()), row=4, col=1)
+
+fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
 
 # 主布局
 col1, col2 = st.columns([1, 1.5])
@@ -402,7 +441,7 @@ with col1:
     st.metric("信号强度", f"{score}/100")
     st.markdown(f"**当前信号**: {signal_text}")
 
-    # 新增：信号条件透明调试面板
+    # 信号条件透明调试面板
     with st.expander("🔍 信号条件详细检查", expanded=True):
         total = 0
         for desc, status, points in condition_details:
@@ -425,8 +464,69 @@ with col1:
 with col2:
     st.plotly_chart(fig, use_container_width=True)
 
-# 自动交易逻辑（保持原样，略）
+# 自动交易
+now = datetime.now()
+trade_allowed = can_trade(drawdown)
 
-# 日志（保持原样，略）
+if trade_allowed and st.session_state.auto_enabled and score >= WEAK_SIGNAL and not st.session_state.auto_position:
+    st.session_state.auto_position = {
+        'direction': direction,
+        'entry': current_price,
+        'time': now,
+        'stop': stop_level,
+        'take': take_level,
+        'size': size,
+        'partial_taken': False
+    }
+    st.session_state.signal_history.append({
+        'timestamp': now,
+        'price': current_price,
+        'direction': direction,
+        'score': score
+    })
+    dir_text = "多" if direction == 1 else "空"
+    telegram(f"🚀 开仓 {symbol} {dir_text} | 强度 {score} | 价格 {current_price:.2f}")
+
+elif st.session_state.auto_position:
+    pos = st.session_state.auto_position
+    direction = pos['direction']
+    hit_stop = (direction == 1 and current_price <= pos['stop']) or (direction == -1 and current_price >= pos['stop'])
+    hit_take = (direction == 1 and current_price >= pos['take']) or (direction == -1 and current_price <= pos['take'])
+    timeout = (now - pos['time']).total_seconds() / 3600 > MAX_HOLD_HOURS
+
+    if hit_stop or hit_take or timeout:
+        pnl = (current_price - pos['entry']) * pos['size'] * direction
+        reason = "止损" if hit_stop else ("全止盈" if hit_take else "超时平仓")
+        if pnl < 0:
+            st.session_state.consecutive_losses += 1
+        else:
+            st.session_state.consecutive_losses = 0
+
+        st.session_state.trade_log.append({
+            '时间': now.strftime("%Y-%m-%d %H:%M"),
+            '方向': "多" if direction == 1 else "空",
+            '盈亏': round(pnl, 2),
+            '原因': reason
+        })
+        telegram(f"{reason} {symbol} | 盈亏 {pnl:.2f} USDT")
+        st.session_state.auto_position = None
+        st.rerun()
+
+# 日志
+with st.expander("📋 执行日志与历史", expanded=True):
+    t1, t2 = st.tabs(["交易记录", "信号历史"])
+    with t1:
+        if st.session_state.trade_log:
+            st.dataframe(pd.DataFrame(st.session_state.trade_log)[-20:], use_container_width=True)
+        else:
+            st.info("暂无交易记录")
+    with t2:
+        if st.session_state.signal_history:
+            history_df = pd.DataFrame(st.session_state.signal_history)
+            history_df['时间'] = history_df['timestamp'].dt.strftime("%m-%d %H:%M")
+            history_df['方向'] = history_df['direction'].map({1: "多", -1: "空"})
+            st.dataframe(history_df[['时间', '方向', '强度', '价格']].tail(30), use_container_width=True)
+        else:
+            st.info("暂无信号历史")
 
 st_autorefresh(interval=60000, key="refresh")
