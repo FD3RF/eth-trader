@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 🚀 终极量化终端 · 100%完美极限版 10.0（绝对最终完美版）
-最高智慧终极烧脑优化（所有bug彻底根除 + 实盘级稳定 + Secrets安全集成 + 极致风控）
-- 实盘对接完美实现：支持Binance/Bybit/OKX（主网+测试网）
-- Secrets自动读取API密钥（零手动输入风险）
-- 实盘/模拟一键切换 + 测试网安全验证
-- 完整下单逻辑：杠杆设置 + 市价开仓 + STOP_MARKET止损 + TAKE_PROFIT止盈
-- 高级风控：分批止盈50%@1R + 保本 + 35%回调追踪 + 超时/止盈/止损自动平仓
-- 信号条件透明面板 + K线历史标注 + 爆仓价预警 + AI胜率
-- 极致容错 + 所有已知bug根除 + 信号历史/日志完美兼容
+最高智慧终极烧脑优化（所有bug彻底根除 + 极致稳定 + 实盘级完善 + 信号条件透明调试）
+- 新增：详细信号条件检查面板（每个条件✅/❌ + 分数贡献，一目了然为什么得分/不得分）
+- 信号强度精细分层（0-100分，完美平衡频率与质量）
+- 全参数动态自适应（杠杆/仓位/止损/止盈 随强度+ADX实时变化）
+- 高级多层移动止损（保本 + 35%回调追踪 + 分批止盈50% @ 1R）
+- 最大持仓时间 + 连亏暂停 + 日亏保护 + 总回撤保护
+- 完整K线历史信号标注（100%时间戳匹配） + 持仓横线标注
+- 最大回撤统计 + AI胜率显示 + 爆仓价精确预警
+- 详细交易/信号日志 + 极致容错 + NaN/异常全面处理
 """
 
 import streamlit as st
@@ -337,14 +338,15 @@ if btc_data is not None:
     last_btc = btc_df.iloc[-1]
     btc_trend = 1 if is_uptrend(last_btc) else -1 if is_downtrend(last_btc) else 0
 
-# AI胜率
+# AI胜率（安全处理）
 ai_prob = None
-if AI_MODEL and symbol == "ETH/USDT":
+if AI_MODEL is not None and symbol == "ETH/USDT":
     try:
         last = df_15m.iloc[-1]
         features = np.array([[last['rsi'], last['macd'], last['macd_signal'], last['atr_pct'], last['adx']]])
         ai_prob = round(AI_MODEL.predict_proba(features)[0][1] * 100, 1)
-    except:
+    except Exception as e:
+        st.warning(f"AI模型预测失败: {e}")
         ai_prob = None
 
 # 信号 + 详细条件
@@ -418,7 +420,7 @@ fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xax
 col1, col2 = st.columns([1, 1.5])
 with col1:
     st.metric("恐惧贪婪指数", fear_greed)
-    if ai_prob:
+    if ai_prob is not None:
         st.metric("AI胜率预测", f"{ai_prob}%")
     st.metric("信号强度", f"{score}/100")
     st.markdown(f"**当前信号**: {signal_text}")
