@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 100%完美极限版 9.0（实盘终极版）
-最高智慧终极烧脑优化 + 实盘对接 + 多交易所支持 + 极致安全
-- 新增：实盘对接（Binance/Bybit合约，支持测试网）
-- 新增：API密钥安全输入，仅运行时使用
-- 新增：实盘开仓/平仓 + 止损单自动设置
-- 保持原有所有智能功能：信号透明、动态风控、移动止损、分批止盈等
-- 模拟/实盘一键切换，模拟盘完全保留作为备选
+🚀 终极量化终端 · 100%完美极限版 9.1（实盘终极版·修复OKX Passphrase）
+最高智慧终极烧脑优化 + 实盘对接（支持Binance/Bybit/OKX）+ 极致安全
+- 新增：OKX专用Passphrase输入，完美支持OKX合约
+- 保持所有智能功能：信号透明、动态风控、移动止损、分批止盈、一键平仓、Telegram通知
+- 模拟/实盘一键切换，测试网支持
 """
 
 import streamlit as st
@@ -365,10 +363,10 @@ def close_real_position(exchange, symbol, size, side):
         raise Exception(f"实盘平仓失败: {e}")
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 100%完美极限版 9.0", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 100%完美极限版 9.1", layout="wide")
 st.markdown("<style>.stApp{background:#0B0E14;color:white;}</style>", unsafe_allow_html=True)
-st.title("🚀 终极量化终端 · 100%完美极限版 9.0")
-st.caption("最终发布版 + 实盘对接 | 多交易所支持 | 极致安全 | 信号透明 | 实盘级稳定")
+st.title("🚀 终极量化终端 · 100%完美极限版 9.1")
+st.caption("最终发布版 + 实盘对接（支持OKX Passphrase） | 多交易所 | 极致安全 | 信号透明")
 
 init_state()
 
@@ -388,20 +386,33 @@ with st.sidebar:
         exchange_choice = st.selectbox("选择交易所", list(EXCHANGES.keys()))
         api_key = st.text_input("API Key", type="password")
         secret_key = st.text_input("Secret Key", type="password")
+        
+        # 针对OKX增加Passphrase输入
+        passphrase = None
+        if exchange_choice == "OKX合约":
+            passphrase = st.text_input("Passphrase (密码短语)", type="password")
+        
         testnet = st.checkbox("使用测试网", value=True, help="测试网不产生真实盈亏，推荐先测试")
         
         if api_key and secret_key:
             try:
                 exchange_class = EXCHANGES[exchange_choice]
-                exchange = exchange_class({
+                # 构建交易所参数
+                exchange_params = {
                     'apiKey': api_key,
                     'secret': secret_key,
                     'enableRateLimit': True,
                     'options': {'defaultType': 'future'}
-                })
+                }
+                # OKX需要额外传入password
+                if exchange_choice == "OKX合约" and passphrase:
+                    exchange_params['password'] = passphrase
+                
+                exchange = exchange_class(exchange_params)
+                
                 if testnet:
                     exchange.set_sandbox_mode(True)
-                # 测试连接
+                # 测试连接（获取账户余额）
                 exchange.fetch_balance()
                 st.session_state.exchange = exchange
                 st.success(f"✅ {exchange_choice} 连接成功")
