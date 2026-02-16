@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境满血版
-环境 → 规则 → 信号 → 风险 → 资本 → 监控
-五层共振｜入场条件｜动态风控｜自动交易｜AI预测｜最强标注｜止损止盈
+🚀 终极量化终端 · 神境完美版
+环境→规则→信号→风险→资本→监控
+五层共振｜AI预测｜最强标注｜默认自动交易｜止损止盈
 """
 
 import streamlit as st
@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 # ==================== 全局配置 ====================
 SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
 BASE_RISK = 0.01
-MAX_LEVERAGE_GLOBAL = 125.0
+MAX_LEVERAGE = 125.0
 DAILY_LOSS_LIMIT = 300.0
 MIN_ATR_PCT = 0.5
 
@@ -322,21 +322,26 @@ def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
     else:
         stop = entry_price + stop_distance
         take = entry_price - take_distance
-    return stop, take, take_distance/stop_distance
+    return stop, take, take_distance / stop_distance  # 返回盈亏比数值
 
 
 def calculate_position_size(balance, entry_price, stop_price, leverage, position_pct):
     risk_amount = balance * position_pct
-    nominal = risk_amount * leverage
-    quantity = nominal / entry_price
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance == 0:
+        return 0.0
+    position_value = risk_amount / stop_distance * entry_price
+    max_position = balance * leverage
+    position_value = min(position_value, max_position)
+    quantity = position_value / entry_price
     return round(quantity, 3)
 
 
 def liquidation_price(entry_price, side, leverage):
     if side == 1:
-        return entry_price * (1 - 1.0/leverage)
+        return entry_price * (1 - 1.0 / leverage)
     else:
-        return entry_price * (1 + 1.0/leverage)
+        return entry_price * (1 + 1.0 / leverage)
 
 
 def send_telegram_message(message):
@@ -394,7 +399,7 @@ def can_trade():
 
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 神境满血版", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 神境完美版", layout="wide")
 st.markdown("""
 <style>
 .stApp { background-color: #0B0E14; color: white; font-size: 0.85rem; }
@@ -410,8 +415,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏆 终极量化终端 · 神境满血版")
-st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜AI预测｜最强标注｜默认自动交易")
+st.title("🏆 终极量化终端 · 神境完美版")
+st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜AI预测｜最强标注｜默认自动交易｜止损止盈")
 
 init_risk_state()
 
@@ -459,7 +464,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🤖 自动交易")
-    # 默认开启，用户可关闭
     auto_enabled = st.checkbox("启用自动跟随", value=st.session_state.auto_enabled)
     st.session_state.auto_enabled = auto_enabled
 
@@ -470,7 +474,7 @@ with st.spinner("获取市场数据..."):
 
 # 处理当前品种
 if selected_symbol not in all_data or all_data[selected_symbol]["data_dict"] is None:
-    st.error(f"❌ 品种 {selected_symbol} 数据不可用")
+    st.error(f"❌ 品种 {selected_symbol} 数据不可用，请稍后重试")
     st.stop()
 
 data = all_data[selected_symbol]
@@ -538,7 +542,7 @@ else:
 can_trade_flag = can_trade()
 eligibility = "活跃" if can_trade_flag and entry_signal != 0 else "禁止"
 
-# AI预测（如果模型存在）
+# AI预测
 ai_prob = None
 if AI_MODEL is not None and '15m' in data_dict:
     try:
@@ -593,7 +597,6 @@ with col_left:
     with col_i4: st.markdown(f"<div class='metric-label'>强度</div><div class='metric-value'>{five_total}/100</div>", unsafe_allow_html=True)
     st.markdown(f"<div style='margin-top:6px;'><span class='metric-label'>执行资格:</span> <span class='eligibility-{'active' if eligibility=='活跃' else 'blocked'}'>{eligibility}</span></div>", unsafe_allow_html=True)
 
-    # AI预测
     if ai_prob is not None:
         st.markdown(f"<div style='margin-top:4px;'><span class='metric-label'>AI预测胜率:</span> <span style='color:#FFD700;'>{ai_prob:.1f}%</span></div>", unsafe_allow_html=True)
     else:
@@ -734,8 +737,6 @@ with col_right:
     else:
         st.warning("K线数据不可用")
 
-    # 自动化开关已在侧边栏，这里不再重复
-
     # 执行日志
     with st.expander("⑦ 执行日志"):
         tab1, tab2 = st.tabs(["交易记录", "信号历史"])
@@ -750,7 +751,7 @@ with col_right:
             else:
                 st.info("暂无历史信号")
 
-# ==================== 自动交易逻辑（后台运行）====================
+# ==================== 自动交易逻辑 ====================
 now = datetime.now()
 if st.session_state.get('auto_enabled', False) and can_trade_flag and entry_signal != 0:
     if st.session_state.auto_position is None:
