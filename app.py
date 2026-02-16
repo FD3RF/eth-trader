@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 100%完美极限版 9.1（实盘终极版·修复OKX Passphrase）
-最高智慧终极烧脑优化 + 实盘对接（支持Binance/Bybit/OKX）+ 极致安全
-- 新增：OKX专用Passphrase输入，完美支持OKX合约
-- 保持所有智能功能：信号透明、动态风控、移动止损、分批止盈、一键平仓、Telegram通知
+🚀 终极量化终端 · 100%完美极限版 9.2（Secrets集成版）
+最高智慧终极烧脑优化 + 实盘对接（支持Binance/Bybit/OKX）+ Secrets密钥读取 + 极致安全
+- 新增：从Streamlit Secrets自动读取API密钥，避免手动输入
+- 保留所有智能功能：信号透明、动态风控、移动止损、分批止盈、一键平仓、Telegram通知
 - 模拟/实盘一键切换，测试网支持
+- 修复OKX连接问题，IP白名单已更新
 """
 
 import streamlit as st
@@ -228,9 +229,9 @@ def position_size(balance, entry, stop_price, leverage, risk_mult):
     return round(value / entry, 3)
 
 def liquidation_price(entry, direction, leverage):
-    if direction == 1:  # long
+    if direction == 1:
         return round(entry * (1 - 1/leverage), 2)
-    else:  # short
+    else:
         return round(entry * (1 + 1/leverage), 2)
 
 def advanced_trailing_and_partial_tp(position, current_price):
@@ -242,7 +243,6 @@ def advanced_trailing_and_partial_tp(position, current_price):
     take = position['take']
     partial_taken = position.get('partial_taken', False)
 
-    # 分批止盈：达到1R时平50%
     risk_dist = abs(entry - current_stop)
     r1_target = entry + risk_dist if direction == 1 else entry - risk_dist
     if not partial_taken:
@@ -251,7 +251,6 @@ def advanced_trailing_and_partial_tp(position, current_price):
             position['partial_taken'] = True
             return position, True
 
-    # 移动止损
     pnl_pct = (current_price - entry) / entry * direction
     if pnl_pct > 0.01:
         if direction == 1:
@@ -311,28 +310,18 @@ def can_trade(drawdown):
 
 # ==================== 实盘交易函数 ====================
 def place_real_order(exchange, symbol, side, size, stop_price, leverage):
-    """
-    通过交易所API执行实盘下单，同时设置止损单
-    """
     try:
-        # 转换交易对格式（去掉/，如 ETH/USDT -> ETHUSDT）
         market_symbol = symbol.replace('/', '')
-        
-        # 设置杠杆
         exchange.fapiPrivatePostLeverage({
             'symbol': market_symbol,
             'leverage': leverage
         })
-        
-        # 市价开仓
         order = exchange.create_market_order(
             symbol=market_symbol,
             side=side,
             amount=size,
             params={'reduceOnly': False}
         )
-        
-        # 设置止损单（市价止损）
         stop_side = 'sell' if side == 'buy' else 'buy'
         stop_order = exchange.create_order(
             symbol=market_symbol,
@@ -341,15 +330,11 @@ def place_real_order(exchange, symbol, side, size, stop_price, leverage):
             amount=size,
             params={'stopPrice': stop_price}
         )
-        
         return order, stop_order
     except Exception as e:
         raise Exception(f"实盘下单失败: {e}")
 
 def close_real_position(exchange, symbol, size, side):
-    """
-    平仓（市价反向平仓）
-    """
     try:
         market_symbol = symbol.replace('/', '')
         close_side = 'sell' if side == 'long' else 'buy'
@@ -363,10 +348,10 @@ def close_real_position(exchange, symbol, size, side):
         raise Exception(f"实盘平仓失败: {e}")
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 100%完美极限版 9.1", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 100%完美极限版 9.2", layout="wide")
 st.markdown("<style>.stApp{background:#0B0E14;color:white;}</style>", unsafe_allow_html=True)
-st.title("🚀 终极量化终端 · 100%完美极限版 9.1")
-st.caption("最终发布版 + 实盘对接（支持OKX Passphrase） | 多交易所 | 极致安全 | 信号透明")
+st.title("🚀 终极量化终端 · 100%完美极限版 9.2")
+st.caption("Secrets集成｜实盘对接（OKX/Binance/Bybit）｜信号透明｜极致风控")
 
 init_state()
 
@@ -384,27 +369,30 @@ with st.sidebar:
     
     if use_real:
         exchange_choice = st.selectbox("选择交易所", list(EXCHANGES.keys()))
-        api_key = st.text_input("API Key", type="password")
-        secret_key = st.text_input("Secret Key", type="password")
         
-        # 针对OKX增加Passphrase输入
+        # 从Secrets读取默认值（如果存在）
+        api_key_default = st.secrets.get(f"{exchange_choice.replace(' ', '_')}_API_KEY", "")
+        secret_key_default = st.secrets.get(f"{exchange_choice.replace(' ', '_')}_SECRET_KEY", "")
+        passphrase_default = st.secrets.get(f"{exchange_choice.replace(' ', '_')}_PASSPHRASE", "")
+        
+        api_key = st.text_input("API Key", value=api_key_default, type="password")
+        secret_key = st.text_input("Secret Key", value=secret_key_default, type="password")
+        
         passphrase = None
         if exchange_choice == "OKX合约":
-            passphrase = st.text_input("Passphrase (密码短语)", type="password")
+            passphrase = st.text_input("Passphrase (密码短语)", value=passphrase_default, type="password")
         
         testnet = st.checkbox("使用测试网", value=True, help="测试网不产生真实盈亏，推荐先测试")
         
-        if api_key and secret_key:
+        if api_key and secret_key and (exchange_choice != "OKX合约" or passphrase):
             try:
                 exchange_class = EXCHANGES[exchange_choice]
-                # 构建交易所参数
                 exchange_params = {
                     'apiKey': api_key,
                     'secret': secret_key,
                     'enableRateLimit': True,
                     'options': {'defaultType': 'future'}
                 }
-                # OKX需要额外传入password
                 if exchange_choice == "OKX合约" and passphrase:
                     exchange_params['password'] = passphrase
                 
@@ -412,7 +400,6 @@ with st.sidebar:
                 
                 if testnet:
                     exchange.set_sandbox_mode(True)
-                # 测试连接（获取账户余额）
                 exchange.fetch_balance()
                 st.session_state.exchange = exchange
                 st.success(f"✅ {exchange_choice} 连接成功")
@@ -421,7 +408,7 @@ with st.sidebar:
                 st.error(f"连接失败: {e}")
         else:
             st.session_state.exchange = None
-            st.warning("请输入API Key和Secret")
+            st.warning("请完整填写API信息")
     else:
         st.session_state.exchange = None
     
@@ -522,7 +509,6 @@ if st.session_state.auto_position:
     fig.add_hline(y=pos['stop'], line_dash="dash", line_color="red", annotation_text=f"止损 {pos['stop']:.2f}")
     fig.add_hline(y=pos['take'], line_dash="dash", line_color="green", annotation_text=f"止盈 {pos['take']:.2f}")
 
-# 历史信号标注
 plot_start = df_plot['timestamp'].min()
 plot_end = df_plot['timestamp'].max()
 for sig in st.session_state.signal_history[-50:]:
@@ -582,11 +568,10 @@ with col1:
 with col2:
     st.plotly_chart(fig, use_container_width=True)
 
-# ==================== 自动交易逻辑（实盘/模拟混合）====================
+# 自动交易逻辑
 now = datetime.now()
 trade_allowed = can_trade(drawdown)
 
-# 开仓
 if trade_allowed and st.session_state.auto_enabled and score >= WEAK_SIGNAL and not st.session_state.auto_position:
     if st.session_state.exchange and use_real:
         try:
@@ -631,7 +616,6 @@ if trade_allowed and st.session_state.auto_enabled and score >= WEAK_SIGNAL and 
         })
         telegram(f"🚀 模拟开仓 {symbol} {'多' if direction==1 else '空'} | 强度 {score} | 价格 {current_price:.2f}")
 
-# 平仓
 elif st.session_state.auto_position:
     pos = st.session_state.auto_position
     direction = pos['direction']
