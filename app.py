@@ -561,7 +561,7 @@ if AI_MODEL is not None and '15m' in data_dict:
         st.sidebar.warning(f"AI预测失败: {e}")
         ai_prob = None
 
-# 主布局
+# 主布局：左侧卡片区（7个卡片），右侧图表区
 col_left, col_right = st.columns([1.4, 1.6])
 
 with col_left:
@@ -586,7 +586,7 @@ with col_left:
     with col_s4: st.markdown(f"<div class='metric-label'>日亏损限额</div><div class='metric-value'>{DAILY_LOSS_LIMIT:.0f} USDT</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ③ 信号引擎 + 入场条件 + AI预测
+    # ③ 信号引擎 + 入场条件 + AI预测 + 交易计划
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">③ 信号引擎</div>', unsafe_allow_html=True)
     col_i1, col_i2, col_i3, col_i4 = st.columns(4)
@@ -619,7 +619,7 @@ with col_left:
     </div>
     """, unsafe_allow_html=True)
 
-    # 交易计划
+    # 交易计划（仅当有信号时显示）
     if entry_signal != 0 and stop_loss and take_profit:
         st.markdown("#### 📝 交易计划")
         st.markdown(f"""
@@ -632,7 +632,7 @@ with col_left:
         """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ④ 风险引擎（核心）
+    # ④ 风险引擎
     st.markdown('<div class="card" style="border-left-color: #FFAA00;">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">④ 风险引擎</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="risk-factor"><span class="factor-name">F_quality</span><span class="factor-value">{F_quality:.2f}</span></div>', unsafe_allow_html=True)
@@ -648,7 +648,7 @@ with col_left:
                 '</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ⑤ 资本状态 + 链上情绪
+    # ⑤ 资本状态
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">⑤ 资本状态</div>', unsafe_allow_html=True)
     col_c1, col_c2, col_c3, col_c4 = st.columns(4)
@@ -656,15 +656,17 @@ with col_left:
     with col_c2: st.markdown(f"<div class='metric-label'>日盈亏</div><div class='metric-value'>{st.session_state.daily_pnl:.1f}</div>", unsafe_allow_html=True)
     with col_c3: st.markdown(f"<div class='metric-label'>当前回撤</div><div class='metric-value'>{drawdown:.2f}%</div>", unsafe_allow_html=True)
     with col_c4: st.markdown(f"<div class='metric-label'>连亏次数</div><div class='metric-value'>{st.session_state.consecutive_losses}</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ⑥ 链上情绪（折叠，避免过多占用空间）
     with st.expander("🔗 链上情绪", expanded=False):
         st.write(f"交易所净流入: **{netflow:+.0f} {selected_symbol.split('/')[0]}** (模拟)")
         st.write(f"大额转账: **{whale}** 笔 (模拟)")
         st.write(f"恐惧贪婪指数: **{fear_greed}**")
-    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ⑥ 市场监控
+    # ⑦ 市场监控（表格）
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-header">⑥ 市场监控</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-header">⑦ 市场监控</div>', unsafe_allow_html=True)
     monitor_data = []
     for sym in SYMBOLS:
         if sym in all_data and all_data[sym]["data_dict"] is not None:
@@ -746,7 +748,7 @@ with col_right:
         st.warning("K线数据不可用")
 
     # 执行日志
-    with st.expander("⑦ 执行日志"):
+    with st.expander("📋 执行日志"):
         tab1, tab2 = st.tabs(["交易记录", "信号历史"])
         with tab1:
             if st.session_state.trade_log:
