@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境完美版（修复版）
+🚀 终极量化终端 · 神境完美版（最终稳定版）
 环境→规则→信号→风险→资本→监控
 五层共振｜AI预测｜K线标注｜默认自动交易｜止损止盈
 """
@@ -576,7 +576,7 @@ with col_left:
     st.markdown(f"<div style='margin-top:4px;'>数据源: {source_display}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ② 策略概况（确保无重复标题）
+    # ② 策略概况
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">② 策略概况</div>', unsafe_allow_html=True)
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -632,7 +632,7 @@ with col_left:
         """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ④ 风险引擎（带默认值）
+    # ④ 风险引擎（核心）
     st.markdown('<div class="card" style="border-left-color: #FFAA00;">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">④ 风险引擎</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="risk-factor"><span class="factor-name">F_quality</span><span class="factor-value">{F_quality:.2f}</span></div>', unsafe_allow_html=True)
