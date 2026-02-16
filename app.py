@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境完美版（AI实时标注）
+🚀 终极量化终端 · 神境完美版（修复版）
 环境→规则→信号→风险→资本→监控
 五层共振｜AI预测｜K线标注｜默认自动交易｜止损止盈
 """
@@ -518,11 +518,11 @@ if entry_signal != 0 and atr_value > 0:
         position_pct
     )
 
-# 风险因子
-F_quality = five_total / 100.0
-F_volatility = 1.0 if atr_pct > 0.8 else 0.5
+# 风险因子（确保有默认值）
+F_quality = five_total / 100.0 if five_total else 0.0
+F_volatility = 1.0 if atr_pct > 0.8 else 0.5 if atr_pct else 0.5
 drawdown = update_risk_state(0.0, st.session_state.account_balance + st.session_state.daily_pnl, st.session_state.daily_pnl)
-F_drawdown = 1.0 if drawdown < 10 else 0.5
+F_drawdown = 1.0 if drawdown < 10 else 0.5 if drawdown else 1.0
 F_loss_streak = 1.0 if st.session_state.consecutive_losses < 3 else 0.5
 R_final = BASE_RISK * F_quality * F_volatility * F_drawdown * F_loss_streak
 R_final = max(0.001, min(0.02, R_final))
@@ -576,7 +576,7 @@ with col_left:
     st.markdown(f"<div style='margin-top:4px;'>数据源: {source_display}</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ② 策略概况
+    # ② 策略概况（确保无重复标题）
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">② 策略概况</div>', unsafe_allow_html=True)
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -632,7 +632,7 @@ with col_left:
         """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ④ 风险引擎
+    # ④ 风险引擎（带默认值）
     st.markdown('<div class="card" style="border-left-color: #FFAA00;">', unsafe_allow_html=True)
     st.markdown('<div class="card-header">④ 风险引擎</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="risk-factor"><span class="factor-name">F_quality</span><span class="factor-value">{F_quality:.2f}</span></div>', unsafe_allow_html=True)
@@ -718,7 +718,7 @@ with col_right:
             fig.add_annotation(x=last_date, y=last_price * (1.02 if entry_signal==1 else 0.98),
                                text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
 
-        # AI预测标注（新增）
+        # AI预测标注
         if ai_prob is not None:
             ai_direction = "🟢" if ai_prob > 60 else "🔴" if ai_prob < 40 else "⚪"
             ai_text = f"AI: {ai_direction} {ai_prob:.1f}%"
