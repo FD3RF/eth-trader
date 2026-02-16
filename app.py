@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 神境完美版
+🚀 终极量化终端 · 神境完美版（AI实时标注）
 环境→规则→信号→风险→资本→监控
-五层共振｜AI预测｜最强标注｜默认自动交易｜止损止盈
+五层共振｜AI预测｜K线标注｜默认自动交易｜止损止盈
 """
 
 import streamlit as st
@@ -41,8 +41,8 @@ AI_MODEL = None
 if os.path.exists('eth_ai_model.pkl'):
     try:
         AI_MODEL = joblib.load('eth_ai_model.pkl')
-    except:
-        pass
+    except Exception as e:
+        st.sidebar.warning(f"AI模型加载失败: {e}")
 
 # ==================== 数据获取器 ====================
 class DataFetcher:
@@ -322,7 +322,7 @@ def calculate_stops(entry_price, side, atr_value, stop_atr, tp_min_ratio):
     else:
         stop = entry_price + stop_distance
         take = entry_price - take_distance
-    return stop, take, take_distance / stop_distance  # 返回盈亏比数值
+    return stop, take, take_distance / stop_distance
 
 
 def calculate_position_size(balance, entry_price, stop_price, leverage, position_pct):
@@ -416,7 +416,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🏆 终极量化终端 · 神境完美版")
-st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜AI预测｜最强标注｜默认自动交易｜止损止盈")
+st.caption("环境→规则→信号→风险→资本→监控 · 五层共振｜AI预测｜K线标注｜默认自动交易｜止损止盈")
 
 init_risk_state()
 
@@ -557,7 +557,8 @@ if AI_MODEL is not None and '15m' in data_dict:
             last['adx']
         ]
         ai_prob = AI_MODEL.predict_proba([features])[0][1] * 100
-    except:
+    except Exception as e:
+        st.sidebar.warning(f"AI预测失败: {e}")
         ai_prob = None
 
 # 主布局
@@ -716,6 +717,13 @@ with col_right:
             arrow_color = "green" if entry_signal == 1 else "red"
             fig.add_annotation(x=last_date, y=last_price * (1.02 if entry_signal==1 else 0.98),
                                text=arrow_text, showarrow=True, arrowhead=2, arrowcolor=arrow_color, font=dict(size=10))
+
+        # AI预测标注（新增）
+        if ai_prob is not None:
+            ai_direction = "🟢" if ai_prob > 60 else "🔴" if ai_prob < 40 else "⚪"
+            ai_text = f"AI: {ai_direction} {ai_prob:.1f}%"
+            fig.add_annotation(x=df['日期'].iloc[-1], y=current_price * 1.05, text=ai_text,
+                               showarrow=False, font=dict(size=10, color="#FFD700"), row=1, col=1)
 
         # RSI
         fig.add_trace(go.Scatter(x=df['日期'], y=df['rsi'], name="RSI", line=dict(color="purple", width=1), showlegend=False), row=2, col=1)
