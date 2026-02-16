@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 100%完美极限版 10.1（终极智能优化版）
+🚀 终极量化终端 · 100%完美极限版 10.2（终极智能优化版）
 最高智慧烧脑级优化：动态环境感知 · 多因子信号融合 · AI自适应风控 · 一键全自动连接
 - 自动识别实盘/测试网：若Secrets中配置测试网密钥则自动切换，无需手动勾选
 - 多交易所统一接口（Binance/Bybit/OKX）支持测试网/实盘无缝切换
@@ -122,12 +122,6 @@ def send_telegram(msg: str):
                           timeout=5)
         except Exception:
             pass
-
-def safe_float_round(x, decimals=2):
-    try:
-        return round(float(x), decimals)
-    except:
-        return 0.0
 
 # ==================== 数据获取器（增强版） ====================
 class DataFetcher:
@@ -411,11 +405,11 @@ class ExchangeTrader:
     def place_order(self, symbol: str, side: str, amount: float, stop_price: float, leverage: int) -> Dict:
         """开仓（市价单 + 止损市价单）"""
         market_symbol = symbol.replace('/', '')
-        # 设置杠杆
-        self.exchange.fapiPrivatePostLeverage({
-            'symbol': market_symbol,
-            'leverage': leverage
-        })
+        # 设置杠杆（使用CCXT通用方法）
+        try:
+            self.exchange.set_leverage(leverage, market_symbol)
+        except Exception as e:
+            st.warning(f"设置杠杆失败，可能交易所不支持或已默认: {e}")
         # 市价开仓
         order = self.exchange.create_market_order(
             symbol=market_symbol,
@@ -425,6 +419,7 @@ class ExchangeTrader:
         )
         # 止损单
         stop_side = 'sell' if side == 'buy' else 'buy'
+        # 根据不同交易所适配止损单参数
         stop_order = self.exchange.create_order(
             symbol=market_symbol,
             type='STOP_MARKET',
@@ -488,14 +483,14 @@ def load_ai_model():
 
 # ==================== 主界面 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 · 100%完美极限版 10.1", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 100%完美极限版 10.2", layout="wide")
     st.markdown("""
     <style>
     .stApp { background: #0B0E14; color: white; }
     .metric-card { background: #1E1F2A; border-radius: 10px; padding: 15px; margin: 5px; }
     </style>
     """, unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 100%完美极限版 10.1")
+    st.title("🚀 终极量化终端 · 100%完美极限版 10.2")
     st.caption("终极智能优化｜动态环境感知｜多因子信号｜AI自适应风控｜信号条件透明")
 
     # 初始化
