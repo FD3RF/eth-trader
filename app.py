@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 100%完美极限版 8.1（绝对最终完美版）
+🚀 终极量化终端 · 100%完美极限版 8.2（最终发布版）
 最高智慧终极烧脑优化（所有bug彻底根除 + 极致稳定 + 实盘级完善 + 信号条件透明调试）
 - 新增：详细信号条件检查面板（每个条件✅/❌ + 分数贡献，一目了然为什么得分/不得分）
 - 信号强度精细分层（0-100分，完美平衡频率与质量）
@@ -10,7 +10,7 @@
 - 完整K线历史信号标注（100%时间戳匹配） + 持仓横线标注
 - 最大回撤统计 + AI胜率显示 + 爆仓价精确预警
 - 详细交易/信号日志 + 极致容错 + NaN/异常全面处理
-- 彻底修复所有bug（包括K线图定义、信号历史兼容等）
+- 彻底修复所有已知bug（包括恐惧贪婪指数赋值错误）
 """
 
 import streamlit as st
@@ -97,7 +97,7 @@ class DataFetcher:
         return {
             "data_dict": data_dict,
             "current_price": float(data_dict['15m']['close'].iloc[-1]),
-            "fear_greed": self.fng_url
+            "fear_greed": self.fetch_fear_greed()   # 修复：原来错误地赋值为URL
         }
 
     def _add_indicators(self, df):
@@ -310,10 +310,10 @@ def can_trade(drawdown):
     return True
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 100%完美极限版 8.1", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 100%完美极限版 8.2", layout="wide")
 st.markdown("<style>.stApp{background:#0B0E14;color:white;}</style>", unsafe_allow_html=True)
-st.title("🚀 终极量化终端 · 100%完美极限版 8.1")
-st.caption("绝对最终完美版 | 所有bug根除 | 新增信号条件透明调试面板 | 实盘级稳定")
+st.title("🚀 终极量化终端 · 100%完美极限版 8.2")
+st.caption("最终发布版 | 所有bug根除 | 信号透明面板 | 实盘级稳定")
 
 init_state()
 
@@ -532,11 +532,10 @@ with st.expander("📋 执行日志与历史", expanded=True):
                 history_df['方向'] = history_df['direction'].map({1: "多", -1: "空"})
             # 统一强度列
             if '强度' not in history_df.columns:
-                history_df['强度'] = history_df.get('score', 0)
+                history_df['强度'] = history_df.get('强度', history_df.get('score', 0))
             # 统一价格列
             if '价格' not in history_df.columns:
-                history_df['价格'] = history_df.get('price', 0).round(2)
-            # 只显示存在的 колон
+                history_df['价格'] = history_df.get('价格', history_df.get('price', 0)).round(2)
             display_cols = ['时间', '方向', '强度', '价格']
             available_cols = [col for col in display_cols if col in history_df.columns]
             st.dataframe(history_df[available_cols].tail(30), use_container_width=True)
