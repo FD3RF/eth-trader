@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 100%完美极限版 7.0（绝对最终完美版）
+🚀 终极量化终端 · 100%完美极限版 7.1（绝对最终完美版）
 最高智慧终极烧脑优化（所有bug彻底根除 + 极致稳定 + 实盘级完善）：
 - 信号强度精细分层（0-100分，完美平衡频率与质量）
 - 全参数动态自适应（杠杆/仓位/止损/止盈 随强度+ADX实时变化）
@@ -9,7 +9,7 @@
 - 完整K线历史信号标注（100%时间戳匹配） + 持仓横线标注
 - 最大回撤统计 + AI胜率显示 + 爆仓价精确预警
 - 详细交易/信号日志 + 极致容错 + NaN/异常全面处理
-- 修复所有潜在bug（仓位风险计算统一止损距离、爆仓价精确等）
+- 修复信号历史显示KeyError（兼容新旧数据 + 完美中文列名）
 """
 
 import streamlit as st
@@ -191,9 +191,9 @@ def position_size(balance, entry, stop_price, leverage, risk_mult):
 
 def liquidation_price(entry, direction, leverage):
     if direction == 1:  # long
-        return entry * (1 - 1/leverage)
+        return round(entry * (1 - 1/leverage), 2)
     else:  # short
-        return entry * (1 + 1/leverage)
+        return round(entry * (1 + 1/leverage), 2)
 
 def advanced_trailing_and_partial_tp(position, current_price):
     if position is None:
@@ -272,9 +272,9 @@ def can_trade(drawdown):
     return True
 
 # ==================== 主界面 ====================
-st.set_page_config(page_title="终极量化终端 · 100%完美极限版 7.0", layout="wide")
+st.set_page_config(page_title="终极量化终端 · 100%完美极限版 7.1", layout="wide")
 st.markdown("<style>.stApp{background:#0B0E14;color:white;}</style>", unsafe_allow_html=True)
-st.title("🚀 终极量化终端 · 100%完美极限版 7.0")
+st.title("🚀 终极量化终端 · 100%完美极限版 7.1")
 st.caption("绝对最终完美版 | 所有bug根除 | 分批止盈优化 | 爆仓价精确 | 实盘级稳定")
 
 init_state()
@@ -339,7 +339,7 @@ adx = df_15m['adx'].iloc[-1]
 stop_level = take_level = size = liq_price = None
 if leverage > 0 and atr > 0 and score >= WEAK_SIGNAL:
     stop_level, take_level = dynamic_stops(current_price, direction, atr, adx)
-    size = position_size(st.session_state.account_balance, current_price, stop_level, leverage, risk_mult)  # 统一用止损距离计算风险
+    size = position_size(st.session_state.account_balance, current_price, stop_level, leverage, risk_mult)
     liq_price = liquidation_price(current_price, direction, leverage)
 
 # 持仓更新
@@ -375,8 +375,9 @@ plot_start = df_plot['timestamp'].min()
 plot_end = df_plot['timestamp'].max()
 for sig in st.session_state.signal_history[-50:]:
     sig_time = sig['timestamp']
+    sig_price = sig.get('价格', sig.get('price', current_price))  # 兼容旧数据
     if plot_start <= sig_time <= plot_end:
-        y_pos = sig['price'] * (0.99 if sig['direction'] == 1 else 1.01)
+        y_pos = sig_price * (0.99 if sig['direction'] == 1 else 1.01)
         text = "▲ 多" if sig['direction'] == 1 else "▼ 空"
         color = "lime" if sig['direction'] == 1 else "red"
         fig.add_annotation(x=sig_time, y=y_pos, text=text, showarrow=True,
@@ -433,9 +434,9 @@ if trade_allowed and st.session_state.auto_enabled and score >= WEAK_SIGNAL and 
     }
     st.session_state.signal_history.append({
         'timestamp': now,
-        'price': current_price,
+        '价格': round(current_price, 2),
         'direction': direction,
-        'score': score
+        '强度': score
     })
     dir_text = "多" if direction == 1 else "空"
     telegram(f"🚀 开仓 {symbol} {dir_text} | 强度 {score} | 价格 {current_price:.2f}")
@@ -476,9 +477,17 @@ with st.expander("📋 执行日志与历史", expanded=True):
     with t2:
         if st.session_state.signal_history:
             history_df = pd.DataFrame(st.session_state.signal_history)
-            history_df['时间'] = history_df['timestamp'].dt.strftime("%m-%d %H:%M")
+            history_df['时间'] = pd.to_datetime(history_df['timestamp']).dt.strftime("%m-%d %H:%M")
             history_df['方向'] = history_df['direction'].map({1: "多", -1: "空"})
-            st.dataframe(history_df[['时间', '方向', '强度', '价格']].tail(30), use_container_width=True)
+            # 兼容旧数据（score/price）
+            if '强度' not in history_df.columns and 'score' in history_df.columns:
+                history_df['强度'] = history_df['score']
+            if '价格' not in history_df.columns and 'price' in history_df.columns:
+                history_df['价格'] = history_df['price'].round(2)
+            display_cols = ['时间', '方向', '强度', '价格']
+            # 确保列存在
+            available_cols = [col for col in display_cols if col in history_df.columns]
+            st.dataframe(history_df[available_cols].tail(30), use_container_width=True)
         else:
             st.info("暂无信号历史")
 
