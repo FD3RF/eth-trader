@@ -325,7 +325,7 @@ def portfolio_var(weights: np.ndarray, cov: np.ndarray, confidence: float = 0.95
     if weights is None or cov is None or len(weights) == 0:
         return 0.0
     port_vol = np.sqrt(np.dot(weights.T, np.dot(cov, weights)))
-    var = port_vol * norm.ppf(confidence)  # 注意：此处是收益率的VaR，负数表示亏损，我们取正值显示风险
+    var = port_vol * norm.ppf(confidence)
     return abs(var)
 
 # ==================== 超真实模拟数据生成器 ====================
@@ -772,7 +772,6 @@ class RiskManager:
         if not symbol_signals:
             return {}
         symbols = list(symbol_signals.keys())
-        # 构建收益矩阵
         ret_arrays = []
         for sym in symbols:
             rets = symbol_signals[sym][4]
@@ -1396,10 +1395,8 @@ class UIRenderer:
             if sym in multi_data:
                 total_floating += pos.pnl(multi_data[sym]['current_price'])
 
-        # 计算组合VaR
         portfolio_var_value = 0.0
         if st.session_state.cov_matrix is not None and len(symbols) > 1:
-            # 构建当前持仓权重（按市值）
             total_value = st.session_state.account_balance
             weights = []
             for sym in symbols:
@@ -1412,9 +1409,9 @@ class UIRenderer:
                 weights.append(weight)
             weights = np.array(weights)
             if np.sum(weights) > 0:
-                weights = weights / np.sum(weights)  # 归一化
+                weights = weights / np.sum(weights)
                 port_vol = np.sqrt(np.dot(weights.T, np.dot(st.session_state.cov_matrix, weights)))
-                portfolio_var_value = port_vol * norm.ppf(0.95) * np.sqrt(1)  # 日VaR
+                portfolio_var_value = port_vol * norm.ppf(0.95) * np.sqrt(1)
         else:
             portfolio_var_value = 0.0
 
@@ -1433,7 +1430,6 @@ class UIRenderer:
 
             if st.session_state.positions:
                 st.markdown("### 📈 当前持仓")
-                # 按品种名称排序显示，确保数据对应正确
                 for sym in sorted(st.session_state.positions.keys()):
                     pos = st.session_state.positions[sym]
                     pnl = pos.pnl(multi_data[sym]['current_price']) if sym in multi_data else 0
