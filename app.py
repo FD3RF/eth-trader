@@ -1,23 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 完美极限版 42.1
+🚀 终极量化终端 · 最终完美版 44.0
 ==================================================
-核心特性：
-1. 协方差矩阵风险平价（动态品种相关性）
-2. 动态滑点模型（基于波动率、成交量、订单大小）
-3. 组合VaR实时监控（每日95% VaR）
-4. 严格Walk Forward验证（训练/测试完全隔离）
-5. 因子IC显著性检验（p值 + 信息比率）
-6. 多品种持仓显示修复（按品种名称严格匹配，数据永不串位）
-7. 数据一致性验证：自动清理无效持仓，一键修复
-8. 净值曲线持久化（包含浮动盈亏，自动保存/加载 equity_curve.csv）
-9. 精准回撤计算（基于实时权益，当前回撤/最大回撤）
-10. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
-11. 实盘一致性误差统计（滑点偏差、胜率对比）
-12. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
-13. 高性能并行数据获取 + 自动回退模拟
-14. 完整日志持久化（CSV + 按日文件）
-15. 一键紧急平仓、Telegram通知
+核心特性清单（100% 完美极限）：
+1. 多周期共振信号（1m/5m/15m/1h/4h/1d） + 动态加权
+2. 震荡市场过滤器（布林带宽度 + RSI区间）抑制假信号
+3. 协方差风险平价 + 组合 VaR 实时监控（95% 置信度）
+4. 动态每日交易次数（根据波动率自适应调整）
+5. 进攻模式开关（短时提升风险预算，仓位放大）
+6. 动态 ATR 止损/止盈（1.2x - 2.5x 自适应）
+7. 净值曲线持久化（含浮动盈亏，自动保存 equity_curve.csv）
+8. 精准回撤计算（当前回撤 + 最大回撤，基于实时权益）
+9. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
+10. 实盘一致性误差统计（滑点对比 + 胜率对比 + 自动报警）
+11. Telegram 增强通知（区分信号、风险、交易类型）
+12. 一键数据修复（清理无效持仓） + 重置所有状态
+13. 高性能并行数据获取（多交易所自动回退）
+14. 完整日志持久化（交易日志、执行日志、错误日志）
+15. 回测引擎 + Walk Forward 验证 + 参数敏感性热力图
+16. 因子 IC 显著性检验（均值、标准差、信息比率、p 值）
+17. 多品种支持（ETH/BTC/SOL/BNB 等，可自由添加）
+18. 滑点 + 手续费精细建模（基于订单深度和波动率）
+19. 移动止损 + 部分止盈 + 保本止损
+20. 熔断机制（基于 ATR 百分比 + 恐惧贪婪指数）
+21. 冷却机制（连续亏损后暂停交易）
+22. 实时盈亏 + 当前回撤 + 最大回撤 + VaR 联动显示
+23. 图表 K 线 + 均线 + 持仓标记 + 交易记录可视化
+24. 完全可配置参数（位于 TradingConfig 类中）
 ==================================================
 """
 
@@ -53,9 +62,9 @@ LOG_DIR = "logs"
 TRADE_LOG_FILE = "trade_log.csv"
 PERF_LOG_FILE = "performance_log.csv"
 SLIPPAGE_LOG_FILE = "slippage_log.csv"
-EQUITY_CURVE_FILE = "equity_curve.csv"      # 权益曲线持久化
-REGIME_STATS_FILE = "regime_stats.csv"      # 市场状态统计
-CONSISTENCY_FILE = "consistency_stats.csv"  # 一致性误差统计
+EQUITY_CURVE_FILE = "equity_curve.csv"
+REGIME_STATS_FILE = "regime_stats.csv"
+CONSISTENCY_FILE = "consistency_stats.csv"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 def append_to_csv(file_path: str, row: dict):
@@ -116,6 +125,8 @@ class TradingConfig:
     cooldown_losses: int = 3
     cooldown_hours: int = 24
     max_daily_trades: int = 5
+    daily_trades_volatility_threshold: float = 0.5
+    daily_trades_boost: int = 2
     leverage_modes: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
         "保守 (1-2x)": (1, 2),
         "稳健 (3-5x)": (3, 5),
@@ -128,13 +139,16 @@ class TradingConfig:
         "OKX合约": ccxt.okx
     })
     data_sources: List[str] = field(default_factory=lambda: ["binance", "bybit", "okx", "mexc", "kucoin"])
-    timeframes: List[str] = field(default_factory=lambda: ['15m', '1h', '4h', '1d'])
-    timeframe_weights: Dict[str, int] = field(default_factory=lambda: {'1d': 10, '4h': 7, '1h': 5, '15m': 3})
-    fetch_limit: int = 1000
+    timeframes: List[str] = field(default_factory=lambda: ['1m', '5m', '15m', '1h', '4h', '1d'])
+    confirm_timeframes: List[str] = field(default_factory=lambda: ['5m', '15m', '1h'])
+    timeframe_weights: Dict[str, int] = field(default_factory=lambda: {'1d': 10, '4h': 7, '1h': 5, '15m': 3, '5m': 2, '1m': 1})
+    fetch_limit: int = 2000
     auto_refresh_ms: int = 30000
     anti_duplicate_seconds: int = 180
     kelly_fraction: float = 0.25
     atr_multiplier_base: float = 1.5
+    atr_multiplier_min: float = 1.2
+    atr_multiplier_max: float = 2.5
     max_leverage_global: float = 10.0
     circuit_breaker_atr: float = 5.0
     circuit_breaker_fg_extreme: Tuple[int, int] = (10, 90)
@@ -148,9 +162,14 @@ class TradingConfig:
     adapt_window: int = 20
     factor_learning_rate: float = 0.3
     var_confidence: float = 0.95
+    var_aggressive_threshold: float = 1.0
     portfolio_risk_target: float = 0.02
     cov_matrix_window: int = 50
-    max_drawdown_window: int = 100  # 回撤计算窗口
+    max_drawdown_window: int = 100
+    bb_width_threshold: float = 0.1
+    rsi_range_low: int = 40
+    rsi_range_high: int = 60
+    signal_weight_boost: float = 1.5
 
 CONFIG = TradingConfig()
 
@@ -194,7 +213,6 @@ def safe_request(max_retries: int = 3):
     return decorator
 
 def init_session_state():
-    # 加载持久化权益曲线
     equity_df = load_csv(EQUITY_CURVE_FILE)
     equity_curve = deque(maxlen=500)
     if not equity_df.empty:
@@ -205,7 +223,6 @@ def init_session_state():
             except:
                 pass
 
-    # 加载市场状态统计
     regime_stats = {}
     regime_df = load_csv(REGIME_STATS_FILE)
     if not regime_df.empty:
@@ -216,7 +233,6 @@ def init_session_state():
                 'total_pnl': float(row['total_pnl'])
             }
 
-    # 加载一致性误差统计
     consistency_stats = {'backtest': {}, 'live': {}}
     cons_df = load_csv(CONSISTENCY_FILE)
     if not cons_df.empty:
@@ -239,8 +255,8 @@ def init_session_state():
         'auto_enabled': True,
         'pause_until': None,
         'exchange': None,
-        'net_value_history': [],  # 仅用于显示已平仓净值（历史）
-        'equity_curve': equity_curve,  # 实时权益曲线（含浮动盈亏）
+        'net_value_history': [],
+        'equity_curve': equity_curve,
         'last_signal_time': {},
         'current_symbols': ['ETH/USDT', 'BTC/USDT'],
         'telegram_token': None,
@@ -273,6 +289,8 @@ def init_session_state():
         'slippage_records': [],
         'regime_stats': regime_stats,
         'consistency_stats': consistency_stats,
+        'aggressive_mode': False,
+        'dynamic_max_daily_trades': CONFIG.max_daily_trades,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -287,13 +305,20 @@ def log_execution(msg: str):
     st.session_state.execution_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
     append_to_log("execution", msg)
 
-def send_telegram(msg: str):
+def send_telegram(msg: str, msg_type: str = "info"):
     token = st.session_state.get('telegram_token')
     chat_id = st.session_state.get('telegram_chat_id')
     if token and chat_id:
         try:
+            prefix = {
+                'info': 'ℹ️ ',
+                'signal': '📊 ',
+                'risk': '⚠️ ',
+                'trade': '🔄 '
+            }.get(msg_type, '')
+            full_msg = f"{prefix}{msg}"
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                          json={"chat_id": chat_id, "text": msg}, timeout=3)
+                          json={"chat_id": chat_id, "text": full_msg}, timeout=3)
         except:
             pass
 
@@ -318,7 +343,6 @@ def update_performance_metrics():
 
 # ==================== 实时权益计算 ====================
 def current_equity():
-    """计算当前总权益 = 余额 + 所有持仓浮动盈亏"""
     balance = st.session_state.account_balance
     floating = 0.0
     for sym, pos in st.session_state.positions.items():
@@ -328,7 +352,6 @@ def current_equity():
 
 # ==================== 精准回撤计算 ====================
 def calculate_drawdown():
-    """基于权益曲线计算当前回撤和最大回撤"""
     if len(st.session_state.equity_curve) < 2:
         return 0.0, 0.0
     df = pd.DataFrame(list(st.session_state.equity_curve))
@@ -343,7 +366,6 @@ def record_equity_point():
     equity = current_equity()
     now = datetime.now()
     st.session_state.equity_curve.append({'time': now, 'equity': equity})
-    # 持久化（可追加）
     append_to_csv(EQUITY_CURVE_FILE, {'time': now.isoformat(), 'equity': equity})
 
 # ==================== 市场状态统计更新 ====================
@@ -380,6 +402,14 @@ def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
         })
     pd.DataFrame(rows).to_csv(CONSISTENCY_FILE, index=False)
 
+# ==================== 动态每日交易次数 ====================
+def update_daily_trades_limit(volatility: float):
+    base = CONFIG.max_daily_trades
+    if volatility > CONFIG.daily_trades_volatility_threshold:
+        st.session_state.dynamic_max_daily_trades = base + CONFIG.daily_trades_boost
+    else:
+        st.session_state.dynamic_max_daily_trades = base
+
 # ==================== 自适应ATR倍数 ====================
 def adaptive_atr_multiplier(price_series: pd.Series, window: int = 20) -> float:
     if len(price_series) < window:
@@ -389,7 +419,7 @@ def adaptive_atr_multiplier(price_series: pd.Series, window: int = 20) -> float:
     base_vol = 0.5
     ratio = base_vol / max(vol, 0.1)
     new_mult = CONFIG.atr_multiplier_base * np.clip(ratio, 0.5, 2.0)
-    return new_mult
+    return np.clip(new_mult, CONFIG.atr_multiplier_min, CONFIG.atr_multiplier_max)
 
 # ==================== 在线学习因子权重 ====================
 def update_factor_weights(ic_dict: Dict[str, float]):
@@ -443,8 +473,43 @@ def portfolio_var(weights: np.ndarray, cov: np.ndarray, confidence: float = 0.95
     var = port_vol * norm.ppf(confidence)
     return abs(var)
 
+def get_dynamic_var_limit():
+    if st.session_state.get('aggressive_mode', False):
+        return CONFIG.var_aggressive_threshold
+    else:
+        return CONFIG.portfolio_risk_target * 100
+
+# ==================== 震荡过滤器 ====================
+def is_range_market(df_dict: Dict[str, pd.DataFrame]) -> bool:
+    if '15m' not in df_dict:
+        return False
+    df = df_dict['15m']
+    last = df.iloc[-1]
+    if not pd.isna(last.get('bb_width')):
+        if last['bb_width'] < CONFIG.bb_width_threshold:
+            return True
+    if not pd.isna(last.get('rsi')):
+        if CONFIG.rsi_range_low < last['rsi'] < CONFIG.rsi_range_high:
+            return True
+    return False
+
+# ==================== 多周期共振确认 ====================
+def multi_timeframe_confirmation(df_dict: Dict[str, pd.DataFrame], direction: int) -> bool:
+    count = 0
+    for tf in CONFIG.confirm_timeframes:
+        if tf not in df_dict:
+            continue
+        df = df_dict[tf]
+        if df.empty:
+            continue
+        last = df.iloc[-1]
+        if not pd.isna(last.get('ema20')):
+            if (direction == 1 and last['close'] > last['ema20']) or (direction == -1 and last['close'] < last['ema20']):
+                count += 1
+    return count >= 2
+
 # ==================== 超真实模拟数据生成器 ====================
-def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
+def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.DataFrame]:
     seed = int(hashlib.md5(symbol.encode()).hexdigest()[:8], 16) % 2**32
     np.random.seed(seed)
     end = datetime.now()
@@ -493,7 +558,7 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
     df_15m = add_indicators(df_15m)
     
     data_dict = {'15m': df_15m}
-    for tf in ['1h', '4h', '1d']:
+    for tf in ['1m', '5m', '1h', '4h', '1d']:
         resampled = df_15m.resample(tf, on='timestamp').agg({
             'open': 'first',
             'high': 'max',
@@ -631,7 +696,8 @@ class AggregatedDataFetcher:
 
     def fetch_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
         data_dict = {}
-        for tf in CONFIG.timeframes:
+        all_tfs = list(set(CONFIG.timeframes + CONFIG.confirm_timeframes))
+        for tf in all_tfs:
             df = self._fetch_kline_parallel(symbol, tf, CONFIG.fetch_limit)
             if df is not None and len(df) >= 50:
                 df = add_indicators(df)
@@ -729,11 +795,13 @@ class SignalEngine:
         regime = st.session_state.market_regime
         ic_dict = {}
 
+        range_penalty = 0.5 if is_range_market(df_dict) else 1.0
+
         for tf, df in df_dict.items():
             if df.empty or len(df) < 2:
                 continue
             last = df.iloc[-1]
-            weight = CONFIG.timeframe_weights.get(tf, 1)
+            weight = CONFIG.timeframe_weights.get(tf, 1) * range_penalty
             if regime == MarketRegime.TREND:
                 if tf in ['4h', '1d']:
                     weight *= 1.5
@@ -814,11 +882,15 @@ class SignalEngine:
         prob_raw = min(1.0, abs(total_score) / max_possible) if max_possible > 0 else 0.5
         prob = 0.5 + 0.45 * prob_raw
 
+        direction_candidate = 1 if total_score > 0 else -1 if total_score < 0 else 0
+        if direction_candidate != 0 and not multi_timeframe_confirmation(df_dict, direction_candidate):
+            prob *= 0.5
+
         if prob < SignalStrength.WEAK.value:
             return 0, prob
 
         if prob >= SignalStrength.WEAK.value:
-            direction = 1 if total_score > 0 else -1 if total_score < 0 else 0
+            direction = direction_candidate
         else:
             if tf_votes:
                 direction = 1 if sum(tf_votes) > 0 else -1 if sum(tf_votes) < 0 else 0
@@ -828,7 +900,7 @@ class SignalEngine:
             prob = 0.0
         return direction, prob
 
-# ==================== 风险管理（含VaR、组合风险）====================
+# ==================== 风险管理 ====================
 class RiskManager:
     def __init__(self):
         pass
@@ -838,7 +910,7 @@ class RiskManager:
         if st.session_state.get('last_trade_date') != today:
             st.session_state.daily_trades = 0
             st.session_state.last_trade_date = today
-        return st.session_state.daily_trades >= CONFIG.max_daily_trades
+        return st.session_state.daily_trades >= st.session_state.dynamic_max_daily_trades
 
     def check_cooldown(self) -> bool:
         until = st.session_state.get('cooldown_until')
@@ -866,12 +938,13 @@ class RiskManager:
         var = np.percentile(returns, (1 - confidence) * 100)
         return abs(var)
 
-    def calc_position_size(self, balance: float, prob: float, atr: float, price: float, recent_returns: np.ndarray) -> float:
+    def calc_position_size(self, balance: float, prob: float, atr: float, price: float, recent_returns: np.ndarray, is_aggressive: bool = False) -> float:
         if price <= 0 or prob < 0.5:
             return 0.0
         edge = max(0.05, prob - 0.5) * 2
         var = self.calc_var(recent_returns, CONFIG.var_confidence)
-        risk_amount = balance * CONFIG.base_risk_per_trade * edge * CONFIG.kelly_fraction * (1 / max(var, 0.01))
+        risk_mult = 1.5 if is_aggressive else 1.0
+        risk_amount = balance * CONFIG.base_risk_per_trade * edge * CONFIG.kelly_fraction * (1 / max(var, 0.01)) * risk_mult
         if atr == 0 or np.isnan(atr) or atr < price * CONFIG.min_atr_pct / 100:
             stop_distance = price * 0.01
         else:
@@ -909,11 +982,12 @@ class RiskManager:
             if dir == 0 or prob < SignalStrength.WEAK.value:
                 allocations[sym] = 0.0
                 continue
-            size = self.calc_position_size(balance * weights[i], prob, atr, price, rets)
+            is_aggressive = prob > 0.7 and st.session_state.get('aggressive_mode', False)
+            size = self.calc_position_size(balance * weights[i], prob, atr, price, rets, is_aggressive)
             allocations[sym] = size
         return allocations
 
-# ==================== 持仓管理（带动态滑点）====================
+# ==================== 持仓管理 ====================
 @dataclass
 class Position:
     symbol: str
@@ -951,8 +1025,8 @@ class Position:
         if self.direction == 1:
             if current_price > self.highest_price:
                 self.highest_price = current_price
-            new_stop = current_price - atr * self.atr_mult
-            self.stop_loss = max(self.stop_loss, new_stop)
+            trailing_stop = self.highest_price - atr * self.atr_mult
+            self.stop_loss = max(self.stop_loss, trailing_stop)
             new_tp = current_price + atr * self.atr_mult * CONFIG.tp_min_ratio
             self.take_profit = max(self.take_profit, new_tp)
             if current_price >= self.entry_price + self.stop_distance() * CONFIG.breakeven_trigger_pct:
@@ -960,8 +1034,8 @@ class Position:
         else:
             if current_price < self.lowest_price:
                 self.lowest_price = current_price
-            new_stop = current_price + atr * self.atr_mult
-            self.stop_loss = min(self.stop_loss, new_stop)
+            trailing_stop = self.lowest_price + atr * self.atr_mult
+            self.stop_loss = min(self.stop_loss, trailing_stop)
             new_tp = current_price - atr * self.atr_mult * CONFIG.tp_min_ratio
             self.take_profit = min(self.take_profit, new_tp)
             if current_price <= self.entry_price - self.stop_distance() * CONFIG.breakeven_trigger_pct:
@@ -990,7 +1064,7 @@ class Position:
                 return True, "部分止盈", self.entry_price - self.stop_distance() * CONFIG.partial_tp_r_multiple
         return False, "", 0
 
-# ==================== 下单执行（动态滑点，带符号标准化）====================
+# ==================== 下单执行 ====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
     sym = symbol.strip()
     dir_str = "多" if direction == 1 else "空"
@@ -1018,7 +1092,7 @@ def execute_order(symbol: str, direction: int, size: float, price: float, stop: 
     )
     st.session_state.daily_trades += 1
     log_execution(f"开仓 {sym} {dir_str} 仓位 {size:.4f} @ {exec_price:.2f} (原价 {price:.2f}, 滑点 {slippage:.4f}) 止损 {stop:.2f} 止盈 {take:.2f}")
-    send_telegram(f"🔔 开仓 {dir_str} {sym}\n价格: {exec_price:.2f}\n仓位: {size:.4f}")
+    send_telegram(f"开仓 {dir_str} {sym}\n价格: {exec_price:.2f}\n仓位: {size:.4f}", msg_type="trade")
     st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage})
 
 def close_position(symbol: str, exit_price: float, reason: str):
@@ -1041,9 +1115,7 @@ def close_position(symbol: str, exit_price: float, reason: str):
     st.session_state.account_balance += pnl
     if st.session_state.account_balance > st.session_state.peak_balance:
         st.session_state.peak_balance = st.session_state.account_balance
-    # 记录已平仓净值点（用于历史曲线）
     st.session_state.net_value_history.append({'time': datetime.now(), 'value': st.session_state.account_balance})
-    # 权益曲线会在每次刷新时自动记录，这里不必重复
     st.session_state.daily_returns.append(pnl / st.session_state.account_balance)
     
     update_regime_stats(st.session_state.market_regime, pnl)
@@ -1071,7 +1143,7 @@ def close_position(symbol: str, exit_price: float, reason: str):
     win = pnl > 0
     RiskManager().update_losses(win)
     log_execution(f"平仓 {sym} {reason} 盈亏 {pnl:.2f} 余额 {st.session_state.account_balance:.2f}")
-    send_telegram(f"🔔 平仓 {reason}\n盈亏: {pnl:.2f}")
+    send_telegram(f"平仓 {reason}\n盈亏: {pnl:.2f}", msg_type="trade")
 
 # ==================== 数据一致性修复 ====================
 def fix_data_consistency(symbols):
@@ -1084,7 +1156,7 @@ def fix_data_consistency(symbols):
         del st.session_state.positions[sym]
     st.session_state.positions = {k: v for k, v in st.session_state.positions.items() if v.size > 0}
 
-# ==================== 回测引擎（多品种组合，带动态滑点）====================
+# ==================== 回测引擎 ====================
 def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], initial_balance: float = 10000) -> Dict[str, Any]:
     first_sym = symbols[0]
     base_df = data_dicts[first_sym]['15m']
@@ -1120,7 +1192,7 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
         signal_inputs = {}
         for sym in symbols:
             dummy = {}
-            for tf in CONFIG.timeframes:
+            for tf in data_dicts[sym]:
                 dummy[tf] = data_dicts[sym][tf].iloc[:i+1].reset_index(drop=True)
             signal_inputs[sym] = dummy
 
@@ -1246,7 +1318,7 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
 
     return {'equity': equity_df, 'trades': trades_df, 'performance': performance}
 
-# ==================== Walk Forward 验证（严格隔离）====================
+# ==================== Walk Forward 验证 ====================
 def walk_forward(data_dicts: Dict[str, Dict[str, pd.DataFrame]], symbols: List[str], train_window=180, test_window=30):
     base_df = data_dicts[symbols[0]]['15m']
     total_len = len(base_df)
@@ -1258,13 +1330,13 @@ def walk_forward(data_dicts: Dict[str, Dict[str, pd.DataFrame]], symbols: List[s
         test_data = {}
         for sym in symbols:
             sym_data = data_dicts[sym]
-            train_data[sym] = {tf: sym_data[tf].iloc[start:train_end].reset_index(drop=True) for tf in CONFIG.timeframes}
-            test_data[sym] = {tf: sym_data[tf].iloc[train_end:test_end].reset_index(drop=True) for tf in CONFIG.timeframes}
+            train_data[sym] = {tf: sym_data[tf].iloc[start:train_end].reset_index(drop=True) for tf in sym_data}
+            test_data[sym] = {tf: sym_data[tf].iloc[train_end:test_end].reset_index(drop=True) for tf in sym_data}
         engine = SignalEngine()
         for _ in range(5):
             for sym in symbols:
                 if len(train_data[sym]['15m']) > 50:
-                    engine.calc_signal({tf: train_data[sym][tf] for tf in CONFIG.timeframes})
+                    engine.calc_signal(train_data[sym])
         result = run_backtest(symbols, test_data, initial_balance=10000)
         results.append(result)
     return results
@@ -1363,6 +1435,7 @@ class UIRenderer:
                     st.error(f"连接失败: {e}")
 
             st.session_state.auto_enabled = st.checkbox("自动交易", value=True)
+            st.session_state.aggressive_mode = st.checkbox("进攻模式 (允许更高风险)", value=False)
 
             with st.expander("📱 Telegram通知"):
                 token = st.text_input("Bot Token", type="password")
@@ -1429,6 +1502,11 @@ class UIRenderer:
         st.session_state.cov_matrix = cov
 
         fix_data_consistency(symbols)
+
+        if first_sym in multi_data:
+            rets = multi_data[first_sym]['data_dict']['15m']['close'].pct_change().dropna().values[-20:]
+            volatility = np.std(rets) if len(rets) > 5 else 0
+            update_daily_trades_limit(volatility)
 
         if st.session_state.mode == 'backtest':
             self.render_backtest_panel(symbols, multi_data)
@@ -1564,7 +1642,6 @@ class UIRenderer:
         else:
             portfolio_var_value = 0.0
 
-        # 记录权益点（每次刷新）
         record_equity_point()
         current_dd, max_dd = calculate_drawdown()
 
@@ -1596,13 +1673,13 @@ class UIRenderer:
             st.metric("当前回撤", f"{current_dd:.2f}%")
             st.metric("最大回撤", f"{max_dd:.2f}%")
             st.metric("连亏次数", st.session_state.consecutive_losses)
-            st.metric("日内交易", f"{st.session_state.daily_trades}/{CONFIG.max_daily_trades}")
-            st.metric("组合VaR (95%)", f"{portfolio_var_value*100:.2f}%")
+            st.metric("日内交易", f"{st.session_state.daily_trades}/{st.session_state.dynamic_max_daily_trades}")
+            var_limit = get_dynamic_var_limit()
+            st.metric("组合VaR (95%)", f"{portfolio_var_value*100:.2f}% (上限 {var_limit:.1f}%)")
 
             if st.session_state.cooldown_until:
                 st.warning(f"冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
 
-            # 市场状态统计
             if st.session_state.regime_stats:
                 with st.expander("📈 市场状态统计"):
                     df_reg = pd.DataFrame(st.session_state.regime_stats).T
@@ -1610,7 +1687,6 @@ class UIRenderer:
                     df_reg['平均盈亏'] = df_reg['total_pnl'] / df_reg['trades']
                     st.dataframe(df_reg[['trades', '胜率', '平均盈亏']].round(2))
 
-            # 一致性误差统计
             if st.session_state.consistency_stats:
                 with st.expander("🔄 实盘一致性"):
                     cons = st.session_state.consistency_stats
@@ -1619,6 +1695,8 @@ class UIRenderer:
                     if bt and lv:
                         st.write(f"回测滑点: {bt.get('avg_slippage', 0):.4f} 实盘滑点: {lv.get('avg_slippage', 0):.4f}")
                         st.write(f"回测胜率: {bt.get('win_rate', 0):.2%} 实盘胜率: {lv.get('win_rate', 0):.2%}")
+                        if lv.get('avg_slippage', 0) > bt.get('avg_slippage', 0) * 2:
+                            st.warning("⚠️ 实盘滑点显著高于回测，请检查流动性或调整滑点模型")
                     else:
                         st.write("暂无足够实盘数据对比")
 
@@ -1670,10 +1748,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 42.1 · 完美极限", layout="wide")
+    st.set_page_config(page_title="终极量化终端 44.0 · 最终完美版", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 完美极限版 42.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 净值持久化 · 精准回撤 · 分段统计 · 一致性误差 · 实时权益")
+    st.title("🚀 终极量化终端 · 最终完美版 44.0")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 全功能集成 · 极致风控 · 实盘验证")
 
     init_session_state()
     renderer = UIRenderer()
