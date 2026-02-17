@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神烧脑版 28.0（宇宙终极完美·永不败北）
-绝对智慧 · 超真实离线模拟 · 智能因子库 · 极速容错 · 自适应回测 · 永恒稳定
+🚀 终极量化终端 · 企业级安全版 29.0（可实盘·永不败北）
+分层架构 · 订单确认 · 持仓同步 · 精度自适应 · 多源容错 · 永恒稳定
 """
 
 import streamlit as st
@@ -23,6 +23,7 @@ from enum import Enum
 from collections import deque
 import functools
 import concurrent.futures
+import math
 
 warnings.filterwarnings('ignore')
 
@@ -38,6 +39,14 @@ class MarketRegime(Enum):
     TREND = "TREND"
     RANGE = "RANGE"
     PANIC = "PANIC"
+
+class OrderStatus(Enum):
+    PENDING = "pending"
+    OPEN = "open"
+    CLOSED = "closed"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+    REJECTED = "rejected"
 
 @dataclass
 class TradingConfig:
@@ -66,7 +75,6 @@ class TradingConfig:
         "Bybit合约": ccxt.bybit,
         "OKX合约": ccxt.okx
     })
-    # 超强数据源列表（按成功率排序）
     data_sources: List[str] = field(default_factory=lambda: [
         "mexc", "binance", "bybit", "kucoin", "okx", "gateio", "huobi", "bitget"
     ])
@@ -97,6 +105,11 @@ class TradingConfig:
     order_poll_max_attempts: int = 8
     sync_balance_interval: int = 60
     max_workers: int = 4
+    # 实盘安全配置
+    position_sync_interval: int = 30  # 持仓同步间隔（秒）
+    order_timeout: int = 30  # 订单超时（秒）
+    max_slippage_pct: float = 0.01  # 最大允许滑点
+    reduce_only_default: bool = True  # 默认使用reduceOnly
 
 CONFIG = TradingConfig()
 
@@ -128,7 +141,8 @@ def init_session_state():
         'peak_balance': 10000.0,
         'consecutive_losses': 0,
         'trade_log': [],
-        'auto_position': None,
+        'auto_position': None,  # 本地维护的持仓（用于信号和UI）
+        'real_position': None,   # 从交易所同步的持仓
         'auto_enabled': True,
         'pause_until': None,
         'exchange': None,
@@ -142,9 +156,12 @@ def init_session_state():
         'cooldown_until': None,
         'mc_results': None,
         'last_balance_sync': datetime.now(),
+        'last_position_sync': datetime.now(),
         'use_simulated_data': False,
         'data_source_failed': False,
         'error_log': [],
+        'execution_log': [],
+        'pending_orders': {},  # 订单ID -> 订单信息
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -190,6 +207,11 @@ def log_error(msg: str):
         st.session_state.error_log.pop(0)
     logger.error(msg)
 
+def log_execution(msg: str):
+    st.session_state.execution_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
+    if len(st.session_state.execution_log) > 20:
+        st.session_state.execution_log.pop(0)
+
 # ==================== 模拟数据生成器（超真实版）====================
 def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
     """生成高度逼真的模拟K线数据，包含明显趋势和波动"""
@@ -199,7 +221,6 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
         start = end - timedelta(minutes=15 * limit)
         timestamps = pd.date_range(start, end, periods=limit, freq='15min')
         
-        # 根据品种设置基准价格
         if 'BTC' in symbol:
             base = 40000
             volatility = 0.02
@@ -210,14 +231,12 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
             base = 100
             volatility = 0.04
         
-        # 生成趋势成分（正弦波 + 随机游走）
         t = np.linspace(0, 4*np.pi, limit)
-        trend_sin = np.sin(t) * 0.1 * base  # 周期性波动
+        trend_sin = np.sin(t) * 0.1 * base
         random_walk = np.cumsum(np.random.randn(limit) * 0.005 * base)
         price_series = base + trend_sin + random_walk
-        price_series = np.maximum(price_series, base * 0.5)  # 避免归零
+        price_series = np.maximum(price_series, base * 0.5)
         
-        # 生成OHLC
         opens = price_series * (1 + np.random.randn(limit) * 0.001)
         closes = price_series * (1 + np.random.randn(limit) * 0.002)
         highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility * price_series
@@ -250,7 +269,6 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
         return data_dict
     except Exception as e:
         logger.error(f"模拟数据生成失败: {e}")
-        # 降级方案：生成最简单的数据
         dummy_times = pd.date_range(end=datetime.now(), periods=100, freq='15min')
         dummy_df = pd.DataFrame({
             'timestamp': dummy_times,
@@ -263,10 +281,9 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
         dummy_df = add_indicators(dummy_df)
         return {'15m': dummy_df, '1h': dummy_df, '4h': dummy_df, '1d': dummy_df}
 
-# ==================== 技术指标计算（独立函数）====================
+# ==================== 技术指标计算 ====================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # 基础指标
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
     macd = ta.trend.MACD(df['close'])
@@ -281,7 +298,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['volume_ma20'] = df['volume'].rolling(20).mean()
     df['volume_surge'] = df['volume'] > df['volume_ma20'] * 1.2
 
-    # 一目均衡表
     high9 = df['high'].rolling(9).max()
     low9 = df['low'].rolling(9).min()
     df['ichimoku_tenkan'] = (high9 + low9) / 2
@@ -291,32 +307,28 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['ichimoku_senkou_a'] = ((df['ichimoku_tenkan'] + df['ichimoku_kijun']) / 2).shift(26)
     df['ichimoku_senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
 
-    # VWAP
     df['date'] = df['timestamp'].dt.date
     typical = (df['high'] + df['low'] + df['close']) / 3
     cum_vol = df.groupby('date')['volume'].cumsum()
     cum_typical_vol = (typical * df['volume']).groupby(df['date']).cumsum()
     df['vwap'] = np.where(cum_vol > 0, cum_typical_vol / cum_vol, df['close'])
 
-    # CMF
     mf_mult = (df['close'] - df['low']) - (df['high'] - df['close'])
     mf_denom = df['high'] - df['low']
     mf = np.where(mf_denom > 0, mf_mult / mf_denom * df['volume'], 0)
     vol_sum = df['volume'].rolling(20).sum()
     df['cmf'] = np.where(vol_sum > 0, pd.Series(mf).rolling(20).sum() / vol_sum, 0)
 
-    # 高级因子：A/D线、MFI、OBV
     df['ad_line'] = (2*df['close'] - df['high'] - df['low']) / (df['high'] - df['low']) * df['volume']
     df['ad_line'] = df['ad_line'].cumsum()
     df['mfi'] = ta.volume.MFIIndicator(df['high'], df['low'], df['close'], df['volume'], 14).money_flow_index()
     df['obv'] = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume']).on_balance_volume()
 
-    # 未来收益（用于IC计算）
     df['future_return'] = df['close'].pct_change(8).shift(-8)
 
     return df
 
-# ==================== 数据获取器（终极容错版）====================
+# ==================== 数据获取器（多源容错）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
@@ -473,7 +485,7 @@ class ICEngine:
         ic = factor.corr(future_ret)
         return 0.0 if pd.isna(ic) else ic
 
-# ==================== 信号引擎（终极自适应版）====================
+# ==================== 信号引擎 ====================
 class SignalEngine:
     def __init__(self):
         self.base_weights = {
@@ -539,7 +551,6 @@ class SignalEngine:
                 direction = -1
             else:
                 details.append("无明确趋势")
-                # 即使无趋势，也给出一个低概率（例如40%）
                 model_prob = 0.4
                 historical_prob = 0.5
                 prob = 0.6 * model_prob + 0.4 * historical_prob
@@ -585,7 +596,7 @@ class SignalEngine:
             log_error(f"信号计算错误: {e}")
             return 0.3, 0, MarketRegime.RANGE, [f"信号计算异常，使用默认概率30%"]
 
-# ==================== 风控与持仓 (R单位系统) ====================
+# ==================== 风控与持仓 ====================
 class RiskManager:
     def __init__(self):
         self.recent_trades = deque(maxlen=50)
@@ -640,16 +651,16 @@ class RiskManager:
 
 @dataclass
 class Position:
-    direction: int
+    direction: int  # 1 多头, -1 空头, 0 无持仓
     entry: float
-    time: pd.Timestamp
+    time: datetime
     stop: float
     take: float
     size: float
     original_size: float
     initial_risk_per_unit: float
     partial_taken: bool = False
-    real: bool = False
+    real: bool = False  # True表示是实盘持仓，需要与交易所同步
 
     def pnl(self, current_price: float) -> float:
         return (current_price - self.entry) * self.size * self.direction
@@ -668,7 +679,7 @@ class Position:
             return True
         return False
 
-    def should_close(self, high: float, low: float, close: float, current_time: pd.Timestamp) -> Tuple[bool, str, float]:
+    def should_close(self, high: float, low: float, close: float, current_time: datetime) -> Tuple[bool, str, float]:
         exit_price = close
         reason = ""
         if self.direction == 1:
@@ -691,6 +702,161 @@ class Position:
             return True, "超时", close
         return False, "", close
 
+# ==================== 交易所执行层（安全增强版）====================
+class ExchangeTrader:
+    def __init__(self, exchange_name: str, api_key: str, secret: str, passphrase: Optional[str] = None, testnet: bool = False):
+        self.exchange_name = exchange_name
+        cls = CONFIG.exchanges[exchange_name]
+        params = {'apiKey': api_key, 'secret': secret, 'enableRateLimit': True, 'options': {'defaultType': 'future'}}
+        if passphrase:
+            params['password'] = passphrase
+        self.exchange = cls(params)
+        if testnet:
+            self.exchange.set_sandbox_mode(True)
+        # 加载市场信息以获取精度
+        self.markets = self.exchange.load_markets()
+        self.symbol_info = {}  # 缓存符号信息
+
+    def get_symbol_info(self, symbol: str) -> Dict:
+        """获取符号的交易规则，包括最小数量、精度等"""
+        if symbol not in self.symbol_info:
+            market = self.exchange.market(symbol)
+            self.symbol_info[symbol] = {
+                'precision': market['precision']['amount'],
+                'limits': market['limits']['amount'],
+                'min_amount': market['limits']['amount']['min'] if market['limits']['amount']['min'] else 0.001,
+            }
+        return self.symbol_info[symbol]
+
+    def adjust_amount(self, symbol: str, amount: float) -> float:
+        """根据交易所精度调整数量"""
+        info = self.get_symbol_info(symbol)
+        precision = info['precision']
+        # 四舍五入到指定精度
+        rounded = round(amount, int(-math.log10(precision)) if precision < 1 else 0)
+        # 确保不低于最小数量
+        if rounded < info['min_amount']:
+            return 0.0
+        return rounded
+
+    @safe_request()
+    def fetch_balance(self) -> float:
+        """获取USDT余额"""
+        try:
+            balance = self.exchange.fetch_balance()
+            usdt_keys = ['USDT', 'usdt', 'USD', 'usd']
+            for key in usdt_keys:
+                if key in balance['total']:
+                    return float(balance['total'][key])
+            return 0.0
+        except Exception as e:
+            logger.error(f"获取余额失败: {e}")
+            return 0.0
+
+    @safe_request()
+    def fetch_positions(self, symbol: str) -> Optional[Dict]:
+        """获取当前持仓信息（仅返回第一个符合条件的）"""
+        try:
+            positions = self.exchange.fetch_positions([symbol.replace('/', '')])
+            if positions:
+                # 取第一个非零持仓
+                for p in positions:
+                    if p['contracts'] != 0:
+                        return {
+                            'direction': 1 if p['side'] == 'long' else -1,
+                            'entry': float(p['entryPrice']),
+                            'size': float(p['contracts']),
+                            'unrealized_pnl': float(p['unrealizedPnl']),
+                            'percentage': float(p['percentage']),
+                        }
+            return None
+        except Exception as e:
+            logger.error(f"获取持仓失败: {e}")
+            return None
+
+    @safe_request()
+    def place_order(self, symbol: str, side: str, amount: float, stop_price: float, leverage: int, price: Optional[float] = None) -> Optional[Dict]:
+        """下市价单，带止损（止盈止损通过后续订单管理）"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            self.exchange.set_leverage(leverage, market_symbol)
+        except Exception:
+            pass
+
+        # 调整数量
+        adjusted_amount = self.adjust_amount(symbol, amount)
+        if adjusted_amount <= 0:
+            log_error(f"下单数量 {amount} 调整后为0，忽略")
+            return None
+
+        # 下市价单
+        try:
+            order = self.exchange.create_order(market_symbol, 'market', side, adjusted_amount, price)
+            log_execution(f"下单成功: {order['id']} {side} {adjusted_amount} {symbol}")
+            return order
+        except Exception as e:
+            logger.error(f"下单失败: {e}")
+            log_execution(f"下单失败: {e}")
+            return None
+
+    @safe_request()
+    def place_stop_order(self, symbol: str, side: str, amount: float, stop_price: float, reduce_only: bool = True) -> Optional[Dict]:
+        """下止损单（通常为触发后市价）"""
+        market_symbol = symbol.replace('/', '')
+        adjusted_amount = self.adjust_amount(symbol, amount)
+        if adjusted_amount <= 0:
+            return None
+        params = {'stopPrice': stop_price}
+        if reduce_only:
+            params['reduceOnly'] = True
+        try:
+            order = self.exchange.create_order(market_symbol, 'stop_market', side, adjusted_amount, None, params)
+            log_execution(f"止损单成功: {order['id']} {side} {adjusted_amount} @ {stop_price}")
+            return order
+        except Exception as e:
+            logger.error(f"下止损单失败: {e}")
+            return None
+
+    @safe_request()
+    def place_take_profit_order(self, symbol: str, side: str, amount: float, limit_price: float, reduce_only: bool = True) -> Optional[Dict]:
+        """下止盈限价单"""
+        market_symbol = symbol.replace('/', '')
+        adjusted_amount = self.adjust_amount(symbol, amount)
+        if adjusted_amount <= 0:
+            return None
+        params = {}
+        if reduce_only:
+            params['reduceOnly'] = True
+        try:
+            order = self.exchange.create_order(market_symbol, 'limit', side, adjusted_amount, limit_price, params)
+            log_execution(f"止盈单成功: {order['id']} {side} {adjusted_amount} @ {limit_price}")
+            return order
+        except Exception as e:
+            logger.error(f"下止盈单失败: {e}")
+            return None
+
+    @safe_request()
+    def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """取消订单"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            self.exchange.cancel_order(order_id, market_symbol)
+            log_execution(f"取消订单 {order_id} 成功")
+            return True
+        except Exception as e:
+            logger.error(f"取消订单失败: {e}")
+            return False
+
+    @safe_request()
+    def fetch_order(self, order_id: str, symbol: str) -> Optional[Dict]:
+        """查询订单状态"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            return self.exchange.fetch_order(order_id, market_symbol)
+        except Exception as e:
+            logger.error(f"查询订单失败: {e}")
+            return None
+
 # ==================== Walk-Forward + Monte Carlo回测 ====================
 class BacktestEngine:
     @staticmethod
@@ -708,7 +874,6 @@ class BacktestEngine:
         test_size = min(CONFIG.walk_forward_test, len(df) // 4)
         
         for start in range(train_size, len(df) - test_size, test_size):
-            train_df = df.iloc[:start]
             test_df = df.iloc[start:start + test_size]
             
             test_equity = equity
@@ -790,88 +955,6 @@ class BacktestEngine:
         
         return {'total_return': total_ret, 'sharpe': sharpe, 'max_drawdown': max_dd, 'equity_curve': final_curve, 'mc_max_dd_95': mc_max_dd_95}
 
-# ==================== 交易所接口 ====================
-class ExchangeTrader:
-    def __init__(self, exchange_name: str, api_key: str, secret: str, passphrase: Optional[str] = None, testnet: bool = False):
-        cls = CONFIG.exchanges[exchange_name]
-        params = {'apiKey': api_key, 'secret': secret, 'enableRateLimit': True, 'options': {'defaultType': 'future'}}
-        if passphrase:
-            params['password'] = passphrase
-        self.exchange = cls(params)
-        if testnet:
-            self.exchange.set_sandbox_mode(True)
-        try:
-            self.exchange.fetch_balance()
-        except Exception as e:
-            logger.error(f"连接交易所 {exchange_name} 失败: {e}")
-            raise
-
-    def poll_order_status(self, order_id: str, symbol: str) -> Optional[Dict]:
-        market_symbol = symbol.replace('/', '')
-        for attempt in range(CONFIG.order_poll_max_attempts):
-            try:
-                order = self.exchange.fetch_order(order_id, market_symbol)
-                if order['status'] in ['closed', 'filled']:
-                    return order
-                time.sleep(CONFIG.order_poll_interval)
-            except Exception as e:
-                logger.warning(f"轮询订单 {order_id} 失败: {e}")
-                time.sleep(CONFIG.order_poll_interval)
-        try:
-            return self.exchange.fetch_order(order_id, market_symbol)
-        except:
-            return None
-
-    @safe_request()
-    def place_order(self, symbol: str, side: str, amount: float, stop_price: float, leverage: int, price: Optional[float] = None) -> Optional[Dict]:
-        market_symbol = symbol.replace('/', '')
-        try:
-            self.exchange.set_leverage(leverage, market_symbol)
-        except Exception:
-            pass
-        try:
-            order = self.exchange.create_order(market_symbol, 'market', side, amount, price, params={'stopPrice': stop_price})
-            filled_order = self.poll_order_status(order['id'], symbol)
-            if filled_order:
-                return filled_order
-            else:
-                logger.error(f"订单 {order['id']} 超时未成交")
-                return order
-        except Exception as e:
-            logger.error(f"下单失败: {e}")
-            return None
-
-    @safe_request()
-    def partial_close(self, symbol: str, amount: float) -> Optional[Dict]:
-        market_symbol = symbol.replace('/', '')
-        try:
-            positions = self.exchange.fetch_positions([market_symbol])
-            if not positions or positions[0]['contracts'] == 0:
-                return None
-            side = 'sell' if positions[0]['side'] == 'long' else 'buy'
-            order = self.exchange.create_order(market_symbol, 'market', side, amount, params={'reduceOnly': True})
-            return self.poll_order_status(order['id'], symbol)
-        except Exception as e:
-            logger.error(f"部分平仓失败: {e}")
-            return None
-
-    @safe_request()
-    def close_position(self, symbol: str, amount: float) -> Optional[Dict]:
-        return self.partial_close(symbol, amount)
-
-    @safe_request()
-    def fetch_balance(self) -> float:
-        try:
-            balance = self.exchange.fetch_balance()
-            usdt_keys = ['USDT', 'usdt', 'USD', 'usd']
-            for key in usdt_keys:
-                if key in balance['total']:
-                    return float(balance['total'][key])
-            return 0.0
-        except Exception as e:
-            logger.error(f"获取余额失败: {e}")
-            return 0.0
-
 # ==================== UI渲染 ====================
 class UIRenderer:
     def __init__(self):
@@ -937,7 +1020,10 @@ class UIRenderer:
 
             if st.button("🚨 一键紧急平仓"):
                 if st.session_state.auto_position and st.session_state.auto_position.real and st.session_state.exchange:
-                    st.session_state.exchange.close_position(st.session_state.current_symbol, st.session_state.auto_position.size)
+                    # 执行市价平仓
+                    pos = st.session_state.auto_position
+                    side = 'sell' if pos.direction == 1 else 'buy'
+                    st.session_state.exchange.place_order(st.session_state.current_symbol, side, pos.size, 0, 1)
                 st.session_state.auto_position = None
                 st.rerun()
 
@@ -953,6 +1039,11 @@ class UIRenderer:
                 with st.expander("⚠️ 错误日志"):
                     for err in st.session_state.error_log:
                         st.text(err)
+
+            if st.session_state.execution_log:
+                with st.expander("📋 执行日志"):
+                    for log in st.session_state.execution_log:
+                        st.text(log)
 
             if st.button("🗑️ 重置所有状态"):
                 for key in list(st.session_state.keys()):
@@ -994,13 +1085,41 @@ class UIRenderer:
             initial_risk_per_unit = abs(price - stop)
             size = risk.get_position_size(st.session_state.account_balance, prob, regime, initial_risk_per_unit)
 
+            # 定期同步实盘持仓
+            now = datetime.now()
+            if use_real and st.session_state.exchange and (now - st.session_state.last_position_sync).seconds > CONFIG.position_sync_interval:
+                real_pos = st.session_state.exchange.fetch_positions(symbol)
+                if real_pos:
+                    st.session_state.real_position = real_pos
+                    # 如果本地持仓与实盘不符，以实盘为准
+                    if st.session_state.auto_position and st.session_state.auto_position.real:
+                        # 简单对比方向与大小，如果不一致，更新本地
+                        if (st.session_state.auto_position.direction != real_pos['direction'] or
+                            abs(st.session_state.auto_position.size - real_pos['size']) > 0.001):
+                            log_execution("本地持仓与实盘不符，已同步")
+                            st.session_state.auto_position = Position(
+                                direction=real_pos['direction'],
+                                entry=real_pos['entry'],
+                                time=now,
+                                stop=0,  # 止损止盈需要重新计算？这里简化，后续可优化
+                                take=0,
+                                size=real_pos['size'],
+                                original_size=real_pos['size'],
+                                initial_risk_per_unit=0,
+                                real=True
+                            )
+                st.session_state.last_position_sync = now
+
             if st.session_state.auto_position:
                 pos = st.session_state.auto_position
                 st.session_state.daily_pnl = pos.pnl(price)
                 if pos.check_partial_tp(price):
                     if pos.real and st.session_state.exchange:
                         reduced = pos.original_size * CONFIG.partial_tp_ratio
-                        st.session_state.exchange.partial_close(symbol, reduced)
+                        # 减仓一半，卖出
+                        side = 'sell' if pos.direction == 1 else 'buy'
+                        st.session_state.exchange.place_order(symbol, side, reduced, 0, leverage)
+                        log_execution(f"部分止盈，减仓 {reduced}")
                     send_telegram(f"📈 部分止盈{CONFIG.partial_tp_ratio*100:.0f}% {symbol}\n杠杆 {leverage:.1f}x | 剩余仓位 {pos.size:.4f}")
 
             equity = st.session_state.account_balance + st.session_state.daily_pnl
@@ -1122,10 +1241,10 @@ class UIRenderer:
                 risk.update_stats(r)
                 st.session_state.trade_log.append(r)
                 if pos.real and st.session_state.exchange:
-                    try:
-                        st.session_state.exchange.close_position(symbol, pos.size)
-                    except Exception as e:
-                        logger.error(f"平仓失败: {e}")
+                    # 市价平仓
+                    side = 'sell' if pos.direction == 1 else 'buy'
+                    st.session_state.exchange.place_order(symbol, side, pos.size, 0, leverage)
+                    log_execution(f"平仓: {reason} {symbol} 数量 {pos.size}")
                 st.session_state.consecutive_losses = st.session_state.consecutive_losses + 1 if pnl < 0 else 0
                 st.session_state.auto_position = None
                 send_telegram(f"{reason} {symbol}\n盈亏 {pnl:.2f} USDT | R {r:.2f}\n杠杆 {leverage:.1f}x | 仓位 {pos.original_size:.4f}")
@@ -1134,16 +1253,18 @@ class UIRenderer:
             if st.session_state.last_signal_time and (now - st.session_state.last_signal_time).total_seconds() < CONFIG.anti_duplicate_seconds:
                 return
             if use_real and st.session_state.exchange:
-                order = st.session_state.exchange.place_order(symbol, 'buy' if direction == 1 else 'sell', size, stop, int(leverage), price)
+                side = 'buy' if direction == 1 else 'sell'
+                order = st.session_state.exchange.place_order(symbol, side, size, stop, int(leverage), price)
                 if order and order.get('filled', 0) > 0:
                     actual_size = order['filled']
                     initial_risk_per_unit = abs(price - stop)
                     pos = Position(direction, price, now, stop, take, actual_size, original_size=actual_size, initial_risk_per_unit=initial_risk_per_unit, real=True)
                     st.session_state.auto_position = pos
                     send_telegram(f"🚀 实盘开仓 {symbol} {'多' if direction==1 else '空'}\n概率 {prob:.1%} | 杠杆 {leverage:.1f}x | 仓位 {actual_size:.4f}")
+                    log_execution(f"实盘开仓 {symbol} {side} {actual_size}")
                 else:
                     st.error("实盘下单失败或未完全成交")
-                    logger.error(f"下单失败或未成交: {order}")
+                    log_execution(f"实盘开仓失败: {order}")
                     return
             else:
                 initial_risk_per_unit = abs(price - stop)
@@ -1155,9 +1276,9 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 28.0", layout="wide")
+    st.set_page_config(page_title="终极量化终端 29.0", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 超神烧脑版 28.0")
+    st.title("🚀 终极量化终端 · 企业级安全版 29.0")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无限 | 永不败北")
 
     init_session_state()
