@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 32.1 稳定版
+🚀 终极量化终端 32.2 优化版
 · 多周期信号 + 多因子动态加权
-· IC调权 + 方向智能决策
+· IC调权 + 方向智能决策（优先采用15分钟方向）
 · 动态止盈止损追踪
 · ATR + 风控 + 仓位自适应
 · 日内最大交易次数限制
@@ -10,6 +10,7 @@
 · 实盘/模拟自由切换
 · Monte Carlo 风险模拟
 · 修复指标计算长度不足错误
+· 增加调试信息
 """
 
 import streamlit as st
@@ -38,7 +39,7 @@ class SignalStrength(Enum):
     STRONG = 0.70
     HIGH = 0.62
     MEDIUM = 0.55
-    WEAK = 0.45
+    WEAK = 0.45          # 阈值45%，高于此值且15分钟方向明确即开仓
     NONE = 0.0
 
 class MarketRegime(Enum):
@@ -191,11 +192,10 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
             'close': 'last',
             'volume': 'sum'
         }).dropna().reset_index()
-        if len(resampled) >= 30:  # 确保有足够数据计算指标
+        if len(resampled) >= 30:
             resampled = add_indicators(resampled)
             data_dict[tf] = resampled
         else:
-            # 如果数据太少，跳过该时间帧（不影响主程序）
             logger.warning(f"{tf} 数据点不足，跳过")
     
     return data_dict
@@ -203,17 +203,14 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
 # ==================== 技术指标计算（带长度检查）====================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # 基础指标（不需要窗口或窗口较小）
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
     
-    # RSI 需要至少14个数据
     if len(df) >= 14:
         df['rsi'] = ta.momentum.rsi(df['close'], window=14)
     else:
         df['rsi'] = np.nan
     
-    # ATR 需要至少14个数据
     if len(df) >= 14:
         atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
         df['atr'] = atr
@@ -222,7 +219,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['atr'] = np.nan
         df['atr_ma'] = np.nan
     
-    # MACD 需要至少26个数据
     if len(df) >= 26:
         macd = ta.trend.MACD(df['close'])
         df['macd'] = macd.macd()
@@ -233,7 +229,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['macd_signal'] = np.nan
         df['macd_diff'] = np.nan
     
-    # ADX 需要至少14个数据
     if len(df) >= 14:
         try:
             df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
@@ -243,7 +238,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['adx'] = np.nan
     
-    # 未来收益率（需要至少6个数据）
     if len(df) >= 6:
         df['future_ret'] = df['close'].pct_change(5).shift(-5)
     else:
@@ -253,20 +247,18 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 # ==================== 因子信息系数 (IC) 计算 ====================
 def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
-    """计算因子与未来收益的相关系数"""
     window = min(CONFIG.ic_window, len(df) - 6)
     if window < 20:
         return 0.0
     factor = df[factor_name].iloc[-window:-5]
     future = df['future_ret'].iloc[-window:-5]
-    # 移除 NaN
     valid = factor.notna() & future.notna()
     if valid.sum() < 10:
         return 0.0
     ic = factor[valid].corr(future[valid])
     return 0.0 if pd.isna(ic) else ic
 
-# ==================== 数据获取器（同步，内置模拟回退）====================
+# ==================== 数据获取器 ====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
@@ -307,35 +299,34 @@ class AggregatedDataFetcher:
                 return None
         return data_dict
 
-# ==================== 多周期多因子信号整合 ====================
+# ==================== 多周期多因子信号整合（优化版）====================
 def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
     """
     返回 (方向, 概率)
     方向: 1多, -1空, 0无
-    概率基于多因子加权得分计算
+    概率基于多因子加权得分计算，当概率高于阈值时优先使用15分钟方向
     """
     total_score = 0
     total_weight = 0
-    main_direction = 0  # 15分钟方向，用于总分接近0时决策
+    main_direction = 0  # 15分钟方向
     
     for tf, df in multi_df.items():
         last = df.iloc[-1]
         weight = CONFIG.timeframe_weights.get(tf, 1)
         total_weight += weight
         
-        # 跳过指标为 NaN 的情况
         if pd.isna(last['ema20']) or pd.isna(last['rsi']) or pd.isna(last['macd_diff']) or pd.isna(last['adx']):
             continue
         
         factor_score = 0
         
-        # 趋势因子（EMA）
+        # 趋势因子
         if last['close'] > last['ema20']:
             factor_score += 1
         elif last['close'] < last['ema20']:
             factor_score -= 1
         
-        # RSI因子（超买/超卖）
+        # RSI因子
         if last['rsi'] > 70:
             factor_score -= 0.5
         elif last['rsi'] < 30:
@@ -347,7 +338,7 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
         elif last['macd_diff'] < 0:
             factor_score -= 0.5
         
-        # ADX因子（趋势强度，不贡献方向，但可调整权重）
+        # ADX趋势强度调节
         adx = last['adx']
         adx_boost = 1.0
         if adx > 30:
@@ -355,7 +346,7 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
         elif adx < 20:
             adx_boost = 0.8
         
-        # 计算IC调整（简化：使用15m的IC代表，或每个周期独立）
+        # IC调节
         ic_rsi = calculate_ic(df, 'rsi')
         ic_macd = calculate_ic(df, 'macd_diff')
         ic_adx = calculate_ic(df, 'adx')
@@ -375,23 +366,34 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
     if total_weight == 0:
         return 0, 0.0
     
-    if abs(total_score) < 10:
-        direction = main_direction
-    else:
-        direction = 1 if total_score > 0 else -1 if total_score < 0 else 0
-    
     max_possible_score = sum(CONFIG.timeframe_weights.values()) * 3
     prob_raw = min(1.0, abs(total_score) / max_possible_score) if max_possible_score > 0 else 0.5
     prob = 0.5 + 0.45 * prob_raw
     
+    # 决策逻辑：当概率超过阈值时，优先使用15分钟方向
+    if prob >= SignalStrength.WEAK.value:
+        if main_direction != 0:
+            direction = main_direction
+        else:
+            direction = 0
+    else:
+        # 概率较低时，采用常规多周期得分判断
+        if abs(total_score) < 10:
+            direction = main_direction
+        else:
+            direction = 1 if total_score > 0 else -1 if total_score < 0 else 0
+    
     if direction == 0:
         prob = 0.0
+    
+    # 调试输出（显示在界面）
+    st.write(f"**调试信息** - 总分: {total_score:.2f}, 15分钟方向: {main_direction}, 概率: {prob:.2%}, 最终方向: {direction}")
     
     return direction, prob
 
 # ==================== 风控 & 仓位 ====================
 def calc_position_size(balance: float, prob: float, atr: float, price: float) -> float:
-    if atr == 0 or np.isnan(atr):
+    if atr == 0 or np.isnan(atr) or price == 0:
         return 0.0
     edge = max(0.05, prob - 0.5)
     risk_amount = balance * CONFIG.base_risk_per_trade * edge
@@ -507,7 +509,7 @@ def close_position(symbol: str, exit_price: float, reason: str):
     log_execution(f"平仓 {symbol} {reason} 盈亏 {pnl:.2f}")
     st.session_state.position = None
 
-# ==================== 自动交易循环（每次刷新执行）====================
+# ==================== 自动交易循环 ====================
 def auto_trade_step(symbol: str):
     if st.session_state.use_simulated_data:
         multi_df = generate_simulated_data(symbol, CONFIG.fetch_limit)
@@ -758,9 +760,9 @@ def render_main_panel():
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 32.1", layout="wide")
+    st.set_page_config(page_title="终极量化终端 32.2", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 稳定版 32.1")
+    st.title("🚀 终极量化终端 · 优化版 32.2")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北")
 
     init_session_state()
