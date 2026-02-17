@@ -464,7 +464,6 @@ class RiskManager:
             risk_mult *= 0.4
         risk_budget = balance * CONFIG.risk_budget_ratio
         position_risk = balance * CONFIG.base_risk_per_trade * risk_mult
-        # 返回合约数量（假设 initial_risk 是每单位风险金额）
         return min(position_risk / initial_risk, risk_budget / initial_risk) if initial_risk > 0 else 0.0
 
     def dynamic_stops(self, entry: float, direction: int, atr: float, adx: float, atr_pct: float) -> Tuple[float, float]:
