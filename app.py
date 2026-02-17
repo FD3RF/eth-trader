@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神终极版 36.1
+🚀 终极量化终端 · 超神终极版 36.2
 ==================================================
-修复：因子IC计算中的KeyError，添加连续因子列，完善在线学习逻辑。
+更新：优化回测引擎，支持完整止损止盈、部分止盈、超时平仓、自适应仓位计算
 ==================================================
 """
 
@@ -850,13 +850,26 @@ def close_position(symbol: str, exit_price: float, reason: str):
     st.session_state.position = None
     update_performance_metrics()
 
-# ==================== 回测引擎 ====================
-def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10000) -> Dict:
+# ==================== 优化后的回测引擎 ====================
+def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10000) -> Dict[str, Any]:
+    """
+    回测引擎（15分钟为基础周期），支持止损、止盈、ATR止损、自适应仓位。
+    返回：
+        - equity: pd.DataFrame，时间序列余额
+        - trades: pd.DataFrame，交易记录
+        - performance: dict，绩效指标
+    """
     df_15m = data_dict['15m'].copy()
     balance = initial_balance
+    peak_balance = initial_balance
     position = None
     equity_curve = []
     trades = []
+    recent_returns = deque(maxlen=50)
+
+    engine = SignalEngine()
+    risk_manager = RiskManager()
+
     for i in range(50, len(df_15m)):
         row = df_15m.iloc[i]
         price = row['close']
@@ -864,59 +877,103 @@ def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10
         low = row['low']
         atr = row['atr'] if not pd.isna(row['atr']) else 0
         dummy_dict = {tf: data_dict[tf].iloc[:i+1] for tf in data_dict}
-        engine = SignalEngine()
+
         direction, prob = engine.calc_signal(dummy_dict)
+
+        # 持仓管理
         if position is None and direction != 0 and prob >= SignalStrength.WEAK.value:
-            if atr == 0 or np.isnan(atr):
-                stop_dist = price * 0.01
-            else:
-                stop_dist = atr * CONFIG.atr_multiplier_base
+            stop_dist = atr * CONFIG.atr_multiplier_base if atr > 0 else price * 0.01
             stop = price - stop_dist if direction == 1 else price + stop_dist
             take = price + stop_dist * CONFIG.tp_min_ratio if direction == 1 else price - stop_dist * CONFIG.tp_min_ratio
-            size = balance * 0.02 / stop_dist
+            size = risk_manager.calc_position_size(balance, prob, atr, price, np.array(recent_returns))
             position = {
                 'direction': direction,
                 'entry': price,
                 'size': size,
                 'stop': stop,
                 'take': take,
-                'entry_time': row['timestamp']
+                'entry_time': row['timestamp'],
+                'partial_taken': False
             }
+
         elif position is not None:
-            if direction == 1:
+            close_flag = False
+            exit_price = price
+            reason = ""
+            # 检查止损/止盈/部分止盈/超时
+            hold_hours = (row['timestamp'] - position['entry_time']).total_seconds() / 3600
+
+            if position['direction'] == 1:
                 if low <= position['stop']:
-                    exit_price = position['stop']
-                    reason = '止损'
+                    close_flag, exit_price, reason = True, position['stop'], '止损'
                 elif high >= position['take']:
-                    exit_price = position['take']
-                    reason = '止盈'
-                else:
-                    continue
+                    close_flag, exit_price, reason = True, position['take'], '止盈'
+                elif not position['partial_taken'] and high >= position['entry'] + (position['take'] - position['entry']) * CONFIG.partial_tp_r_multiple:
+                    close_flag, exit_price, reason = True, position['entry'] + (position['take'] - position['entry']) * CONFIG.partial_tp_r_multiple, '部分止盈'
+                    position['partial_taken'] = True
             else:
                 if high >= position['stop']:
-                    exit_price = position['stop']
-                    reason = '止损'
+                    close_flag, exit_price, reason = True, position['stop'], '止损'
                 elif low <= position['take']:
-                    exit_price = position['take']
-                    reason = '止盈'
-                else:
-                    continue
-            pnl = (exit_price - position['entry']) * position['size'] * direction
-            balance += pnl
-            trades.append({
-                'entry_time': position['entry_time'],
-                'exit_time': row['timestamp'],
-                'direction': direction,
-                'entry': position['entry'],
-                'exit': exit_price,
-                'pnl': pnl,
-                'reason': reason
-            })
-            position = None
-        equity_curve.append({'time': row['timestamp'], 'balance': balance})
-    return {'equity': pd.DataFrame(equity_curve), 'trades': pd.DataFrame(trades) if trades else pd.DataFrame()}
+                    close_flag, exit_price, reason = True, position['take'], '止盈'
+                elif not position['partial_taken'] and low <= position['entry'] - (position['entry'] - position['take']) * CONFIG.partial_tp_r_multiple:
+                    close_flag, exit_price, reason = True, position['entry'] - (position['entry'] - position['take']) * CONFIG.partial_tp_r_multiple, '部分止盈'
+                    position['partial_taken'] = True
 
-# ==================== UI渲染器（与之前相同，略作调整）====================
+            if hold_hours > CONFIG.max_hold_hours:
+                close_flag, exit_price, reason = True, (high + low) / 2, '超时'
+
+            if close_flag:
+                pnl = (exit_price - position['entry']) * position['size'] * position['direction']
+                balance += pnl
+                trades.append({
+                    'entry_time': position['entry_time'],
+                    'exit_time': row['timestamp'],
+                    'direction': position['direction'],
+                    'entry': position['entry'],
+                    'exit': exit_price,
+                    'size': position['size'],
+                    'pnl': pnl,
+                    'reason': reason
+                })
+                recent_returns.append(pnl / max(1, balance))
+                peak_balance = max(peak_balance, balance)
+                position = None
+
+        equity_curve.append({'time': row['timestamp'], 'balance': balance})
+
+    equity_df = pd.DataFrame(equity_curve)
+    trades_df = pd.DataFrame(trades) if trades else pd.DataFrame(columns=['entry_time','exit_time','direction','entry','exit','size','pnl','reason'])
+
+    # 简单绩效指标
+    if not trades_df.empty:
+        wins = trades_df[trades_df['pnl'] > 0]
+        losses = trades_df[trades_df['pnl'] < 0]
+        win_rate = len(wins)/len(trades_df)
+        avg_win = wins['pnl'].mean() if not wins.empty else 0
+        avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 1
+        returns = trades_df['pnl'].values / initial_balance
+        sharpe = (returns.mean()/returns.std()*np.sqrt(252)) if len(returns) > 1 and returns.std() != 0 else 0
+        max_drawdown = (peak_balance - equity_df['balance'].min()) / peak_balance * 100
+    else:
+        win_rate = avg_win = avg_loss = sharpe = max_drawdown = 0
+
+    performance = {
+        'final_balance': balance,
+        'win_rate': win_rate,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'sharpe': sharpe,
+        'max_drawdown_pct': max_drawdown
+    }
+
+    return {
+        'equity': equity_df,
+        'trades': trades_df,
+        'performance': performance
+    }
+
+# ==================== UI渲染器（含回测结果显示）====================
 class UIRenderer:
     def __init__(self):
         self.fetcher = get_fetcher()
@@ -1071,7 +1128,15 @@ class UIRenderer:
             if st.session_state.backtest_results:
                 eq = st.session_state.backtest_results['equity']
                 trades = st.session_state.backtest_results['trades']
+                perf = st.session_state.backtest_results['performance']
                 st.subheader("回测结果")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("最终余额", f"{perf['final_balance']:.2f}")
+                col2.metric("胜率", f"{perf['win_rate']:.2%}")
+                col3.metric("夏普比率", f"{perf['sharpe']:.2f}")
+                col1.metric("平均盈利", f"{perf['avg_win']:.2f}")
+                col2.metric("平均亏损", f"{perf['avg_loss']:.2f}")
+                col3.metric("最大回撤", f"{perf['max_drawdown_pct']:.2f}%")
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=eq['time'], y=eq['balance'], mode='lines', name='净值'))
                 fig.update_layout(height=400)
@@ -1080,6 +1145,7 @@ class UIRenderer:
                     st.dataframe(trades.tail(10))
             return
 
+        # 实盘模式
         direction, prob = engine.calc_signal(df_dict)
         recent_returns = df_15m['close'].pct_change().dropna().values[-20:]
         size = risk.calc_position_size(st.session_state.account_balance, prob, atr, current_price, recent_returns)
@@ -1214,10 +1280,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 36.1", layout="wide")
+    st.set_page_config(page_title="终极量化终端 36.2", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 超神终极版 36.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 多源并行 · 在线学习 · 自适应风控")
+    st.title("🚀 终极量化终端 · 超神终极版 36.2")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 多源并行 · 在线学习 · 自适应风控 · 优化回测")
 
     init_session_state()
     renderer = UIRenderer()
