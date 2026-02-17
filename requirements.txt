@@ -8,3 +8,4 @@ streamlit-autorefresh
 ccxt
 scikit-learn
 joblib
+nest-asyncio
