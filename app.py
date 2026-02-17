@@ -2,6 +2,7 @@
 """
 🚀 终极量化终端 · 超神烧脑版 34.0（宇宙主宰·永恒无敌·完美无瑕·永不败北）
 绝对智慧 · 优先币安实时数据 · K线图真实同步 · 自动回退保护 · 永恒稳定
+修复：移除类方法上的 @st.cache_data，避免 UnhashableParamError
 """
 
 import streamlit as st
@@ -300,6 +301,15 @@ def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
     ic = factor[valid].corr(future[valid])
     return 0.0 if pd.isna(ic) else ic
 
+# ==================== 独立缓存函数（无self）====================
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_fear_greed() -> int:
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+        return int(r.json()['data'][0]['value'])
+    except Exception:
+        return 50
+
 # ==================== 数据获取器（币安优先 + 自动回退模拟）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
@@ -340,7 +350,7 @@ class AggregatedDataFetcher:
                     return df
         return None
 
-    @st.cache_data(ttl=55, show_spinner=False)
+    # 移除 @st.cache_data 装饰器，避免 self 不可哈希
     def fetch_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
         data_dict = {}
         for tf in CONFIG.timeframes:
@@ -349,14 +359,6 @@ class AggregatedDataFetcher:
                 df = add_indicators(df)
                 data_dict[tf] = df
         return data_dict
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def fetch_fear_greed() -> int:
-        try:
-            r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
-            return int(r.json()['data'][0]['value'])
-        except Exception:
-            return 50
 
     def fetch_funding_rate(self, symbol: str) -> float:
         rates = []
@@ -399,7 +401,7 @@ class AggregatedDataFetcher:
         return {
             "data_dict": data_dict,
             "current_price": current_price,
-            "fear_greed": self.fetch_fear_greed(),
+            "fear_greed": fetch_fear_greed(),  # 调用独立函数
             "funding_rate": self.fetch_funding_rate(symbol),
             "orderbook_imbalance": self.fetch_orderbook_imbalance(symbol),
         }
@@ -607,7 +609,7 @@ class Position:
             self.stop_loss = min(self.stop_loss, trailing_stop)
             new_tp = current_price - atr * CONFIG.atr_multiplier_base * CONFIG.tp_min_ratio
             self.take_profit = min(self.take_profit, new_tp)
-            if current_price <= self.entry_price - (self.stop_loss_original() - self.entry_price) * CONFIG.breakeven_trigger_pct:
+            if current_price <= self.entry_price - (self.stop_loss_original()) * CONFIG.breakeven_trigger_pct:
                 self.stop_loss = min(self.stop_loss, self.entry_price)
 
     def stop_loss_original(self) -> float:
@@ -633,7 +635,7 @@ class Position:
         if not self.partial_taken:
             if self.direction == 1 and high >= self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.partial_tp_r_multiple:
                 return True, "部分止盈", self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.partial_tp_r_multiple
-            if self.direction == -1 and low <= self.entry_price - (self.stop_loss_original()) * CONFIG.partial_tp_r_multiple:
+            if self.direction == -1 and low <= self.entry_price - self.stop_loss_original() * CONFIG.partial_tp_r_multiple:
                 return True, "部分止盈", self.entry_price - self.stop_loss_original() * CONFIG.partial_tp_r_multiple
         return False, "", 0
 
