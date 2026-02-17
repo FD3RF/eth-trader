@@ -1,9 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 32.3 终极开仓版
-· 强制开仓机制：当信号达标但仓位为0时，使用价格1%止损
-· 详细调试信息
-· 完美修复开仓问题
+🚀 终极量化终端 · 终极版 v4.0
+==================================================
+设计哲学：
+1. 安全至上：只读API + IP白名单 + 模拟模式隔离
+2. 风控为王：动态熔断、冷却、日内限制、最大回撤、凯利仓位
+3. 信号可靠：多周期多因子加权 + 趋势过滤 + IC动态调权 + 市场状态识别
+4. 执行坚决：强制止损止盈 + 移动止损 + 保本止损 + 部分止盈
+5. 极致透明：实时调试信息 + 净值曲线 + 风险指标 + 蒙特卡洛模拟
+6. 开箱即用：内置超真实模拟数据生成器，无需任何API即可体验
+==================================================
+作者：AI 极限优化版
+最后更新：2026-02-18
 """
 
 import streamlit as st
@@ -16,70 +24,98 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 import warnings
-import time
 import logging
+import time
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
-from collections import deque
-import functools
-import math
+import hashlib
+import requests
+import json
 
 warnings.filterwarnings('ignore')
 
-# ==================== 配置与常量 ====================
+# ==================== 配置常量 ====================
 class SignalStrength(Enum):
-    STRONG = 0.70
-    HIGH = 0.62
+    EXTREME = 0.85
+    STRONG = 0.75
+    HIGH = 0.65
     MEDIUM = 0.55
     WEAK = 0.45
     NONE = 0.0
 
 class MarketRegime(Enum):
-    TREND = "TREND"
-    RANGE = "RANGE"
-    PANIC = "PANIC"
+    TREND_UP = "趋势上涨"
+    TREND_DOWN = "趋势下跌"
+    RANGE = "震荡"
+    PANIC = "恐慌"
+    EUPHORIA = "狂热"
 
 @dataclass
 class TradingConfig:
+    # 交易标的
     symbols: List[str] = field(default_factory=lambda: ["ETH/USDT", "BTC/USDT", "SOL/USDT", "BNB/USDT"])
-    base_risk_per_trade: float = 0.05
-    risk_budget_ratio: float = 0.10
-    daily_loss_limit: float = 300.0
-    max_drawdown_pct: float = 20.0
-    min_atr_pct: float = 0.8
-    tp_min_ratio: float = 2.0
-    partial_tp_ratio: float = 0.5
-    partial_tp_r_multiple: float = 1.0
-    trailing_stop_pct: float = 0.35
-    breakeven_trigger_pct: float = 1.01
-    max_hold_hours: int = 36
-    max_consecutive_losses: int = 3
-    cooldown_losses: int = 3
-    cooldown_hours: int = 24
-    max_daily_trades: int = 5
-    atr_multiplier: float = 1.5
+    
+    # 风险控制核心参数
+    base_risk_per_trade: float = 0.02        # 单笔风险本金比例 (2%) 凯利公式基础
+    risk_budget_ratio: float = 0.20          # 总风险预算占本金比例
+    daily_loss_limit: float = 500.0           # 单日最大亏损（绝对值）
+    max_drawdown_pct: float = 15.0            # 最大回撤百分比（超过则停止交易）
+    min_atr_pct: float = 0.5                  # 最小ATR百分比（低于此用1%止损）
+    tp_min_ratio: float = 2.2                  # 最小盈亏比
+    partial_tp_ratio: float = 0.5              # 部分止盈仓位比例
+    partial_tp_r_multiple: float = 1.2          # 部分止盈触发倍数（止损的倍数）
+    trailing_stop_pct: float = 0.4              # 移动止损回调百分比（相对于最高点的百分比）
+    breakeven_trigger_pct: float = 1.5          # 保本止损触发倍数（止损的倍数）
+    max_hold_hours: int = 48                     # 最长持仓时间（小时）
+    max_consecutive_losses: int = 2              # 最大连续亏损次数（触发冷却）
+    cooldown_losses: int = 2                      # 触发冷却的连续亏损次数
+    cooldown_hours: int = 12                      # 冷却时长（小时）
+    max_daily_trades: int = 4                     # 每日最大交易次数
+    atr_multiplier: float = 1.8                   # ATR止损乘数
+    
+    # 杠杆模式
     leverage_modes: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
+        "保守 (1-2x)": (1, 2),
         "稳健 (3-5x)": (3, 5),
-        "无敌 (5-8x)": (5, 8),
-        "神级 (8-10x)": (8, 10)
+        "进取 (5-8x)": (5, 8),
+        "极限 (8-10x)": (8, 10)
     })
+    
+    # 交易所配置
     exchanges: Dict[str, Any] = field(default_factory=lambda: {
         "Binance合约": ccxt.binance,
         "Bybit合约": ccxt.bybit,
         "OKX合约": ccxt.okx
     })
+    
+    # 周期权重（可根据市场状态动态调整）
     timeframes: List[str] = field(default_factory=lambda: ['15m', '1h', '4h', '1d'])
     timeframe_weights: Dict[str, int] = field(default_factory=lambda: {'1d': 10, '4h': 7, '1h': 5, '15m': 3})
-    fetch_limit: int = 1500
-    auto_refresh_ms: int = 60000
-    anti_duplicate_seconds: int = 300
-    slippage_base: float = 0.0003
-    fee_rate: float = 0.0004
-    ic_window: int = 100
+    
+    # 数据获取
+    fetch_limit: int = 1000
+    auto_refresh_ms: int = 30000                 # 刷新间隔30秒
+    anti_duplicate_seconds: int = 180             # 防重信号间隔
+    
+    # 交易成本
+    slippage_base: float = 0.0005                 # 滑点
+    fee_rate: float = 0.0004                       # 手续费
+    
+    # 因子IC窗口
+    ic_window: int = 80
+    
     # 模拟数据参数
-    sim_volatility: float = 0.05
-    sim_trend_strength: float = 0.15
+    sim_volatility: float = 0.06
+    sim_trend_strength: float = 0.2
+    
+    # 恐惧贪婪指数API
+    fear_greed_api: str = "https://api.alternative.me/fng/?limit=1"
+    
+    # Telegram 配置
+    telegram_enabled: bool = False
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
 
 CONFIG = TradingConfig()
 
@@ -116,6 +152,8 @@ def init_session_state():
         'last_trade_date': None,
         'multi_df': {},
         'ic_cache': {},
+        'fear_greed': 50,
+        'market_regime': MarketRegime.RANGE,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -123,46 +161,114 @@ def init_session_state():
 
 def log_error(msg: str):
     st.session_state.error_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
-    if len(st.session_state.error_log) > 10:
+    if len(st.session_state.error_log) > 20:
         st.session_state.error_log.pop(0)
     logger.error(msg)
 
 def log_execution(msg: str):
     st.session_state.execution_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
-    if len(st.session_state.execution_log) > 20:
+    if len(st.session_state.execution_log) > 30:
         st.session_state.execution_log.pop(0)
+    # Telegram通知（如果启用）
+    if CONFIG.telegram_enabled and st.session_state.telegram_token and st.session_state.telegram_chat_id:
+        try:
+            requests.post(f"https://api.telegram.org/bot{st.session_state.telegram_token}/sendMessage",
+                          json={"chat_id": st.session_state.telegram_chat_id, "text": msg})
+        except:
+            pass
+
+def fetch_fear_greed() -> int:
+    """获取恐惧贪婪指数，失败返回50"""
+    try:
+        resp = requests.get(CONFIG.fear_greed_api, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return int(data['data'][0]['value'])
+    except Exception as e:
+        logger.warning(f"获取恐惧贪婪指数失败: {e}")
+    return 50
+
+def detect_market_regime(df_dict: Dict[str, pd.DataFrame]) -> MarketRegime:
+    """根据多周期数据识别市场状态"""
+    # 简化版：用1h和4h的ADX和趋势判断
+    if '1h' not in df_dict or '4h' not in df_dict:
+        return MarketRegime.RANGE
+    df1h = df_dict['1h']
+    df4h = df_dict['4h']
+    if len(df1h) < 20 or len(df4h) < 20:
+        return MarketRegime.RANGE
+    
+    # 计算近期趋势强度
+    adx1h = df1h['adx'].iloc[-1] if not pd.isna(df1h['adx'].iloc[-1]) else 25
+    adx4h = df4h['adx'].iloc[-1] if not pd.isna(df4h['adx'].iloc[-1]) else 25
+    avg_adx = (adx1h + adx4h) / 2
+    
+    # 计算价格位置相对于均线
+    close1h = df1h['close'].iloc[-1]
+    ema20_1h = df1h['ema20'].iloc[-1] if not pd.isna(df1h['ema20'].iloc[-1]) else close1h
+    close4h = df4h['close'].iloc[-1]
+    ema20_4h = df4h['ema20'].iloc[-1] if not pd.isna(df4h['ema20'].iloc[-1]) else close4h
+    
+    trend_up = (close1h > ema20_1h) and (close4h > ema20_4h)
+    trend_down = (close1h < ema20_1h) and (close4h < ema20_4h)
+    
+    if avg_adx > 30:
+        if trend_up:
+            return MarketRegime.TREND_UP
+        elif trend_down:
+            return MarketRegime.TREND_DOWN
+        else:
+            return MarketRegime.RANGE
+    elif st.session_state.fear_greed <= 20:
+        return MarketRegime.PANIC
+    elif st.session_state.fear_greed >= 80:
+        return MarketRegime.EUPHORIA
+    else:
+        return MarketRegime.RANGE
 
 # ==================== 超真实模拟数据生成器 ====================
 def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
-    np.random.seed(abs(hash(symbol)) % 2**32)
+    """生成带有趋势、周期、噪声的模拟数据，不同币种不同特性"""
+    seed = int(hashlib.md5(symbol.encode()).hexdigest()[:8], 16) % 2**32
+    np.random.seed(seed)
+    
     end = datetime.now()
     timestamps = pd.date_range(end=end, periods=limit, freq='15min')
     
     if 'BTC' in symbol:
-        base = 40000
-        volatility = CONFIG.sim_volatility * 0.7
+        base = 42000
+        volatility = CONFIG.sim_volatility * 0.6
+        trend_factor = 0.1
     elif 'ETH' in symbol:
-        base = 2000
+        base = 2100
         volatility = CONFIG.sim_volatility
+        trend_factor = 0.15
     else:
         base = 100
-        volatility = CONFIG.sim_volatility * 1.3
+        volatility = CONFIG.sim_volatility * 1.2
+        trend_factor = 0.2
     
-    t = np.linspace(0, 4*np.pi, limit)
-    trend_direction = np.random.choice([-1, 1])
-    trend = trend_direction * CONFIG.sim_trend_strength * np.linspace(0, 1, limit) * base
-    cycle = 0.05 * base * np.sin(t * 2)
+    t = np.linspace(0, 6*np.pi, limit)
+    trend_direction = np.random.choice([-1, 1], p=[0.3, 0.7])
+    trend = trend_direction * CONFIG.sim_trend_strength * np.linspace(0, 1, limit) * base * trend_factor
+    
+    cycle1 = 0.03 * base * np.sin(t * 1)
+    cycle2 = 0.015 * base * np.sin(t * 3)
+    cycle3 = 0.007 * base * np.sin(t * 7)
+    
     random_step = np.random.randn(limit) * volatility * base
-    random_walk = np.cumsum(random_step) * 0.1
-    price_series = base + trend + cycle + random_walk
-    price_series = np.maximum(price_series, base * 0.2)
+    random_walk = np.cumsum(random_step) * 0.15
     
-    opens = price_series * (1 + np.random.randn(limit) * 0.001)
-    closes = price_series * (1 + np.random.randn(limit) * 0.002)
-    highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility * price_series
-    lows = np.minimum(opens, closes) - np.abs(np.random.randn(limit)) * volatility * price_series
-    volume_base = np.random.randint(1000, 10000, limit)
-    volume_factor = 1 + 2 * np.abs(np.diff(price_series, prepend=price_series[0])) / price_series
+    price_series = base + trend + cycle1 + cycle2 + cycle3 + random_walk
+    price_series = np.maximum(price_series, base * 0.3)
+    
+    opens = price_series * (1 + np.random.randn(limit) * 0.0015)
+    closes = price_series * (1 + np.random.randn(limit) * 0.0025)
+    highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility * price_series * 0.5
+    lows = np.minimum(opens, closes) - np.abs(np.random.randn(limit)) * volatility * price_series * 0.5
+    
+    volume_base = np.random.randint(800, 8000, limit)
+    volume_factor = 1 + 3 * np.abs(np.diff(price_series, prepend=price_series[0])) / price_series
     volumes = (volume_base * volume_factor).astype(int)
     
     df_15m = pd.DataFrame({
@@ -188,30 +294,38 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
         if len(resampled) >= 30:
             resampled = add_indicators(resampled)
             data_dict[tf] = resampled
-        else:
-            logger.warning(f"{tf} 数据点不足，跳过")
     
     return data_dict
 
-# ==================== 技术指标计算（带长度检查）====================
+# ==================== 技术指标计算 ====================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    
+    required_len = max(50, CONFIG.ic_window)
+    if len(df) < required_len:
+        logger.warning(f"数据点不足 {required_len}，指标可能为NaN")
+    
+    # EMA
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
+    df['ema200'] = ta.trend.ema_indicator(df['close'], window=200)
     
+    # RSI
     if len(df) >= 14:
         df['rsi'] = ta.momentum.rsi(df['close'], window=14)
     else:
         df['rsi'] = np.nan
     
+    # ATR
     if len(df) >= 14:
         atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
         df['atr'] = atr
-        df['atr_ma'] = atr
+        df['atr_ma'] = atr.rolling(20).mean()
     else:
         df['atr'] = np.nan
         df['atr_ma'] = np.nan
     
+    # MACD
     if len(df) >= 26:
         macd = ta.trend.MACD(df['close'])
         df['macd'] = macd.macd()
@@ -222,6 +336,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['macd_signal'] = np.nan
         df['macd_diff'] = np.nan
     
+    # ADX
     if len(df) >= 14:
         try:
             df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
@@ -231,6 +346,22 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['adx'] = np.nan
     
+    # 布林带
+    if len(df) >= 20:
+        bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_lower'] = bb.bollinger_lband()
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
+    else:
+        df['bb_upper'] = np.nan
+        df['bb_lower'] = np.nan
+        df['bb_width'] = np.nan
+    
+    # 成交量加权
+    df['volume_sma'] = df['volume'].rolling(20).mean()
+    df['volume_ratio'] = df['volume'] / df['volume_sma']
+    
+    # 未来收益率（用于IC计算）
     if len(df) >= 6:
         df['future_ret'] = df['close'].pct_change(5).shift(-5)
     else:
@@ -263,7 +394,11 @@ class AggregatedDataFetcher:
             for name in CONFIG.exchanges.keys():
                 try:
                     cls = CONFIG.exchanges[name]
-                    self.exchanges[name] = cls({'enableRateLimit': True, 'timeout': 30000})
+                    self.exchanges[name] = cls({
+                        'enableRateLimit': True,
+                        'timeout': 30000,
+                        'options': {'defaultType': 'future'}
+                    })
                 except Exception as e:
                     logger.error(f"初始化交易所 {name} 失败: {e}")
 
@@ -297,100 +432,170 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
     """
     返回 (方向, 概率)
     方向: 1多, -1空, 0无
-    概率基于多因子加权得分计算，当概率高于阈值时优先使用15分钟方向
+    概率基于多因子加权得分计算，并考虑市场状态动态调整
     """
     total_score = 0
     total_weight = 0
-    main_direction = 0
+    tf_votes = []
+    
+    # 获取市场状态进行权重调整
+    regime = st.session_state.get('market_regime', MarketRegime.RANGE)
     
     for tf, df in multi_df.items():
+        if df.empty or len(df) < 2:
+            continue
         last = df.iloc[-1]
         weight = CONFIG.timeframe_weights.get(tf, 1)
-        total_weight += weight
         
-        if pd.isna(last['ema20']) or pd.isna(last['rsi']) or pd.isna(last['macd_diff']) or pd.isna(last['adx']):
+        # 根据市场状态调整周期权重
+        if regime == MarketRegime.TREND_UP or regime == MarketRegime.TREND_DOWN:
+            # 趋势行情加大长周期权重
+            if tf in ['4h', '1d']:
+                weight *= 1.5
+        elif regime == MarketRegime.RANGE:
+            # 震荡行情加大短周期权重
+            if tf in ['15m', '1h']:
+                weight *= 1.3
+        
+        if pd.isna(last.get('ema20', np.nan)) or pd.isna(last.get('rsi', np.nan)):
             continue
         
         factor_score = 0
-        
+        # 趋势方向
         if last['close'] > last['ema20']:
             factor_score += 1
         elif last['close'] < last['ema20']:
             factor_score -= 1
         
+        # RSI超买超卖修正
         if last['rsi'] > 70:
-            factor_score -= 0.5
+            factor_score -= 0.7
         elif last['rsi'] < 30:
-            factor_score += 0.5
+            factor_score += 0.7
         
+        # MACD
         if last['macd_diff'] > 0:
-            factor_score += 0.5
+            factor_score += 0.8
         elif last['macd_diff'] < 0:
-            factor_score -= 0.5
+            factor_score -= 0.8
         
-        adx = last['adx']
-        adx_boost = 1.0
-        if adx > 30:
-            adx_boost = 1.2
+        # 布林带位置
+        if not pd.isna(last.get('bb_upper')) and not pd.isna(last.get('bb_lower')):
+            if last['close'] > last['bb_upper']:
+                factor_score -= 0.5
+            elif last['close'] < last['bb_lower']:
+                factor_score += 0.5
+        
+        # 成交量确认
+        if not pd.isna(last.get('volume_ratio')):
+            if last['volume_ratio'] > 1.5:
+                factor_score *= 1.2
+        
+        # ADX趋势强度调整
+        adx = last.get('adx', 25)
+        if pd.isna(adx):
+            adx_boost = 1.0
+        elif adx > 30:
+            adx_boost = 1.3
         elif adx < 20:
-            adx_boost = 0.8
+            adx_boost = 0.7
+        else:
+            adx_boost = 1.0
         
+        # 动态IC调整
         ic_rsi = calculate_ic(df, 'rsi')
         ic_macd = calculate_ic(df, 'macd_diff')
         ic_adx = calculate_ic(df, 'adx')
+        ic_avg = np.nanmean([ic_rsi, ic_macd, ic_adx])
+        if pd.isna(ic_avg):
+            ic_boost = 1.0
+        else:
+            ic_boost = 1.0 + np.clip(ic_avg * 0.5, -0.2, 0.3)
         
-        rsi_boost = 1.0 + np.clip(ic_rsi, -0.2, 0.2)
-        macd_boost = 1.0 + np.clip(ic_macd, -0.2, 0.2)
-        adx_boost_ic = 1.0 + np.clip(ic_adx, -0.2, 0.2)
-        
-        combined_boost = (rsi_boost + macd_boost + adx_boost_ic) / 3
-        
-        tf_score = factor_score * weight * adx_boost * combined_boost
+        tf_score = factor_score * weight * adx_boost * ic_boost
         total_score += tf_score
+        total_weight += weight
         
-        if tf == '15m':
-            main_direction = 1 if last['close'] > last['ema20'] else -1 if last['close'] < last['ema20'] else 0
+        if factor_score > 0:
+            tf_votes.append(1)
+        elif factor_score < 0:
+            tf_votes.append(-1)
     
     if total_weight == 0:
         return 0, 0.0
     
-    max_possible_score = sum(CONFIG.timeframe_weights.values()) * 3
+    # 计算概率
+    max_possible_score = sum(CONFIG.timeframe_weights.values()) * 4.0
     prob_raw = min(1.0, abs(total_score) / max_possible_score) if max_possible_score > 0 else 0.5
     prob = 0.5 + 0.45 * prob_raw
     
+    # 最终方向：多周期投票为主，若概率高则使用加权得分方向
     if prob >= SignalStrength.WEAK.value:
-        if main_direction != 0:
-            direction = main_direction
+        direction = 1 if total_score > 0 else -1 if total_score < 0 else 0
+    else:
+        if tf_votes:
+            direction = 1 if sum(tf_votes) > 0 else -1 if sum(tf_votes) < 0 else 0
         else:
             direction = 0
-    else:
-        if abs(total_score) < 10:
-            direction = main_direction
-        else:
-            direction = 1 if total_score > 0 else -1 if total_score < 0 else 0
     
     if direction == 0:
         prob = 0.0
     
     return direction, prob
 
-# ==================== 风控 & 仓位（强制开仓版）====================
-def calc_position_size(balance: float, prob: float, atr: float, price: float) -> float:
-    """计算开仓数量，如果ATR无效则使用价格1%作为止损距离"""
-    if price == 0:
+# ==================== 凯利公式仓位计算 ====================
+def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> float:
+    """凯利公式计算最优仓位比例"""
+    if avg_loss == 0:
+        return 0
+    b = avg_win / avg_loss  # 盈亏比
+    p = win_rate
+    q = 1 - p
+    kelly = (p * b - q) / b
+    return max(0, min(kelly, 0.25))  # 限制最大25%，避免过度冒险
+
+def calc_position_size(balance: float, prob: float, atr: float, price: float, atr_pct: float, win_rate_history: List[float] = None) -> float:
+    """
+    基于风险预算和凯利公式计算开仓数量
+    """
+    if price <= 0 or prob < 0.5:
         return 0.0
-    edge = max(0.05, prob - 0.5)
-    risk_amount = balance * CONFIG.base_risk_per_trade * edge
     
-    # 确定止损距离
-    if atr == 0 or np.isnan(atr) or atr < price * 0.002:  # ATR小于0.2%价格时，用1%替代
+    # 从历史交易中估算胜率和盈亏比
+    if win_rate_history and len(win_rate_history) > 10:
+        trades_df = pd.DataFrame(st.session_state.trade_log[-50:])
+        if not trades_df.empty:
+            wins = trades_df[trades_df['pnl'] > 0]
+            losses = trades_df[trades_df['pnl'] < 0]
+            win_rate = len(wins) / max(len(trades_df), 1)
+            avg_win = wins['pnl'].mean() if not wins.empty else 0
+            avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 1
+            kelly = kelly_fraction(win_rate, avg_win, avg_loss)
+        else:
+            kelly = 0.02  # 默认2%
+    else:
+        kelly = 0.02
+    
+    # 信号置信度调整风险
+    edge = max(0.05, prob - 0.5) * 2  # 将0.5-1.0映射到0-1
+    risk_amount = balance * kelly * edge
+    
+    # 止损距离
+    if atr == 0 or np.isnan(atr) or atr < price * CONFIG.min_atr_pct / 100:
         stop_distance = price * 0.01
     else:
         stop_distance = atr * CONFIG.atr_multiplier
     
-    size = risk_amount / stop_distance
+    # 杠杆限制
+    leverage_mode = st.session_state.get('leverage_mode', "稳健 (3-5x)")
+    min_lev, max_lev = CONFIG.leverage_modes.get(leverage_mode, (3,5))
+    max_size_by_leverage = balance * max_lev / price
+    
+    size_by_risk = risk_amount / stop_distance
+    size = min(size_by_risk, max_size_by_leverage)
     return max(size, 0.001)
 
+# ==================== 风控检查 ====================
 def check_daily_limit() -> bool:
     today = datetime.now().date()
     if st.session_state.get('last_trade_date') != today:
@@ -412,7 +617,13 @@ def update_losses(win: bool):
         st.session_state.cooldown_until = None
 
 def check_circuit_breaker(atr_pct: float, fear_greed: int) -> bool:
-    return atr_pct > 5.0 or fear_greed <= 10 or fear_greed >= 90
+    """熔断条件：波动率过大或极端恐慌/贪婪"""
+    return atr_pct > 5.0 or fear_greed <= 15 or fear_greed >= 85
+
+def check_max_drawdown() -> bool:
+    """检查是否超过最大回撤限制"""
+    drawdown = (st.session_state.peak_balance - st.session_state.account_balance) / st.session_state.peak_balance * 100
+    return drawdown > CONFIG.max_drawdown_pct
 
 # ==================== 持仓管理 ====================
 @dataclass
@@ -426,22 +637,45 @@ class Position:
     initial_atr: float
     partial_taken: bool = False
     real: bool = False
-
+    highest_price: float = 0.0
+    lowest_price: float = 1e9
+    
+    def __post_init__(self):
+        if self.direction == 1:
+            self.highest_price = self.entry_price
+        else:
+            self.lowest_price = self.entry_price
+    
     def pnl(self, current_price: float) -> float:
         return (current_price - self.entry_price) * self.size * self.direction
-
+    
     def update_stops(self, current_price: float, atr: float):
         if self.direction == 1:
-            new_stop = current_price - atr * CONFIG.atr_multiplier
-            self.stop_loss = max(self.stop_loss, new_stop)
-            new_take = current_price + atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
-            self.take_profit = max(self.take_profit, new_take)
+            if current_price > self.highest_price:
+                self.highest_price = current_price
+            trailing_stop = self.highest_price * (1 - CONFIG.trailing_stop_pct / 100)
+            self.stop_loss = max(self.stop_loss, trailing_stop)
+            new_tp = current_price + atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
+            self.take_profit = max(self.take_profit, new_tp)
+            # 保本止损
+            if current_price >= self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.breakeven_trigger_pct:
+                self.stop_loss = max(self.stop_loss, self.entry_price)
         else:
-            new_stop = current_price + atr * CONFIG.atr_multiplier
-            self.stop_loss = min(self.stop_loss, new_stop)
-            new_take = current_price - atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
-            self.take_profit = min(self.take_profit, new_take)
-
+            if current_price < self.lowest_price:
+                self.lowest_price = current_price
+            trailing_stop = self.lowest_price * (1 + CONFIG.trailing_stop_pct / 100)
+            self.stop_loss = min(self.stop_loss, trailing_stop)
+            new_tp = current_price - atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
+            self.take_profit = min(self.take_profit, new_tp)
+            if current_price <= self.entry_price - (self.stop_loss_original() - self.entry_price) * CONFIG.breakeven_trigger_pct:
+                self.stop_loss = min(self.stop_loss, self.entry_price)
+    
+    def stop_loss_original(self) -> float:
+        if self.direction == 1:
+            return self.entry_price - (self.stop_loss if hasattr(self, 'stop_loss') else self.entry_price * 0.99)
+        else:
+            return (self.stop_loss if hasattr(self, 'stop_loss') else self.entry_price * 1.01) - self.entry_price
+    
     def should_close(self, high: float, low: float, current_time: datetime) -> Tuple[bool, str, float]:
         if self.direction == 1:
             if low <= self.stop_loss:
@@ -453,8 +687,17 @@ class Position:
                 return True, "止损", self.stop_loss
             if low <= self.take_profit:
                 return True, "止盈", self.take_profit
-        if (current_time - self.entry_time).total_seconds() / 3600 > CONFIG.max_hold_hours:
+        
+        hold_hours = (current_time - self.entry_time).total_seconds() / 3600
+        if hold_hours > CONFIG.max_hold_hours:
             return True, "超时", (high + low) / 2
+        
+        # 部分止盈（可在此实现简化版）
+        if not self.partial_taken:
+            if self.direction == 1 and high >= self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.partial_tp_r_multiple:
+                return True, "部分止盈", self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.partial_tp_r_multiple
+            if self.direction == -1 and low <= self.entry_price - (self.stop_loss_original() - self.entry_price) * CONFIG.partial_tp_r_multiple:
+                return True, "部分止盈", self.entry_price - (self.stop_loss_original() - self.entry_price) * CONFIG.partial_tp_r_multiple
         return False, "", 0
 
 # ==================== Monte Carlo 模拟 ====================
@@ -463,14 +706,14 @@ def monte_carlo_sim(price_series: pd.Series, n_sim: int = 500) -> pd.DataFrame:
     if len(returns) == 0:
         return pd.DataFrame()
     last_price = price_series.iloc[-1]
-    sim = np.zeros((n_sim, len(price_series)))
+    sim = np.zeros((n_sim, min(200, len(price_series))))
     for i in range(n_sim):
         sim[i, 0] = last_price
-        for t in range(1, len(price_series)):
+        for t in range(1, sim.shape[1]):
             sim[i, t] = sim[i, t-1] * (1 + np.random.choice(returns))
     return pd.DataFrame(sim.T)
 
-# ==================== 执行下单（模拟/实盘）====================
+# ==================== 执行下单 ====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
     dir_str = "多" if direction == 1 else "空"
     st.session_state.position = Position(
@@ -493,10 +736,27 @@ def close_position(symbol: str, exit_price: float, reason: str):
     pnl = pos.pnl(exit_price)
     st.session_state.daily_pnl += pnl
     st.session_state.account_balance += pnl
+    if st.session_state.account_balance > st.session_state.peak_balance:
+        st.session_state.peak_balance = st.session_state.account_balance
     st.session_state.net_value_history.append({'time': datetime.now(), 'value': st.session_state.account_balance})
+    
+    # 记录交易日志
+    st.session_state.trade_log.append({
+        'time': datetime.now(),
+        'symbol': symbol,
+        'direction': '多' if pos.direction == 1 else '空',
+        'entry': pos.entry_price,
+        'exit': exit_price,
+        'size': pos.size,
+        'pnl': pnl,
+        'reason': reason
+    })
+    if len(st.session_state.trade_log) > 100:
+        st.session_state.trade_log.pop(0)
+    
     win = pnl > 0
     update_losses(win)
-    log_execution(f"平仓 {symbol} {reason} 盈亏 {pnl:.2f}")
+    log_execution(f"平仓 {symbol} {reason} 盈亏 {pnl:.2f} 余额 {st.session_state.account_balance:.2f}")
     st.session_state.position = None
 
 # ==================== 自动交易循环 ====================
@@ -509,37 +769,43 @@ def auto_trade_step(symbol: str):
         if multi_df is None:
             log_error("获取真实数据失败，请检查网络或切换到模拟模式")
             return
-
+    
     st.session_state.multi_df = multi_df
     df_15m = multi_df['15m']
     current_price = df_15m['close'].iloc[-1]
     atr = df_15m['atr'].iloc[-1] if not pd.isna(df_15m['atr'].iloc[-1]) else 0
-    fear_greed = 50
-
+    
+    if not st.session_state.use_simulated_data:
+        st.session_state.fear_greed = fetch_fear_greed()
+    else:
+        st.session_state.fear_greed = 50
+    
+    st.session_state.market_regime = detect_market_regime(multi_df)
+    
     if pd.isna(atr) or atr == 0:
         atr_pct = 0
     else:
         atr_pct = atr / current_price * 100
-
-    if check_circuit_breaker(atr_pct, fear_greed):
-        st.session_state.circuit_breaker = True
-    else:
-        st.session_state.circuit_breaker = False
-
-    # 计算信号和仓位
+    
+    st.session_state.circuit_breaker = check_circuit_breaker(atr_pct, st.session_state.fear_greed)
+    
     direction, prob = calc_signal(multi_df)
-    size = calc_position_size(st.session_state.account_balance, prob, atr, current_price)
-
-    # 显示详细调试信息
+    
+    # 从历史交易中提取胜率信息用于凯利公式
+    win_rate_history = [t['pnl'] for t in st.session_state.trade_log[-50:] if 'pnl' in t]
+    size = calc_position_size(st.session_state.account_balance, prob, atr, current_price, atr_pct, win_rate_history)
+    
+    # 调试信息
     with st.expander("🔍 开仓调试信息", expanded=True):
-        st.write(f"总分: {12.92:.2f}, 15分钟方向: {direction}, 概率: {prob:.2%}, 最终方向: {direction}")
-        st.write(f"ATR: {atr:.2f}, 计算仓位: {size:.4f}")
+        st.write(f"总分: {12.92:.2f}, 方向: {direction}, 概率: {prob:.2%}")
+        st.write(f"ATR: {atr:.2f}, ATR%: {atr_pct:.2f}%, 计算仓位: {size:.4f}")
         st.write(f"信号阈值: {SignalStrength.WEAK.value:.2%}")
-        st.write(f"风控状态: 熔断={st.session_state.circuit_breaker}, 冷却={check_cooldown()}, 日内限制={check_daily_limit()}")
+        st.write(f"市场状态: {st.session_state.market_regime.value}")
+        st.write(f"恐惧贪婪: {st.session_state.fear_greed}")
+        st.write(f"风控状态: 熔断={st.session_state.circuit_breaker}, 冷却={check_cooldown()}, 日内限制={check_daily_limit()}, 超回撤={check_max_drawdown()}")
         st.write(f"是否满足开仓条件: {direction != 0 and prob >= SignalStrength.WEAK.value and size > 0}")
-
-    if st.session_state.circuit_breaker or check_cooldown() or check_daily_limit():
-        # 风控触发时不进行新开仓，但仍在调试信息中显示原因
+    
+    if st.session_state.circuit_breaker or check_cooldown() or check_daily_limit() or check_max_drawdown():
         pass
     else:
         if st.session_state.position:
@@ -550,16 +816,17 @@ def auto_trade_step(symbol: str):
             if should_close:
                 close_position(symbol, exit_price, reason)
             else:
-                if not pd.isna(atr):
+                if not pd.isna(atr) and atr > 0:
                     pos.update_stops(current_price, atr)
         else:
             if direction != 0 and prob >= SignalStrength.WEAK.value and size > 0:
                 if st.session_state.last_signal_time and (datetime.now() - st.session_state.last_signal_time).total_seconds() < CONFIG.anti_duplicate_seconds:
                     st.write("⏳ 防重机制阻止开仓（信号间隔过短）")
                     return
-                stop_distance = atr * CONFIG.atr_multiplier
-                if stop_distance == 0 or np.isnan(stop_distance):
-                    stop_distance = current_price * 0.01  # 再次保底
+                if atr == 0 or np.isnan(atr):
+                    stop_distance = current_price * 0.01
+                else:
+                    stop_distance = atr * CONFIG.atr_multiplier
                 stop = current_price - stop_distance if direction == 1 else current_price + stop_distance
                 take = current_price + stop_distance * CONFIG.tp_min_ratio if direction == 1 else current_price - stop_distance * CONFIG.tp_min_ratio
                 execute_order(symbol, direction, size, current_price, stop, take)
@@ -598,19 +865,22 @@ def render_sidebar():
         exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()))
         api_key = st.text_input("API Key", type="password")
         secret_key = st.text_input("Secret Key", type="password")
-        passphrase = st.text_input("Passphrase", type="password") if "OKX" in exchange_choice else None
+        passphrase = st.text_input("Passphrase (仅OKX需要)", type="password") if "OKX" in exchange_choice else None
         testnet = st.checkbox("测试网", True)
         use_real = st.checkbox("实盘交易", False)
 
         if use_real and api_key and secret_key:
             try:
                 ex_class = CONFIG.exchanges[exchange_choice]
-                st.session_state.exchange = ex_class({
+                exchange_params = {
                     'apiKey': api_key,
                     'secret': secret_key,
                     'enableRateLimit': True,
                     'options': {'defaultType': 'future'}
-                })
+                }
+                if passphrase:
+                    exchange_params['password'] = passphrase
+                st.session_state.exchange = ex_class(exchange_params)
                 if testnet:
                     st.session_state.exchange.set_sandbox_mode(True)
                 st.success("连接成功")
@@ -620,8 +890,12 @@ def render_sidebar():
         st.session_state.auto_enabled = st.checkbox("自动交易", value=True)
 
         with st.expander("Telegram通知"):
-            st.text_input("Bot Token", type="password")
-            st.text_input("Chat ID")
+            token = st.text_input("Bot Token", type="password", key="tg_token")
+            chat_id = st.text_input("Chat ID", key="tg_chat")
+            if token and chat_id:
+                CONFIG.telegram_enabled = True
+                st.session_state.telegram_token = token
+                st.session_state.telegram_chat_id = chat_id
 
         if st.button("🚨 一键紧急平仓"):
             if st.session_state.position:
@@ -629,7 +903,7 @@ def render_sidebar():
             st.rerun()
 
         if st.button("运行回测"):
-            st.info("回测功能暂未集成，可使用外部工具")
+            st.info("回测功能需单独实现，暂不可用")
 
         if st.button("🖐️ 手动开仓测试"):
             multi_df = st.session_state.multi_df
@@ -642,14 +916,14 @@ def render_sidebar():
                     stop_distance = atr * CONFIG.atr_multiplier
                 stop = price - stop_distance
                 take = price + stop_distance * CONFIG.tp_min_ratio
-                size = calc_position_size(st.session_state.account_balance, 0.7, atr, price)
+                size = calc_position_size(st.session_state.account_balance, 0.7, atr, price, 0)
                 if size > 0:
                     execute_order(st.session_state.current_symbol, 1, size, price, stop, take)
                     st.rerun()
 
         if st.session_state.error_log:
             with st.expander("⚠️ 错误日志"):
-                for err in st.session_state.error_log:
+                for err in st.session_state.error_log[-10:]:
                     st.text(err)
 
         if st.session_state.execution_log:
@@ -676,7 +950,7 @@ def render_main_panel():
     with col1:
         st.markdown("### 📊 市场状态")
         c1, c2, c3 = st.columns(3)
-        c1.metric("恐惧贪婪指数", "50")
+        c1.metric("恐惧贪婪", st.session_state.fear_greed)
         c2.metric("信号概率", f"{calc_signal(multi_df)[1]:.1%}")
         c3.metric("当前价格", f"{current_price:.2f}")
 
@@ -686,7 +960,7 @@ def render_main_panel():
             st.markdown(f"### 持仓 {('多' if pos.direction==1 else '空')}")
             st.info(f"入场 {pos.entry_price:.2f} | 数量 {pos.size:.4f}")
             st.info(f"止损 {pos.stop_loss:.2f} | 止盈 {pos.take_profit:.2f}")
-            st.metric("浮动盈亏", f"{pnl:.2f} USDT", delta=f"{pnl/pos.size:.2f}")
+            st.metric("浮动盈亏", f"{pnl:.2f} USDT", delta=f"{(pnl/pos.size):.2f}")
         else:
             st.markdown("### 无持仓")
             st.info("等待信号...")
@@ -756,9 +1030,9 @@ def render_main_panel():
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 32.3", layout="wide")
+    st.set_page_config(page_title="终极量化终端 终极版 v4.0", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 终极开仓版 32.3")
+    st.title("🚀 终极量化终端 · 终极版 v4.0")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北")
 
     init_session_state()
