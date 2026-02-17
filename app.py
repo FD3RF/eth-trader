@@ -66,8 +66,8 @@ class TradingConfig:
         "Bybit合约": ccxt.bybit,
         "OKX合约": ccxt.okx
     })
-    # 数据源：国内用户推荐使用 mexc，如需其他可自行添加
-    data_sources: List[str] = field(default_factory=lambda: ["mexc"])
+    # 数据源：按顺序尝试，直到成功。包含多个常用交易所以提高成功率。
+    data_sources: List[str] = field(default_factory=lambda: ["mexc", "binance", "bybit", "kucoin"])
     # 备用数据源（当前数据源全部失败时尝试）
     fallback_data_sources: List[str] = field(default_factory=lambda: ["binance"])
     timeframes: List[str] = field(default_factory=lambda: ['15m', '1h', '4h', '1d'])
@@ -1028,7 +1028,7 @@ def main():
     st.set_page_config(page_title="终极量化终端 27.0", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 超神烧脑版 27.0")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无限 | 永不败北")
 
     init_session_state()
     renderer = UIRenderer()
@@ -1037,7 +1037,7 @@ def main():
     data = renderer.fetcher.get_symbol_data(symbol)
     if not data:
         if st.session_state.data_source_failed:
-            st.error("❌ 数据源获取失败，请检查网络或稍后重试。如果您在中国大陆，建议将数据源修改为 `mexc`（已在配置中默认）。")
+            st.error("❌ 数据源获取失败，请检查网络或稍后重试。如果您在中国大陆，建议尝试使用 VPN 或修改代码中的 `data_sources` 顺序（例如将 `binance` 提前）。")
         else:
             st.error("❌ 无法获取交易数据，请检查网络连接。")
         st.stop()
