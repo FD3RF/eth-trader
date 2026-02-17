@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神烧脑版 27.0（宇宙主宰·永恒无敌·完美无瑕·永不败北·终极自适应R引擎）
+🚀 终极量化终端 · 超神烧脑版 27.0（离线兼容·全球稳定）
 绝对智慧 · Regime增强识别 · IC安全调权 · 真实概率校准 · Walk-Forward滚动 · 真实撮合顺序 · R单位系统 · 组合风险预算 · Monte Carlo验证 · 永恒稳定
 """
 
@@ -66,10 +66,10 @@ class TradingConfig:
         "Bybit合约": ccxt.bybit,
         "OKX合约": ccxt.okx
     })
-    # 数据源：按顺序尝试，直到成功。包含多个常用交易所以提高成功率。
-    data_sources: List[str] = field(default_factory=lambda: ["mexc", "binance", "bybit", "kucoin"])
-    # 备用数据源（当前数据源全部失败时尝试）
-    fallback_data_sources: List[str] = field(default_factory=lambda: ["binance"])
+    # 数据源：按顺序尝试，直到成功。包含更多交易所以提高成功率。
+    data_sources: List[str] = field(default_factory=lambda: [
+        "mexc", "binance", "bybit", "kucoin", "okx", "gateio", "huobi", "bitget"
+    ])
     timeframes: List[str] = field(default_factory=lambda: ['15m', '1h', '4h', '1d'])
     timeframe_weights: Dict[str, int] = field(default_factory=lambda: {'1d': 10, '4h': 7, '1h': 5, '15m': 3})
     fetch_limit: int = 1500
@@ -142,7 +142,8 @@ def init_session_state():
         'cooldown_until': None,
         'mc_results': None,
         'last_balance_sync': datetime.now(),
-        'data_source_failed': False,  # 标记数据源是否失败
+        'use_simulated_data': False,  # 是否使用模拟数据
+        'data_source_failed': False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -182,6 +183,45 @@ def send_telegram(msg: str) -> None:
         except Exception as e:
             logger.error(f"Telegram发送失败: {e}")
 
+# ==================== 模拟数据生成器 ====================
+def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
+    """生成模拟的K线数据，用于离线演示"""
+    np.random.seed(42)  # 固定种子使数据可重复
+    end = datetime.now()
+    start = end - timedelta(minutes=15 * limit)
+    timestamps = pd.date_range(start, end, periods=limit, freq='15min')
+    
+    price_base = 2000 if 'ETH' in symbol else 40000 if 'BTC' in symbol else 100
+    prices = price_base + np.cumsum(np.random.randn(limit) * 10)
+    prices = np.maximum(prices, price_base * 0.5)  # 避免负价格
+    
+    df_dict = {}
+    for tf in CONFIG.timeframes:
+        if tf == '15m':
+            df = pd.DataFrame({
+                'timestamp': timestamps,
+                'open': prices,
+                'high': prices * (1 + np.random.rand(limit) * 0.02),
+                'low': prices * (1 - np.random.rand(limit) * 0.02),
+                'close': prices * (1 + np.random.randn(limit) * 0.01),
+                'volume': np.random.randint(1000, 10000, limit)
+            })
+        else:
+            # 其他时间帧通过重采样15m数据得到
+            resampled = df_15m.resample(tf, on='timestamp').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+            df = resampled.reset_index()
+        # 添加技术指标
+        df = AggregatedDataFetcher._add_indicators(df)
+        df_dict[tf] = df
+    
+    return df_dict
+
 # ==================== 数据获取器（增强容错版）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
@@ -191,10 +231,6 @@ class AggregatedDataFetcher:
     def __init__(self):
         self.exchanges: Dict[str, ccxt.Exchange] = {}
         self._init_exchanges(CONFIG.data_sources)
-        # 如果主数据源全部失败，尝试备用源
-        if not self.exchanges:
-            logger.warning("主数据源全部失败，尝试备用数据源")
-            self._init_exchanges(CONFIG.fallback_data_sources)
 
     def _init_exchanges(self, sources: List[str]):
         for name in sources:
@@ -286,11 +322,24 @@ class AggregatedDataFetcher:
 
     def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         try:
+            # 如果用户强制使用模拟数据，直接返回模拟数据
+            if st.session_state.get('use_simulated_data', False):
+                data_dict = generate_simulated_data(symbol, CONFIG.fetch_limit)
+                return {
+                    "data_dict": data_dict,
+                    "current_price": float(data_dict['15m']['close'].iloc[-1]),
+                    "fear_greed": 50,
+                    "funding_rate": 0.0,
+                    "orderbook_imbalance": 0.0,
+                }
+            
             data_dict = self.fetch_all_timeframes(symbol)
             if '15m' not in data_dict or data_dict['15m'].empty or len(data_dict['15m']) < 50:
                 logger.error(f"缺少15m数据或数据不足，symbol={symbol}")
                 st.session_state.data_source_failed = True
-                return None
+                # 自动切换到模拟数据
+                st.session_state.use_simulated_data = True
+                return self.get_symbol_data(symbol)  # 递归调用，将使用模拟数据
             st.session_state.data_source_failed = False
             return {
                 "data_dict": data_dict,
@@ -302,7 +351,8 @@ class AggregatedDataFetcher:
         except Exception as e:
             logger.error(f"获取 {symbol} 数据时发生未预期错误: {e}")
             st.session_state.data_source_failed = True
-            return None
+            st.session_state.use_simulated_data = True
+            return self.get_symbol_data(symbol)
 
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -777,6 +827,13 @@ class UIRenderer:
             st.header("⚙️ 配置")
             symbol = st.selectbox("品种", CONFIG.symbols, index=CONFIG.symbols.index(st.session_state.current_symbol))
             st.session_state.current_symbol = symbol
+            
+            # 手动切换模拟数据开关
+            use_sim = st.checkbox("使用模拟数据（离线模式）", value=st.session_state.get('use_simulated_data', False))
+            if use_sim != st.session_state.get('use_simulated_data', False):
+                st.session_state.use_simulated_data = use_sim
+                st.rerun()
+            
             mode = st.selectbox("杠杆模式", list(CONFIG.leverage_modes.keys()))
             current_balance = st.session_state.account_balance
             st.number_input("余额 USDT", value=current_balance, disabled=True, key="balance_display")
@@ -1037,10 +1094,14 @@ def main():
     data = renderer.fetcher.get_symbol_data(symbol)
     if not data:
         if st.session_state.data_source_failed:
-            st.error("❌ 数据源获取失败，请检查网络或稍后重试。如果您在中国大陆，建议尝试使用 VPN 或修改代码中的 `data_sources` 顺序（例如将 `binance` 提前）。")
+            st.warning("⚠️ 当前无法获取实时数据，已自动切换到离线模拟模式。您仍然可以测试所有功能。如需实盘数据，请检查网络或尝试使用 VPN。")
         else:
             st.error("❌ 无法获取交易数据，请检查网络连接。")
         st.stop()
+
+    # 显示数据源状态
+    if st.session_state.get('use_simulated_data', False):
+        st.info("🔧 当前处于离线模拟模式，所有数据均为模拟生成。")
 
     engine = SignalEngine()
     risk = RiskManager()
