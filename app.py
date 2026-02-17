@@ -1,21 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 完美极限版 41.1
+🚀 终极量化终端 · 完美极限版 42.0
 ==================================================
-核心特性：
-1. 协方差矩阵风险平价（动态品种相关性）
-2. 动态滑点模型（基于波动率、成交量、订单大小）
-3. 组合VaR实时监控（每日95% VaR）
-4. 严格Walk Forward验证（训练/测试完全隔离）
-5. 因子IC显著性检验（p值 + 信息比率）
-6. 多品种持仓显示修复（按品种名称严格匹配，数据永不串位）
-7. 数据一致性验证：自动清理无效持仓，一键修复
-8. 图表时间戳异常自动修复（防止x轴显示未来年份）
-9. 数字格式化修复（数量始终用点，无千位分隔符）
-10. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
-11. 高性能并行数据获取 + 自动回退模拟
-12. 完整日志持久化（CSV + 按日文件）
-13. 一键紧急平仓、Telegram通知
+新增核心功能：
+1. 净值曲线持久化（自动保存/加载 equity.csv）
+2. 精准回撤计算（滚动窗口 + 实时显示）
+3. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
+4. 实盘一致性误差统计（滑点偏差、胜率对比）
 ==================================================
 """
 
@@ -51,6 +42,9 @@ LOG_DIR = "logs"
 TRADE_LOG_FILE = "trade_log.csv"
 PERF_LOG_FILE = "performance_log.csv"
 SLIPPAGE_LOG_FILE = "slippage_log.csv"
+EQUITY_FILE = "equity.csv"          # 净值曲线持久化
+REGIME_STATS_FILE = "regime_stats.csv"  # 市场状态统计
+CONSISTENCY_FILE = "consistency_stats.csv"  # 一致性误差统计
 os.makedirs(LOG_DIR, exist_ok=True)
 
 def append_to_csv(file_path: str, row: dict):
@@ -63,6 +57,11 @@ def append_to_csv(file_path: str, row: dict):
             writer.writerow(row)
     except Exception as e:
         print(f"写入CSV失败: {e}")
+
+def load_csv(file_path: str) -> pd.DataFrame:
+    if os.path.exists(file_path):
+        return pd.read_csv(file_path)
+    return pd.DataFrame()
 
 def append_to_log(file_name: str, message: str):
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -140,6 +139,7 @@ class TradingConfig:
     var_confidence: float = 0.95
     portfolio_risk_target: float = 0.02
     cov_matrix_window: int = 50
+    max_drawdown_window: int = 100  # 回撤计算窗口
 
 CONFIG = TradingConfig()
 
@@ -183,6 +183,42 @@ def safe_request(max_retries: int = 3):
     return decorator
 
 def init_session_state():
+    # 加载持久化净值
+    equity_df = load_csv(EQUITY_FILE)
+    net_value_history = deque(maxlen=500)
+    if not equity_df.empty:
+        for _, row in equity_df.iterrows():
+            net_value_history.append({'time': pd.to_datetime(row['time']), 'value': row['value']})
+
+    # 加载市场状态统计
+    regime_stats = {}
+    regime_df = load_csv(REGIME_STATS_FILE)
+    if not regime_df.empty:
+        for _, row in regime_df.iterrows():
+            regime_stats[row['regime']] = {
+                'trades': row['trades'],
+                'wins': row['wins'],
+                'total_pnl': row['total_pnl']
+            }
+
+    # 加载一致性误差统计
+    consistency_stats = {'backtest': {}, 'live': {}}
+    cons_df = load_csv(CONSISTENCY_FILE)
+    if not cons_df.empty:
+        for _, row in cons_df.iterrows():
+            if row['type'] == 'backtest':
+                consistency_stats['backtest'] = {
+                    'avg_slippage': row['avg_slippage'],
+                    'win_rate': row['win_rate'],
+                    'trades': row['trades']
+                }
+            else:
+                consistency_stats['live'] = {
+                    'avg_slippage': row['avg_slippage'],
+                    'win_rate': row['win_rate'],
+                    'trades': row['trades']
+                }
+
     defaults = {
         'account_balance': 10000.0,
         'daily_pnl': 0.0,
@@ -194,7 +230,7 @@ def init_session_state():
         'auto_enabled': True,
         'pause_until': None,
         'exchange': None,
-        'net_value_history': [],
+        'net_value_history': net_value_history,
         'last_signal_time': {},
         'current_symbols': ['ETH/USDT', 'BTC/USDT'],
         'telegram_token': None,
@@ -225,6 +261,9 @@ def init_session_state():
         'daily_returns': deque(maxlen=252),
         'cov_matrix': None,
         'slippage_records': [],
+        'regime_stats': regime_stats,           # 市场状态统计
+        'consistency_stats': consistency_stats, # 一致性误差统计
+        'max_drawdown_series': deque(maxlen=CONFIG.max_drawdown_window),  # 用于滚动回撤
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -267,6 +306,60 @@ def update_performance_metrics():
         'avg_loss': avg_loss,
         'sharpe': sharpe
     }
+
+# ==================== 精准回撤计算 ====================
+def calculate_drawdown():
+    """基于净值历史计算当前回撤和最大回撤"""
+    if not st.session_state.net_value_history:
+        return 0.0, 0.0
+    # 取最近window个点
+    series = list(st.session_state.net_value_history)[-CONFIG.max_drawdown_window:]
+    values = [p['value'] for p in series]
+    if len(values) < 2:
+        return 0.0, 0.0
+    peak = np.maximum.accumulate(values)
+    drawdowns = (peak - values) / peak * 100
+    current_dd = drawdowns[-1]
+    max_dd = np.max(drawdowns)
+    return current_dd, max_dd
+
+# ==================== 市场状态统计更新 ====================
+def update_regime_stats(regime: MarketRegime, pnl: float):
+    """记录某个市场状态下的交易结果"""
+    key = regime.value
+    if key not in st.session_state.regime_stats:
+        st.session_state.regime_stats[key] = {'trades': 0, 'wins': 0, 'total_pnl': 0.0}
+    st.session_state.regime_stats[key]['trades'] += 1
+    if pnl > 0:
+        st.session_state.regime_stats[key]['wins'] += 1
+    st.session_state.regime_stats[key]['total_pnl'] += pnl
+    # 持久化
+    rows = []
+    for k, v in st.session_state.regime_stats.items():
+        rows.append({'regime': k, 'trades': v['trades'], 'wins': v['wins'], 'total_pnl': v['total_pnl']})
+    pd.DataFrame(rows).to_csv(REGIME_STATS_FILE, index=False)
+
+# ==================== 一致性误差统计 ====================
+def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
+    """更新实盘或回测的滑点和胜率统计"""
+    key = 'backtest' if is_backtest else 'live'
+    stats = st.session_state.consistency_stats.get(key, {'trades': 0, 'avg_slippage': 0.0, 'wins': 0})
+    stats['trades'] += 1
+    stats['avg_slippage'] = (stats['avg_slippage'] * (stats['trades']-1) + slippage) / stats['trades']
+    if win:
+        stats['wins'] += 1
+    stats['win_rate'] = stats['wins'] / stats['trades'] if stats['trades'] > 0 else 0
+    st.session_state.consistency_stats[key] = stats
+    # 持久化
+    rows = []
+    for typ, s in st.session_state.consistency_stats.items():
+        rows.append({
+            'type': typ,
+            'trades': s.get('trades', 0),
+            'avg_slippage': s.get('avg_slippage', 0.0),
+            'win_rate': s.get('win_rate', 0.0)
+        })
+    pd.DataFrame(rows).to_csv(CONSISTENCY_FILE, index=False)
 
 # ==================== 自适应ATR倍数 ====================
 def adaptive_atr_multiplier(price_series: pd.Series, window: int = 20) -> float:
@@ -745,8 +838,8 @@ class RiskManager:
         return atr_pct > CONFIG.circuit_breaker_atr or fear_greed <= CONFIG.circuit_breaker_fg_extreme[0] or fear_greed >= CONFIG.circuit_breaker_fg_extreme[1]
 
     def check_max_drawdown(self) -> bool:
-        drawdown = (st.session_state.peak_balance - st.session_state.account_balance) / st.session_state.peak_balance * 100
-        return drawdown > CONFIG.max_drawdown_pct
+        current_dd, max_dd = calculate_drawdown()
+        return current_dd > CONFIG.max_drawdown_pct
 
     def calc_var(self, returns: np.ndarray, confidence: float = 0.95) -> float:
         if len(returns) < 10:
@@ -880,7 +973,6 @@ class Position:
 
 # ==================== 下单执行（动态滑点，带符号标准化）====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
-    # 标准化symbol，去除两端空格
     sym = symbol.strip()
     dir_str = "多" if direction == 1 else "空"
     volume = 0
@@ -930,8 +1022,16 @@ def close_position(symbol: str, exit_price: float, reason: str):
     st.session_state.account_balance += pnl
     if st.session_state.account_balance > st.session_state.peak_balance:
         st.session_state.peak_balance = st.session_state.account_balance
-    st.session_state.net_value_history.append({'time': datetime.now(), 'value': st.session_state.account_balance})
+    # 记录净值
+    net_point = {'time': datetime.now(), 'value': st.session_state.account_balance}
+    st.session_state.net_value_history.append(net_point)
+    append_to_csv(EQUITY_FILE, {'time': net_point['time'].isoformat(), 'value': net_point['value']})
     st.session_state.daily_returns.append(pnl / st.session_state.account_balance)
+    
+    # 更新市场状态统计
+    update_regime_stats(st.session_state.market_regime, pnl)
+    # 更新一致性误差（实盘）
+    update_consistency_stats(is_backtest=False, slippage=slippage, win=pnl>0)
     
     trade_record = {
         'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -959,7 +1059,6 @@ def close_position(symbol: str, exit_price: float, reason: str):
 
 # ==================== 数据一致性修复 ====================
 def fix_data_consistency(symbols):
-    """清理无效持仓，确保positions中的symbol在symbols中，且对应的数据存在"""
     to_remove = []
     for sym in list(st.session_state.positions.keys()):
         if sym not in symbols or sym not in st.session_state.multi_df:
@@ -967,7 +1066,6 @@ def fix_data_consistency(symbols):
     for sym in to_remove:
         log_execution(f"数据修复：移除无效持仓 {sym}")
         del st.session_state.positions[sym]
-    # 同时清理可能存在的空仓位
     st.session_state.positions = {k: v for k, v in st.session_state.positions.items() if v.size > 0}
 
 # ==================== 回测引擎（多品种组合，带动态滑点）====================
@@ -991,6 +1089,9 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
     recent_returns = deque(maxlen=50)
     engine = SignalEngine()
     risk_manager = RiskManager()
+    # 用于记录回测滑点
+    total_slippage = 0.0
+    slippage_count = 0
 
     for i in range(50, min_len):
         row_dict = {sym: aligned_data[sym].iloc[i] for sym in symbols}
@@ -1026,6 +1127,8 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
                 size = allocations[sym]
                 vola = np.std(aligned_data[sym]['close'].pct_change().dropna().values[-20:]) if len(aligned_data[sym])>20 else 0.02
                 slippage = dynamic_slippage(price, size, volume_dict[sym], vola)
+                total_slippage += slippage
+                slippage_count += 1
                 exec_price = price + slippage if dir == 1 else price - slippage
                 positions[sym] = {
                     'direction': dir,
@@ -1071,6 +1174,8 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
             if close_flag:
                 vola = np.std(aligned_data[sym]['close'].pct_change().dropna().values[-20:]) if len(aligned_data[sym])>20 else 0.02
                 slippage = dynamic_slippage(exit_price, pos['size'], volume_dict[sym], vola)
+                total_slippage += slippage
+                slippage_count += 1
                 exec_exit = exit_price - slippage if pos['direction'] == 1 else exit_price + slippage
                 pnl = (exec_exit - pos['entry']) * pos['size'] * pos['direction'] - exec_exit * pos['size'] * CONFIG.fee_rate * 2
                 balance += pnl
@@ -1108,8 +1213,12 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
         returns = trades_df['pnl'].values / initial_balance
         sharpe = (returns.mean()/returns.std()*np.sqrt(252)) if len(returns) > 1 and returns.std() != 0 else 0
         max_drawdown = (peak_balance - equity_df['balance'].min()) / peak_balance * 100
+        avg_slippage = total_slippage / slippage_count if slippage_count > 0 else 0
     else:
-        win_rate = avg_win = avg_loss = sharpe = max_drawdown = 0
+        win_rate = avg_win = avg_loss = sharpe = max_drawdown = avg_slippage = 0
+
+    # 记录回测一致性统计
+    update_consistency_stats(is_backtest=True, slippage=avg_slippage, win=False)  # win参数仅用于实盘，这里只更新滑点
 
     performance = {
         'final_balance': balance,
@@ -1117,7 +1226,8 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
         'avg_win': avg_win,
         'avg_loss': avg_loss,
         'sharpe': sharpe,
-        'max_drawdown_pct': max_drawdown
+        'max_drawdown_pct': max_drawdown,
+        'avg_slippage': avg_slippage
     }
 
     return {'equity': equity_df, 'trades': trades_df, 'performance': performance}
@@ -1163,7 +1273,7 @@ def param_sensitivity_heatmap(data_dicts: Dict[str, Dict[str, pd.DataFrame]], sy
             CONFIG.tp_min_ratio = old_tp
     return {'atr_vals': atr_vals, 'tp_vals': tp_vals, 'sharpe': sharpe_matrix}
 
-# ==================== UI渲染器（完美版，修复图表x轴和数字格式化）====================
+# ==================== UI渲染器 ====================
 class UIRenderer:
     def __init__(self):
         self.fetcher = get_fetcher()
@@ -1304,7 +1414,6 @@ class UIRenderer:
         cov = calculate_cov_matrix(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, CONFIG.cov_matrix_window)
         st.session_state.cov_matrix = cov
 
-        # 自动修复数据一致性
         fix_data_consistency(symbols)
 
         if st.session_state.mode == 'backtest':
@@ -1441,6 +1550,9 @@ class UIRenderer:
         else:
             portfolio_var_value = 0.0
 
+        # 计算精准回撤
+        current_dd, max_dd = calculate_drawdown()
+
         col1, col2 = st.columns([1, 1.5])
         with col1:
             st.markdown("### 📊 市场状态")
@@ -1456,11 +1568,9 @@ class UIRenderer:
 
             if st.session_state.positions:
                 st.markdown("### 📈 当前持仓")
-                # 按品种名称排序显示，确保数据对应正确，并使用点格式化数量
                 for sym in sorted(st.session_state.positions.keys()):
                     pos = st.session_state.positions[sym]
                     pnl = pos.pnl(multi_data[sym]['current_price']) if sym in multi_data else 0
-                    # 强制使用点作为小数点，数量保留4位
                     st.info(f"{sym}: {'多' if pos.direction==1 else '空'} 入场 {pos.entry_price:.2f} 数量 {pos.size:.4f} 浮动盈亏 {pnl:.2f}")
             else:
                 st.markdown("### 无持仓")
@@ -1468,14 +1578,34 @@ class UIRenderer:
 
             st.markdown("### 📉 风险监控")
             st.metric("实时盈亏", f"{st.session_state.daily_pnl + total_floating:.2f} USDT")
-            drawdown = (st.session_state.peak_balance - st.session_state.account_balance) / st.session_state.peak_balance * 100
-            st.metric("最大回撤", f"{drawdown:.2f}%")
+            st.metric("当前回撤", f"{current_dd:.2f}%")
+            st.metric("最大回撤", f"{max_dd:.2f}%")
             st.metric("连亏次数", st.session_state.consecutive_losses)
             st.metric("日内交易", f"{st.session_state.daily_trades}/{CONFIG.max_daily_trades}")
             st.metric("组合VaR (95%)", f"{portfolio_var_value*100:.2f}%")
 
             if st.session_state.cooldown_until:
                 st.warning(f"冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
+
+            # 市场状态统计
+            if st.session_state.regime_stats:
+                with st.expander("📈 市场状态统计"):
+                    df_reg = pd.DataFrame(st.session_state.regime_stats).T
+                    df_reg['胜率'] = df_reg['wins'] / df_reg['trades'] * 100
+                    df_reg['平均盈亏'] = df_reg['total_pnl'] / df_reg['trades']
+                    st.dataframe(df_reg[['trades', '胜率', '平均盈亏']].round(2))
+
+            # 一致性误差统计
+            if st.session_state.consistency_stats:
+                with st.expander("🔄 实盘一致性"):
+                    cons = st.session_state.consistency_stats
+                    bt = cons.get('backtest', {})
+                    lv = cons.get('live', {})
+                    if bt and lv:
+                        st.write(f"回测滑点: {bt.get('avg_slippage', 0):.4f} 实盘滑点: {lv.get('avg_slippage', 0):.4f}")
+                        st.write(f"回测胜率: {bt.get('win_rate', 0):.2%} 实盘胜率: {lv.get('win_rate', 0):.2%}")
+                    else:
+                        st.write("暂无足够实盘数据对比")
 
             if st.session_state.factor_ic_stats:
                 with st.expander("📊 因子IC统计"):
@@ -1490,14 +1620,11 @@ class UIRenderer:
                 st.plotly_chart(fig_nv, use_container_width=True)
 
         with col2:
-            # 获取图表数据，并修复时间戳异常
             df_plot = st.session_state.multi_df[first_sym]['15m'].tail(120).copy()
             if not df_plot.empty:
-                # 确保timestamp是datetime类型，并丢弃无效值
                 if not pd.api.types.is_datetime64_any_dtype(df_plot['timestamp']):
                     df_plot['timestamp'] = pd.to_datetime(df_plot['timestamp'], errors='coerce')
                 df_plot = df_plot.dropna(subset=['timestamp'])
-                # 如果数据为空，显示提示
                 if df_plot.empty:
                     st.warning("图表数据无效")
                     return
@@ -1528,10 +1655,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 41.1 · 完美极限", layout="wide")
+    st.set_page_config(page_title="终极量化终端 42.0 · 完美极限", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 完美极限版 41.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 协方差风险平价 · 动态滑点 · 组合VaR · 严格Walk Forward · IC显著性 · 数据一致性修复 · 图表稳定")
+    st.title("🚀 终极量化终端 · 完美极限版 42.0")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 净值持久化 · 精准回撤 · 分段统计 · 一致性误差")
 
     init_session_state()
     renderer = UIRenderer()
