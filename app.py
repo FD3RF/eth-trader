@@ -1,12 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 完美极限版 42.0
+🚀 终极量化终端 · 完美极限版 42.1
 ==================================================
-新增核心功能：
-1. 净值曲线持久化（自动保存/加载 equity.csv）
-2. 精准回撤计算（滚动窗口 + 实时显示）
-3. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
-4. 实盘一致性误差统计（滑点偏差、胜率对比）
+核心特性：
+1. 协方差矩阵风险平价（动态品种相关性）
+2. 动态滑点模型（基于波动率、成交量、订单大小）
+3. 组合VaR实时监控（每日95% VaR）
+4. 严格Walk Forward验证（训练/测试完全隔离）
+5. 因子IC显著性检验（p值 + 信息比率）
+6. 多品种持仓显示修复（按品种名称严格匹配，数据永不串位）
+7. 数据一致性验证：自动清理无效持仓，一键修复
+8. 净值曲线持久化（包含浮动盈亏，自动保存/加载 equity_curve.csv）
+9. 精准回撤计算（基于实时权益，当前回撤/最大回撤）
+10. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
+11. 实盘一致性误差统计（滑点偏差、胜率对比）
+12. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
+13. 高性能并行数据获取 + 自动回退模拟
+14. 完整日志持久化（CSV + 按日文件）
+15. 一键紧急平仓、Telegram通知
 ==================================================
 """
 
@@ -42,8 +53,8 @@ LOG_DIR = "logs"
 TRADE_LOG_FILE = "trade_log.csv"
 PERF_LOG_FILE = "performance_log.csv"
 SLIPPAGE_LOG_FILE = "slippage_log.csv"
-EQUITY_FILE = "equity.csv"          # 净值曲线持久化
-REGIME_STATS_FILE = "regime_stats.csv"  # 市场状态统计
+EQUITY_CURVE_FILE = "equity_curve.csv"      # 权益曲线持久化
+REGIME_STATS_FILE = "regime_stats.csv"      # 市场状态统计
 CONSISTENCY_FILE = "consistency_stats.csv"  # 一致性误差统计
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -183,12 +194,16 @@ def safe_request(max_retries: int = 3):
     return decorator
 
 def init_session_state():
-    # 加载持久化净值
-    equity_df = load_csv(EQUITY_FILE)
-    net_value_history = deque(maxlen=500)
+    # 加载持久化权益曲线
+    equity_df = load_csv(EQUITY_CURVE_FILE)
+    equity_curve = deque(maxlen=500)
     if not equity_df.empty:
         for _, row in equity_df.iterrows():
-            net_value_history.append({'time': pd.to_datetime(row['time']), 'value': row['value']})
+            try:
+                t = pd.to_datetime(row['time'])
+                equity_curve.append({'time': t, 'equity': float(row['equity'])})
+            except:
+                pass
 
     # 加载市场状态统计
     regime_stats = {}
@@ -196,9 +211,9 @@ def init_session_state():
     if not regime_df.empty:
         for _, row in regime_df.iterrows():
             regime_stats[row['regime']] = {
-                'trades': row['trades'],
-                'wins': row['wins'],
-                'total_pnl': row['total_pnl']
+                'trades': int(row['trades']),
+                'wins': int(row['wins']),
+                'total_pnl': float(row['total_pnl'])
             }
 
     # 加载一致性误差统计
@@ -206,18 +221,12 @@ def init_session_state():
     cons_df = load_csv(CONSISTENCY_FILE)
     if not cons_df.empty:
         for _, row in cons_df.iterrows():
-            if row['type'] == 'backtest':
-                consistency_stats['backtest'] = {
-                    'avg_slippage': row['avg_slippage'],
-                    'win_rate': row['win_rate'],
-                    'trades': row['trades']
-                }
-            else:
-                consistency_stats['live'] = {
-                    'avg_slippage': row['avg_slippage'],
-                    'win_rate': row['win_rate'],
-                    'trades': row['trades']
-                }
+            typ = row['type']
+            consistency_stats[typ] = {
+                'trades': int(row['trades']),
+                'avg_slippage': float(row['avg_slippage']),
+                'win_rate': float(row['win_rate'])
+            }
 
     defaults = {
         'account_balance': 10000.0,
@@ -230,7 +239,8 @@ def init_session_state():
         'auto_enabled': True,
         'pause_until': None,
         'exchange': None,
-        'net_value_history': net_value_history,
+        'net_value_history': [],  # 仅用于显示已平仓净值（历史）
+        'equity_curve': equity_curve,  # 实时权益曲线（含浮动盈亏）
         'last_signal_time': {},
         'current_symbols': ['ETH/USDT', 'BTC/USDT'],
         'telegram_token': None,
@@ -261,9 +271,8 @@ def init_session_state():
         'daily_returns': deque(maxlen=252),
         'cov_matrix': None,
         'slippage_records': [],
-        'regime_stats': regime_stats,           # 市场状态统计
-        'consistency_stats': consistency_stats, # 一致性误差统计
-        'max_drawdown_series': deque(maxlen=CONFIG.max_drawdown_window),  # 用于滚动回撤
+        'regime_stats': regime_stats,
+        'consistency_stats': consistency_stats,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -307,25 +316,38 @@ def update_performance_metrics():
         'sharpe': sharpe
     }
 
+# ==================== 实时权益计算 ====================
+def current_equity():
+    """计算当前总权益 = 余额 + 所有持仓浮动盈亏"""
+    balance = st.session_state.account_balance
+    floating = 0.0
+    for sym, pos in st.session_state.positions.items():
+        if sym in st.session_state.symbol_current_prices:
+            floating += pos.pnl(st.session_state.symbol_current_prices[sym])
+    return balance + floating
+
 # ==================== 精准回撤计算 ====================
 def calculate_drawdown():
-    """基于净值历史计算当前回撤和最大回撤"""
-    if not st.session_state.net_value_history:
+    """基于权益曲线计算当前回撤和最大回撤"""
+    if len(st.session_state.equity_curve) < 2:
         return 0.0, 0.0
-    # 取最近window个点
-    series = list(st.session_state.net_value_history)[-CONFIG.max_drawdown_window:]
-    values = [p['value'] for p in series]
-    if len(values) < 2:
-        return 0.0, 0.0
-    peak = np.maximum.accumulate(values)
-    drawdowns = (peak - values) / peak * 100
-    current_dd = drawdowns[-1]
-    max_dd = np.max(drawdowns)
+    df = pd.DataFrame(list(st.session_state.equity_curve))
+    peak = df['equity'].cummax()
+    dd = (peak - df['equity']) / peak * 100
+    current_dd = dd.iloc[-1]
+    max_dd = dd.max()
     return current_dd, max_dd
+
+# ==================== 记录权益点 ====================
+def record_equity_point():
+    equity = current_equity()
+    now = datetime.now()
+    st.session_state.equity_curve.append({'time': now, 'equity': equity})
+    # 持久化（可追加）
+    append_to_csv(EQUITY_CURVE_FILE, {'time': now.isoformat(), 'equity': equity})
 
 # ==================== 市场状态统计更新 ====================
 def update_regime_stats(regime: MarketRegime, pnl: float):
-    """记录某个市场状态下的交易结果"""
     key = regime.value
     if key not in st.session_state.regime_stats:
         st.session_state.regime_stats[key] = {'trades': 0, 'wins': 0, 'total_pnl': 0.0}
@@ -333,7 +355,6 @@ def update_regime_stats(regime: MarketRegime, pnl: float):
     if pnl > 0:
         st.session_state.regime_stats[key]['wins'] += 1
     st.session_state.regime_stats[key]['total_pnl'] += pnl
-    # 持久化
     rows = []
     for k, v in st.session_state.regime_stats.items():
         rows.append({'regime': k, 'trades': v['trades'], 'wins': v['wins'], 'total_pnl': v['total_pnl']})
@@ -341,7 +362,6 @@ def update_regime_stats(regime: MarketRegime, pnl: float):
 
 # ==================== 一致性误差统计 ====================
 def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
-    """更新实盘或回测的滑点和胜率统计"""
     key = 'backtest' if is_backtest else 'live'
     stats = st.session_state.consistency_stats.get(key, {'trades': 0, 'avg_slippage': 0.0, 'wins': 0})
     stats['trades'] += 1
@@ -350,7 +370,6 @@ def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
         stats['wins'] += 1
     stats['win_rate'] = stats['wins'] / stats['trades'] if stats['trades'] > 0 else 0
     st.session_state.consistency_stats[key] = stats
-    # 持久化
     rows = []
     for typ, s in st.session_state.consistency_stats.items():
         rows.append({
@@ -838,7 +857,7 @@ class RiskManager:
         return atr_pct > CONFIG.circuit_breaker_atr or fear_greed <= CONFIG.circuit_breaker_fg_extreme[0] or fear_greed >= CONFIG.circuit_breaker_fg_extreme[1]
 
     def check_max_drawdown(self) -> bool:
-        current_dd, max_dd = calculate_drawdown()
+        current_dd, _ = calculate_drawdown()
         return current_dd > CONFIG.max_drawdown_pct
 
     def calc_var(self, returns: np.ndarray, confidence: float = 0.95) -> float:
@@ -1022,15 +1041,12 @@ def close_position(symbol: str, exit_price: float, reason: str):
     st.session_state.account_balance += pnl
     if st.session_state.account_balance > st.session_state.peak_balance:
         st.session_state.peak_balance = st.session_state.account_balance
-    # 记录净值
-    net_point = {'time': datetime.now(), 'value': st.session_state.account_balance}
-    st.session_state.net_value_history.append(net_point)
-    append_to_csv(EQUITY_FILE, {'time': net_point['time'].isoformat(), 'value': net_point['value']})
+    # 记录已平仓净值点（用于历史曲线）
+    st.session_state.net_value_history.append({'time': datetime.now(), 'value': st.session_state.account_balance})
+    # 权益曲线会在每次刷新时自动记录，这里不必重复
     st.session_state.daily_returns.append(pnl / st.session_state.account_balance)
     
-    # 更新市场状态统计
     update_regime_stats(st.session_state.market_regime, pnl)
-    # 更新一致性误差（实盘）
     update_consistency_stats(is_backtest=False, slippage=slippage, win=pnl>0)
     
     trade_record = {
@@ -1089,7 +1105,6 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
     recent_returns = deque(maxlen=50)
     engine = SignalEngine()
     risk_manager = RiskManager()
-    # 用于记录回测滑点
     total_slippage = 0.0
     slippage_count = 0
 
@@ -1217,8 +1232,7 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
     else:
         win_rate = avg_win = avg_loss = sharpe = max_drawdown = avg_slippage = 0
 
-    # 记录回测一致性统计
-    update_consistency_stats(is_backtest=True, slippage=avg_slippage, win=False)  # win参数仅用于实盘，这里只更新滑点
+    update_consistency_stats(is_backtest=True, slippage=avg_slippage, win=False)
 
     performance = {
         'final_balance': balance,
@@ -1550,7 +1564,8 @@ class UIRenderer:
         else:
             portfolio_var_value = 0.0
 
-        # 计算精准回撤
+        # 记录权益点（每次刷新）
+        record_equity_point()
         current_dd, max_dd = calculate_drawdown()
 
         col1, col2 = st.columns([1, 1.5])
@@ -1615,7 +1630,7 @@ class UIRenderer:
             if st.session_state.net_value_history:
                 hist_df = pd.DataFrame(st.session_state.net_value_history[-200:])
                 fig_nv = go.Figure()
-                fig_nv.add_trace(go.Scatter(x=hist_df['time'], y=hist_df['value'], mode='lines', name='净值', line=dict(color='cyan')))
+                fig_nv.add_trace(go.Scatter(x=hist_df['time'], y=hist_df['value'], mode='lines', name='已平仓净值', line=dict(color='cyan')))
                 fig_nv.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), template='plotly_dark')
                 st.plotly_chart(fig_nv, use_container_width=True)
 
@@ -1655,10 +1670,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 42.0 · 完美极限", layout="wide")
+    st.set_page_config(page_title="终极量化终端 42.1 · 完美极限", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 完美极限版 42.0")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 净值持久化 · 精准回撤 · 分段统计 · 一致性误差")
+    st.title("🚀 终极量化终端 · 完美极限版 42.1")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 净值持久化 · 精准回撤 · 分段统计 · 一致性误差 · 实时权益")
 
     init_session_state()
     renderer = UIRenderer()
