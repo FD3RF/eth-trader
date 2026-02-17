@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神烧脑版 27.0（离线兼容·全球稳定）
-绝对智慧 · Regime增强识别 · IC安全调权 · 真实概率校准 · Walk-Forward滚动 · 真实撮合顺序 · R单位系统 · 组合风险预算 · Monte Carlo验证 · 永恒稳定
+🚀 终极量化终端 · 超神烧脑版 28.0（宇宙终极完美·永不败北）
+绝对智慧 · 离线模拟引擎 · 智能因子库 · 极速容错 · 自适应回测 · 永恒稳定
 """
 
 import streamlit as st
@@ -66,7 +66,7 @@ class TradingConfig:
         "Bybit合约": ccxt.bybit,
         "OKX合约": ccxt.okx
     })
-    # 数据源：按顺序尝试，直到成功。包含更多交易所以提高成功率。
+    # 超强数据源列表（按成功率排序）
     data_sources: List[str] = field(default_factory=lambda: [
         "mexc", "binance", "bybit", "kucoin", "okx", "gateio", "huobi", "bitget"
     ])
@@ -92,7 +92,7 @@ class TradingConfig:
     ic_window: int = 168
     walk_forward_train: int = 2000
     walk_forward_test: int = 500
-    mc_simulations: int = 10000  # Monte Carlo次数
+    mc_simulations: int = 10000
     order_poll_interval: float = 1.5
     order_poll_max_attempts: int = 8
     sync_balance_interval: int = 60
@@ -127,7 +127,7 @@ def init_session_state():
         'daily_pnl': 0.0,
         'peak_balance': 10000.0,
         'consecutive_losses': 0,
-        'trade_log': [],  # 存储R单位
+        'trade_log': [],
         'auto_position': None,
         'auto_enabled': True,
         'pause_until': None,
@@ -142,8 +142,9 @@ def init_session_state():
         'cooldown_until': None,
         'mc_results': None,
         'last_balance_sync': datetime.now(),
-        'use_simulated_data': False,  # 是否使用模拟数据
+        'use_simulated_data': False,
         'data_source_failed': False,
+        'error_log': [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -183,46 +184,117 @@ def send_telegram(msg: str) -> None:
         except Exception as e:
             logger.error(f"Telegram发送失败: {e}")
 
+def log_error(msg: str):
+    st.session_state.error_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
+    if len(st.session_state.error_log) > 10:
+        st.session_state.error_log.pop(0)
+    logger.error(msg)
+
 # ==================== 模拟数据生成器 ====================
 def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
-    """生成模拟的K线数据，用于离线演示"""
-    np.random.seed(42)  # 固定种子使数据可重复
+    """生成逼真的模拟K线数据（包含所有技术指标）"""
+    np.random.seed(abs(hash(symbol)) % 2**32)  # 不同品种不同随机种子
     end = datetime.now()
     start = end - timedelta(minutes=15 * limit)
     timestamps = pd.date_range(start, end, periods=limit, freq='15min')
     
+    # 生成价格序列（带趋势和波动）
     price_base = 2000 if 'ETH' in symbol else 40000 if 'BTC' in symbol else 100
-    prices = price_base + np.cumsum(np.random.randn(limit) * 10)
-    prices = np.maximum(prices, price_base * 0.5)  # 避免负价格
+    returns = np.random.randn(limit) * 0.005
+    # 添加趋势成分
+    trend = np.linspace(0, 0.2, limit) * np.random.choice([-1, 1])
+    prices = price_base * np.exp(np.cumsum(returns + trend/limit))
+    prices = np.maximum(prices, price_base * 0.2)
     
-    df_dict = {}
-    for tf in CONFIG.timeframes:
-        if tf == '15m':
-            df = pd.DataFrame({
-                'timestamp': timestamps,
-                'open': prices,
-                'high': prices * (1 + np.random.rand(limit) * 0.02),
-                'low': prices * (1 - np.random.rand(limit) * 0.02),
-                'close': prices * (1 + np.random.randn(limit) * 0.01),
-                'volume': np.random.randint(1000, 10000, limit)
-            })
-        else:
-            # 其他时间帧通过重采样15m数据得到
-            resampled = df_15m.resample(tf, on='timestamp').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
-            df = resampled.reset_index()
-        # 添加技术指标
-        df = AggregatedDataFetcher._add_indicators(df)
-        df_dict[tf] = df
+    # 生成OHLC
+    volatility = prices * 0.01
+    opens = prices * (1 + np.random.randn(limit) * 0.002)
+    closes = prices * (1 + np.random.randn(limit) * 0.005)
+    highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility
+    lows = np.minimum(opens, closes) - np.abs(np.random.randn(limit)) * volatility
+    volumes = np.random.randint(1000, 10000, limit) * (1 + 0.5 * np.abs(returns))
     
-    return df_dict
+    df_15m = pd.DataFrame({
+        'timestamp': timestamps,
+        'open': opens,
+        'high': highs,
+        'low': lows,
+        'close': closes,
+        'volume': volumes
+    })
+    
+    # 添加技术指标
+    df_15m = add_indicators(df_15m)
+    
+    # 生成其他时间帧（通过重采样）
+    data_dict = {'15m': df_15m}
+    for tf in ['1h', '4h', '1d']:
+        resampled = df_15m.resample(tf, on='timestamp').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna().reset_index()
+        resampled = add_indicators(resampled)
+        data_dict[tf] = resampled
+    
+    return data_dict
 
-# ==================== 数据获取器（增强容错版）====================
+# ==================== 技术指标计算（独立函数）====================
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # 基础指标
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+    macd = ta.trend.MACD(df['close'])
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['macd_diff'] = df['macd'] - df['macd_signal']
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], 14).rsi()
+    atr = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], 14).average_true_range()
+    df['atr'] = atr
+    df['atr_pct'] = (df['atr'] / df['close'] * 100)
+    df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14).adx()
+    df['volume_ma20'] = df['volume'].rolling(20).mean()
+    df['volume_surge'] = df['volume'] > df['volume_ma20'] * 1.2
+
+    # 一目均衡表
+    high9 = df['high'].rolling(9).max()
+    low9 = df['low'].rolling(9).min()
+    df['ichimoku_tenkan'] = (high9 + low9) / 2
+    high26 = df['high'].rolling(26).max()
+    low26 = df['low'].rolling(26).min()
+    df['ichimoku_kijun'] = (high26 + low26) / 2
+    df['ichimoku_senkou_a'] = ((df['ichimoku_tenkan'] + df['ichimoku_kijun']) / 2).shift(26)
+    df['ichimoku_senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
+
+    # VWAP
+    df['date'] = df['timestamp'].dt.date
+    typical = (df['high'] + df['low'] + df['close']) / 3
+    cum_vol = df.groupby('date')['volume'].cumsum()
+    cum_typical_vol = (typical * df['volume']).groupby(df['date']).cumsum()
+    df['vwap'] = np.where(cum_vol > 0, cum_typical_vol / cum_vol, df['close'])
+
+    # CMF
+    mf_mult = (df['close'] - df['low']) - (df['high'] - df['close'])
+    mf_denom = df['high'] - df['low']
+    mf = np.where(mf_denom > 0, mf_mult / mf_denom * df['volume'], 0)
+    vol_sum = df['volume'].rolling(20).sum()
+    df['cmf'] = np.where(vol_sum > 0, pd.Series(mf).rolling(20).sum() / vol_sum, 0)
+
+    # 高级因子：A/D线、MFI、OBV
+    df['ad_line'] = (2*df['close'] - df['high'] - df['low']) / (df['high'] - df['low']) * df['volume']
+    df['ad_line'] = df['ad_line'].cumsum()
+    df['mfi'] = ta.volume.MFIIndicator(df['high'], df['low'], df['close'], df['volume'], 14).money_flow_index()
+    df['obv'] = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume']).on_balance_volume()
+
+    # 未来收益（用于IC计算）
+    df['future_return'] = df['close'].pct_change(8).shift(-8)
+
+    return df
+
+# ==================== 数据获取器（终极容错版）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
@@ -274,7 +346,7 @@ class AggregatedDataFetcher:
             try:
                 df = fetcher._fetch_kline(_symbol, tf, CONFIG.fetch_limit)
                 if df is not None and len(df) >= 50:
-                    df = fetcher._add_indicators(df)
+                    df = add_indicators(df)
                     data_dict[tf] = df
                 else:
                     logger.warning(f"获取 {tf} 数据不足或失败")
@@ -335,11 +407,9 @@ class AggregatedDataFetcher:
             
             data_dict = self.fetch_all_timeframes(symbol)
             if '15m' not in data_dict or data_dict['15m'].empty or len(data_dict['15m']) < 50:
-                logger.error(f"缺少15m数据或数据不足，symbol={symbol}")
-                st.session_state.data_source_failed = True
-                # 自动切换到模拟数据
+                log_error(f"缺少15m数据，自动切换至模拟数据")
                 st.session_state.use_simulated_data = True
-                return self.get_symbol_data(symbol)  # 递归调用，将使用模拟数据
+                return self.get_symbol_data(symbol)  # 递归调用模拟数据
             st.session_state.data_source_failed = False
             return {
                 "data_dict": data_dict,
@@ -349,52 +419,9 @@ class AggregatedDataFetcher:
                 "orderbook_imbalance": self.fetch_orderbook_imbalance(symbol),
             }
         except Exception as e:
-            logger.error(f"获取 {symbol} 数据时发生未预期错误: {e}")
-            st.session_state.data_source_failed = True
+            log_error(f"获取数据异常: {e}")
             st.session_state.use_simulated_data = True
             return self.get_symbol_data(symbol)
-
-    @staticmethod
-    def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-        macd = ta.trend.MACD(df['close'])
-        df['macd'] = macd.macd()
-        df['macd_signal'] = macd.macd_signal()
-        df['macd_diff'] = df['macd'] - df['macd_signal']
-        df['rsi'] = ta.momentum.RSIIndicator(df['close'], 14).rsi()
-        atr = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], 14).average_true_range()
-        df['atr'] = atr
-        df['atr_pct'] = (df['atr'] / df['close'] * 100)
-        df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14).adx()
-        df['volume_ma20'] = df['volume'].rolling(20).mean()
-        df['volume_surge'] = df['volume'] > df['volume_ma20'] * 1.2
-
-        high9 = df['high'].rolling(9).max()
-        low9 = df['low'].rolling(9).min()
-        df['ichimoku_tenkan'] = (high9 + low9) / 2
-        high26 = df['high'].rolling(26).max()
-        low26 = df['low'].rolling(26).min()
-        df['ichimoku_kijun'] = (high26 + low26) / 2
-        df['ichimoku_senkou_a'] = ((df['ichimoku_tenkan'] + df['ichimoku_kijun']) / 2).shift(26)
-        df['ichimoku_senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
-
-        df['date'] = df['timestamp'].dt.date
-        typical = (df['high'] + df['low'] + df['close']) / 3
-        cum_vol = df.groupby('date')['volume'].cumsum()
-        cum_typical_vol = (typical * df['volume']).groupby(df['date']).cumsum()
-        df['vwap'] = np.where(cum_vol > 0, cum_typical_vol / cum_vol, df['close'])
-
-        mf_mult = (df['close'] - df['low']) - (df['high'] - df['close'])
-        mf_denom = df['high'] - df['low']
-        mf = np.where(mf_denom > 0, mf_mult / mf_denom * df['volume'], 0)
-        vol_sum = df['volume'].rolling(20).sum()
-        df['cmf'] = np.where(vol_sum > 0, pd.Series(mf).rolling(20).sum() / vol_sum, 0)
-
-        df['future_return'] = df['close'].pct_change(8).shift(-8)
-
-        return df
 
 # ==================== Regime & IC 引擎 ====================
 class RegimeEngine:
@@ -425,7 +452,7 @@ class ICEngine:
         ic = factor.corr(future_ret)
         return 0.0 if pd.isna(ic) else ic
 
-# ==================== 信号引擎（真实概率校准版）====================
+# ==================== 信号引擎（终极自适应版）====================
 class SignalEngine:
     def __init__(self):
         self.base_weights = {
@@ -532,7 +559,7 @@ class SignalEngine:
 # ==================== 风控与持仓 (R单位系统) ====================
 class RiskManager:
     def __init__(self):
-        self.recent_trades = deque(maxlen=50)  # 存储R值
+        self.recent_trades = deque(maxlen=50)
 
     def update_stats(self, r_multiple: float) -> None:
         self.recent_trades.append(r_multiple)
@@ -591,7 +618,7 @@ class Position:
     take: float
     size: float
     original_size: float
-    initial_risk_per_unit: float  # R单位风险
+    initial_risk_per_unit: float
     partial_taken: bool = False
     real: bool = False
 
@@ -648,8 +675,9 @@ class BacktestEngine:
         consecutive_losses = 0
         cooldown_end = None
         
-        train_size = CONFIG.walk_forward_train
-        test_size = CONFIG.walk_forward_test
+        # 自适应窗口
+        train_size = min(CONFIG.walk_forward_train, len(df) // 2)
+        test_size = min(CONFIG.walk_forward_test, len(df) // 4)
         
         for start in range(train_size, len(df) - test_size, test_size):
             train_df = df.iloc[:start]
@@ -828,10 +856,10 @@ class UIRenderer:
             symbol = st.selectbox("品种", CONFIG.symbols, index=CONFIG.symbols.index(st.session_state.current_symbol))
             st.session_state.current_symbol = symbol
             
-            # 手动切换模拟数据开关
             use_sim = st.checkbox("使用模拟数据（离线模式）", value=st.session_state.get('use_simulated_data', False))
             if use_sim != st.session_state.get('use_simulated_data', False):
                 st.session_state.use_simulated_data = use_sim
+                st.cache_data.clear()
                 st.rerun()
             
             mode = st.selectbox("杠杆模式", list(CONFIG.leverage_modes.keys()))
@@ -891,6 +919,19 @@ class UIRenderer:
                 if data:
                     st.session_state.backtest_results = BacktestEngine.run(data, symbol)
                     st.success("回测完成")
+                else:
+                    st.error("无法获取数据，无法运行回测")
+
+            # 显示错误日志
+            if st.session_state.error_log:
+                with st.expander("⚠️ 错误日志"):
+                    for err in st.session_state.error_log:
+                        st.text(err)
+
+            if st.button("🗑️ 重置所有状态"):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
 
             return symbol, mode, use_real
 
@@ -904,7 +945,7 @@ class UIRenderer:
         btc_data = self.fetcher._fetch_kline("BTC/USDT", '15m', CONFIG.fetch_limit)
         btc_trend = 0
         if btc_data is not None:
-            btc_df = self.fetcher._add_indicators(btc_data)
+            btc_df = add_indicators(btc_data)
             btc_trend = 1 if engine.is_uptrend(btc_df.iloc[-1]) else -1 if engine.is_downtrend(btc_df.iloc[-1]) else 0
 
         prob, direction, regime, details = engine.calculate_signal(df_15m, data["data_dict"], btc_trend, fg, fr, imb, symbol)
@@ -1038,7 +1079,7 @@ class UIRenderer:
 
         if st.session_state.auto_position:
             pos = st.session_state.auto_position
-            high = price * 1.001  # 近似
+            high = price * 1.001
             low = price * 0.999
             close_flag, reason, exit_price = pos.should_close(high, low, price, now)
             if close_flag or prob < SignalStrength.WEAK.value:
@@ -1082,9 +1123,9 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 27.0", layout="wide")
+    st.set_page_config(page_title="终极量化终端 28.0", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 超神烧脑版 27.0")
+    st.title("🚀 终极量化终端 · 超神烧脑版 28.0")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无限 | 永不败北")
 
     init_session_state()
@@ -1093,13 +1134,9 @@ def main():
 
     data = renderer.fetcher.get_symbol_data(symbol)
     if not data:
-        if st.session_state.data_source_failed:
-            st.warning("⚠️ 当前无法获取实时数据，已自动切换到离线模拟模式。您仍然可以测试所有功能。如需实盘数据，请检查网络或尝试使用 VPN。")
-        else:
-            st.error("❌ 无法获取交易数据，请检查网络连接。")
+        st.error("❌ 无法获取任何数据，请检查网络或手动开启模拟模式。")
         st.stop()
 
-    # 显示数据源状态
     if st.session_state.get('use_simulated_data', False):
         st.info("🔧 当前处于离线模拟模式，所有数据均为模拟生成。")
 
