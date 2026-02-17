@@ -132,13 +132,13 @@ def log_execution(msg: str):
     if len(st.session_state.execution_log) > 20:
         st.session_state.execution_log.pop(0)
 
-# ==================== 超真实模拟数据生成器 ====================
+# ==================== 超真实模拟数据生成器（修复版）====================
 def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
     """生成动态波动的模拟K线数据，包含所有技术指标"""
     np.random.seed(abs(hash(symbol)) % 2**32)
     end = datetime.now()
-    start = end - timedelta(minutes=15 * limit)
-    timestamps = pd.date_range(start, end, periods=limit, freq='15min')
+    # 使用 end 和 periods 生成时间戳，避免 start 计算误差
+    timestamps = pd.date_range(end=end, periods=limit, freq='15min')
     
     if 'BTC' in symbol:
         base = 40000
