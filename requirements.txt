@@ -6,6 +6,6 @@ plotly
 requests
 streamlit-autorefresh
 ccxt
+nest-asyncio
 scikit-learn
 joblib
-nest-asyncio
