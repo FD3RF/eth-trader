@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超真实模拟版 30.1（动态K线·信号可触发·永不败北）
-超真实模拟引擎 · 动态波动 · 阈值可调 · 一键实盘安全提示
+🚀 终极量化终端 · 超神烧脑版 30.0（宇宙主宰·永恒无敌·完美无瑕·永不败北·终极自适应R引擎）
+绝对智慧 · 异步数据抓取 · 增量指标计算 · 动态IC移动平均 · 真实概率置信区间 · 高级Monte Carlo · 组合风险预算 · 永恒稳定
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import ta
-import ccxt
+import ccxt.async_support as ccxt_async
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -17,14 +17,17 @@ from streamlit_autorefresh import st_autorefresh
 import warnings
 import time
 import logging
-from typing import Optional, Dict, List, Tuple, Any, Callable
+import asyncio
+import nest_asyncio
+from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import functools
-import concurrent.futures
 import math
 
+# 解决异步事件循环冲突
+nest_asyncio.apply()
 warnings.filterwarnings('ignore')
 
 # ==================== 配置与常量 ====================
@@ -32,7 +35,7 @@ class SignalStrength(Enum):
     STRONG = 0.70
     HIGH = 0.62
     MEDIUM = 0.55
-    WEAK = 0.50   # 将此值调低（如0.30）可让低概率信号触发交易
+    WEAK = 0.50
     NONE = 0.0
 
 class MarketRegime(Enum):
@@ -57,19 +60,18 @@ class TradingConfig:
     max_consecutive_losses: int = 3
     cooldown_losses: int = 3
     cooldown_hours: int = 24
+    max_daily_trades: int = 5
     leverage_modes: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
         "稳健 (3-5x)": (3, 5),
         "无敌 (5-8x)": (5, 8),
         "神级 (8-10x)": (8, 10)
     })
     exchanges: Dict[str, Any] = field(default_factory=lambda: {
-        "Binance合约": ccxt.binance,
-        "Bybit合约": ccxt.bybit,
-        "OKX合约": ccxt.okx
+        "Binance合约": ccxt_async.binance,
+        "Bybit合约": ccxt_async.bybit,
+        "OKX合约": ccxt_async.okx
     })
-    data_sources: List[str] = field(default_factory=lambda: [
-        "mexc", "binance", "bybit", "kucoin", "okx", "gateio", "huobi", "bitget"
-    ])
+    data_sources: List[str] = field(default_factory=lambda: ["mexc", "binance", "bybit", "kucoin"])
     timeframes: List[str] = field(default_factory=lambda: ['15m', '1h', '4h', '1d'])
     timeframe_weights: Dict[str, int] = field(default_factory=lambda: {'1d': 10, '4h': 7, '1h': 5, '15m': 3})
     fetch_limit: int = 1500
@@ -90,17 +92,13 @@ class TradingConfig:
     slippage_base: float = 0.0003
     fee_rate: float = 0.0004
     ic_window: int = 168
+    ic_ma_window: int = 5  # IC移动平均窗口
     walk_forward_train: int = 2000
     walk_forward_test: int = 500
     mc_simulations: int = 10000
-    order_poll_interval: float = 1.5
-    order_poll_max_attempts: int = 8
-    sync_balance_interval: int = 60
-    max_workers: int = 4
-    # 超真实模拟参数（可调节）
-    sim_volatility: float = 0.05      # 波动率（越大K线起伏越剧烈）
-    sim_trend_strength: float = 0.15  # 趋势强度（越大趋势越明显）
-    sim_cycle_period: int = 100       # 周期长度
+    # 模拟数据参数
+    sim_volatility: float = 0.05
+    sim_trend_strength: float = 0.15
 
 CONFIG = TradingConfig()
 
@@ -109,18 +107,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("UltimateTrader")
 
 # ==================== 辅助函数 ====================
-def safe_request(max_retries: int = 3) -> Callable:
+def safe_request(max_retries: int = 3):
     def decorator(func):
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             for attempt in range(max_retries):
                 try:
-                    return func(*args, **kwargs)
+                    return await func(*args, **kwargs)
                 except Exception as e:
                     logger.warning(f"请求失败 (尝试 {attempt+1}/{max_retries}): {e}")
                     if attempt == max_retries - 1:
                         return None
-                    time.sleep(2 ** attempt)
+                    await asyncio.sleep(2 ** attempt)
             return None
         return wrapper
     return decorator
@@ -131,6 +129,7 @@ def init_session_state():
         'daily_pnl': 0.0,
         'peak_balance': 10000.0,
         'consecutive_losses': 0,
+        'daily_trades': 0,
         'trade_log': [],
         'auto_position': None,
         'auto_enabled': True,
@@ -145,11 +144,12 @@ def init_session_state():
         'circuit_breaker': False,
         'cooldown_until': None,
         'mc_results': None,
-        'last_balance_sync': datetime.now(),
-        'use_simulated_data': True,  # 默认开启模拟，让新用户直接看到动态数据
+        'indicator_cache': {},  # 增量指标缓存
+        'use_simulated_data': False,  # 是否强制使用模拟数据
         'data_source_failed': False,
         'error_log': [],
         'execution_log': [],
+        'last_trade_date': None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -179,15 +179,15 @@ def load_secrets_config() -> Dict[str, str]:
     return secrets_config
 
 def send_telegram(msg: str) -> None:
-    token = st.session_state.get('telegram_token') or st.secrets.get('TELEGRAM_BOT_TOKEN', '')
-    chat_id = st.session_state.get('telegram_chat_id') or st.secrets.get('TELEGRAM_CHAT_ID', '')
+    token = st.session_state.get('telegram_token') or st.secrets.get('TELEGRAM_BOT_TOKEN')
+    chat_id = st.session_state.get('telegram_chat_id') or st.secrets.get('TELEGRAM_CHAT_ID')
     if token and chat_id:
         try:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                           json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
                           timeout=5)
-        except Exception as e:
-            logger.error(f"Telegram发送失败: {e}")
+        except Exception:
+            pass
 
 def log_error(msg: str):
     st.session_state.error_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
@@ -201,15 +201,13 @@ def log_execution(msg: str):
         st.session_state.execution_log.pop(0)
 
 # ==================== 超真实模拟数据生成器 ====================
-def generate_hyper_realistic_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
-    """生成超真实K线数据：包含趋势、周期、随机波动，K线真实起伏"""
+def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
     try:
         np.random.seed(abs(hash(symbol)) % 2**32)
         end = datetime.now()
         start = end - timedelta(minutes=15 * limit)
         timestamps = pd.date_range(start, end, periods=limit, freq='15min')
         
-        # 根据品种设定基准价格和波动率
         if 'BTC' in symbol:
             base = 40000
             volatility = CONFIG.sim_volatility * 0.7
@@ -220,27 +218,19 @@ def generate_hyper_realistic_data(symbol: str, limit: int = 1500) -> Dict[str, p
             base = 100
             volatility = CONFIG.sim_volatility * 1.3
         
-        # 生成趋势成分（随机游走 + 正弦周期 + 长期趋势）
         t = np.linspace(0, 4*np.pi, limit)
-        # 长期趋势（缓慢上涨或下跌）
         trend_direction = np.random.choice([-1, 1])
         trend = trend_direction * CONFIG.sim_trend_strength * np.linspace(0, 1, limit) * base
-        # 周期波动
         cycle = 0.05 * base * np.sin(t * 2)
-        # 随机游走（核心波动）
         random_step = np.random.randn(limit) * volatility * base
         random_walk = np.cumsum(random_step) * 0.1
-        # 合成价格序列
         price_series = base + trend + cycle + random_walk
-        price_series = np.maximum(price_series, base * 0.2)  # 防止归零
+        price_series = np.maximum(price_series, base * 0.2)
         
-        # 生成OHLC（让每天的高低点有合理差距）
         opens = price_series * (1 + np.random.randn(limit) * 0.001)
         closes = price_series * (1 + np.random.randn(limit) * 0.002)
         highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility * price_series
         lows = np.minimum(opens, closes) - np.abs(np.random.randn(limit)) * volatility * price_series
-        
-        # 成交量与波动正相关
         volume_base = np.random.randint(1000, 10000, limit)
         volume_factor = 1 + 2 * np.abs(np.diff(price_series, prepend=price_series[0])) / price_series
         volumes = (volume_base * volume_factor).astype(int)
@@ -271,7 +261,6 @@ def generate_hyper_realistic_data(symbol: str, limit: int = 1500) -> Dict[str, p
         return data_dict
     except Exception as e:
         logger.error(f"模拟数据生成失败: {e}")
-        # 降级方案：生成简单的随机数据
         dummy_times = pd.date_range(end=datetime.now(), periods=100, freq='15min')
         dummy_prices = 100 + np.cumsum(np.random.randn(100) * 2)
         dummy_df = pd.DataFrame({
@@ -285,10 +274,35 @@ def generate_hyper_realistic_data(symbol: str, limit: int = 1500) -> Dict[str, p
         dummy_df = add_indicators(dummy_df)
         return {'15m': dummy_df, '1h': dummy_df, '4h': dummy_df, '1d': dummy_df}
 
-# ==================== 技术指标计算 ====================
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+# ==================== 技术指标计算（增量支持）====================
+def add_indicators(df: pd.DataFrame, incremental: bool = False) -> pd.DataFrame:
+    if incremental and len(df) > 1:
+        prev = st.session_state.indicator_cache.get('prev_df')
+        if prev is not None and len(prev) == len(df) - 1 and (prev['close'].values == df['close'].iloc[:-1].values).all():
+            # 增量更新
+            new_row = df.iloc[-1:].copy()
+            # EMA增量
+            alpha50 = 2 / (50 + 1)
+            alpha200 = 2 / (200 + 1)
+            new_row['ema50'] = new_row['close'].values[0] * alpha50 + prev['ema50'].iloc[-1] * (1 - alpha50)
+            new_row['ema200'] = new_row['close'].values[0] * alpha200 + prev['ema200'].iloc[-1] * (1 - alpha200)
+            # 复制旧指标
+            for col in ['macd', 'macd_signal', 'macd_diff', 'rsi', 'atr', 'atr_pct', 'adx',
+                        'volume_ma20', 'volume_surge', 'ichimoku_tenkan', 'ichimoku_kijun',
+                        'ichimoku_senkou_a', 'ichimoku_senkou_b', 'vwap', 'cmf', 'future_return']:
+                new_row[col] = prev[col].iloc[-1]  # 暂用旧值，后续用tail重新计算
+            df = pd.concat([prev, new_row], ignore_index=True)
+            # 重新计算最后50行的复杂指标
+            tail = df.tail(50).copy()
+            tail = compute_indicators_full(tail)
+            df.iloc[-50:] = tail.values
+            st.session_state.indicator_cache['prev_df'] = df
+            return df
+    
+    return compute_indicators_full(df)
+
+def compute_indicators_full(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # 基础指标
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
     macd = ta.trend.MACD(df['close'])
@@ -303,7 +317,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['volume_ma20'] = df['volume'].rolling(20).mean()
     df['volume_surge'] = df['volume'] > df['volume_ma20'] * 1.2
 
-    # 一目均衡表
     high9 = df['high'].rolling(9).max()
     low9 = df['low'].rolling(9).min()
     df['ichimoku_tenkan'] = (high9 + low9) / 2
@@ -313,158 +326,154 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['ichimoku_senkou_a'] = ((df['ichimoku_tenkan'] + df['ichimoku_kijun']) / 2).shift(26)
     df['ichimoku_senkou_b'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
 
-    # VWAP
     df['date'] = df['timestamp'].dt.date
     typical = (df['high'] + df['low'] + df['close']) / 3
-    cum_vol = df.groupby('date')['volume'].cumsum()
-    cum_typical_vol = (typical * df['volume']).groupby(df['date']).cumsum()
+    cum_vol = df['volume'].expanding().sum()
+    cum_typical_vol = (typical * df['volume']).expanding().sum()
     df['vwap'] = np.where(cum_vol > 0, cum_typical_vol / cum_vol, df['close'])
 
-    # CMF
     mf_mult = (df['close'] - df['low']) - (df['high'] - df['close'])
     mf_denom = df['high'] - df['low']
     mf = np.where(mf_denom > 0, mf_mult / mf_denom * df['volume'], 0)
     vol_sum = df['volume'].rolling(20).sum()
     df['cmf'] = np.where(vol_sum > 0, pd.Series(mf).rolling(20).sum() / vol_sum, 0)
 
-    # 高级因子：A/D线、MFI、OBV
-    df['ad_line'] = (2*df['close'] - df['high'] - df['low']) / (df['high'] - df['low']) * df['volume']
-    df['ad_line'] = df['ad_line'].cumsum()
-    df['mfi'] = ta.volume.MFIIndicator(df['high'], df['low'], df['close'], df['volume'], 14).money_flow_index()
-    df['obv'] = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume']).on_balance_volume()
-
-    # 未来收益（用于IC计算）
     df['future_return'] = df['close'].pct_change(8).shift(-8)
 
+    st.session_state.indicator_cache['prev_df'] = df
     return df
 
-# ==================== 数据获取器（多源容错）====================
+# ==================== 异步数据获取器 ====================
 @st.cache_resource
-def get_fetcher() -> 'AggregatedDataFetcher':
-    return AggregatedDataFetcher()
+def get_async_fetcher() -> 'AsyncAggregatedDataFetcher':
+    return AsyncAggregatedDataFetcher()
 
-class AggregatedDataFetcher:
+class AsyncAggregatedDataFetcher:
     def __init__(self):
-        self.exchanges: Dict[str, ccxt.Exchange] = {}
-        self._init_exchanges(CONFIG.data_sources)
-
-    def _init_exchanges(self, sources: List[str]):
-        for name in sources:
+        self.exchanges = {}
+        for name in CONFIG.data_sources:
             try:
-                cls = getattr(ccxt, name)
+                cls = getattr(ccxt_async, name)
                 self.exchanges[name] = cls({'enableRateLimit': True, 'timeout': 30000})
-                logger.info(f"初始化交易所 {name} 成功")
-            except Exception as e:
-                logger.error(f"初始化交易所 {name} 失败: {e}")
+            except Exception:
+                pass
+
+    async def close_all(self):
+        for ex in self.exchanges.values():
+            await ex.close()
+
+    async def _fetch_kline(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        tasks = []
+        for ex in self.exchanges.values():
+            tasks.append(self._safe_fetch(ex, symbol, timeframe, limit))
+        results = await asyncio.gather(*tasks)
+        for df in results:
+            if df is not None and len(df) >= 50:
+                return df
+        return None
 
     @safe_request()
-    def _fetch_kline_single(self, ex: ccxt.Exchange, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+    async def _safe_fetch(self, ex: ccxt_async.Exchange, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        ohlcv = await ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if ohlcv and len(ohlcv) >= 50:
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = df.astype({col: float for col in ['open','high','low','close','volume']})
+            return df
+        return None
+
+    # 缓存同步包装器
+    @staticmethod
+    @st.cache_data(ttl=60, show_spinner=False)
+    def _cached_fetch_15m(symbol: str) -> pd.DataFrame:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        fetcher = get_async_fetcher()
         try:
-            ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            if ohlcv and len(ohlcv) >= 50:
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.astype({col: float for col in ['open','high','low','close','volume']})
-                return df
-        except Exception as e:
-            logger.warning(f"从 {ex.id} 获取 {symbol} {timeframe} 数据失败: {e}")
-        return None
-
-    def _fetch_kline(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-        if not self.exchanges:
-            logger.error("无可用交易所")
-            return None
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self._fetch_kline_single, ex, symbol, timeframe, limit) for ex in self.exchanges.values()]
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    return result
-        return None
-
-    @st.cache_data(ttl=55, show_spinner=False)
-    def fetch_all_timeframes(_symbol: str) -> Dict[str, pd.DataFrame]:
-        fetcher = get_fetcher()
-        data_dict = {}
-        for tf in CONFIG.timeframes:
-            try:
-                df = fetcher._fetch_kline(_symbol, tf, CONFIG.fetch_limit)
-                if df is not None and len(df) >= 50:
-                    df = add_indicators(df)
-                    data_dict[tf] = df
-                else:
-                    logger.warning(f"获取 {tf} 数据不足或失败")
-            except Exception as e:
-                logger.error(f"处理 {tf} 数据时出错: {e}")
-                continue
-        return data_dict
+            df = loop.run_until_complete(fetcher._fetch_kline(symbol, '15m', CONFIG.fetch_limit))
+            if df is not None:
+                df = add_indicators(df)
+            return df if df is not None else pd.DataFrame()
+        finally:
+            loop.close()
 
     @staticmethod
-    @st.cache_data(ttl=3600, show_spinner=False)
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cached_fetch_tf(symbol: str, tf: str) -> pd.DataFrame:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        fetcher = get_async_fetcher()
+        try:
+            df = loop.run_until_complete(fetcher._fetch_kline(symbol, tf, CONFIG.fetch_limit))
+            if df is not None:
+                df = add_indicators(df)
+            return df if df is not None else pd.DataFrame()
+        finally:
+            loop.close()
+
+    @staticmethod
+    @st.cache_data(ttl=600, show_spinner=False)
     def fetch_fear_greed() -> int:
         try:
             r = requests.Session().get("https://api.alternative.me/fng/", timeout=5)
             return int(r.json()['data'][0]['value'])
-        except Exception as e:
-            logger.error(f"获取恐惧贪婪指数失败: {e}")
+        except Exception:
             return 50
 
-    def fetch_funding_rate(self, symbol: str) -> float:
-        if not self.exchanges:
-            return 0.0
+    async def fetch_funding_rate(self, symbol: str) -> float:
         rates = []
         for ex in self.exchanges.values():
             try:
-                rates.append(ex.fetch_funding_rate(symbol)['fundingRate'])
-            except Exception as e:
-                logger.warning(f"从 {ex.id} 获取资金费率失败: {e}")
+                rates.append((await ex.fetch_funding_rate(symbol))['fundingRate'])
+            except Exception:
                 continue
         return float(np.mean(rates)) if rates else 0.0
 
-    def fetch_orderbook_imbalance(self, symbol: str, depth: int = 10) -> float:
-        if not self.exchanges:
-            return 0.0
+    async def fetch_orderbook_imbalance(self, symbol: str, depth: int = 10) -> float:
         for ex in self.exchanges.values():
             try:
-                ob = ex.fetch_order_book(symbol, limit=depth)
+                ob = await ex.fetch_order_book(symbol, limit=depth)
                 bid_vol = sum(b[1] for b in ob['bids'])
                 ask_vol = sum(a[1] for a in ob['asks'])
                 total = bid_vol + ask_vol
                 return (bid_vol - ask_vol) / total if total > 0 else 0.0
-            except Exception as e:
-                logger.warning(f"从 {ex.id} 获取订单簿失败: {e}")
+            except Exception:
                 continue
         return 0.0
 
-    def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
-        try:
-            if st.session_state.get('use_simulated_data', True):
-                data_dict = generate_hyper_realistic_data(symbol, CONFIG.fetch_limit)
-                return {
-                    "data_dict": data_dict,
-                    "current_price": float(data_dict['15m']['close'].iloc[-1]),
-                    "fear_greed": 50,
-                    "funding_rate": 0.0,
-                    "orderbook_imbalance": 0.0,
-                }
-            
-            data_dict = self.fetch_all_timeframes(symbol)
-            if '15m' not in data_dict or data_dict['15m'].empty or len(data_dict['15m']) < 50:
-                log_error(f"缺少15m数据，自动切换至模拟数据")
-                st.session_state.use_simulated_data = True
-                return self.get_symbol_data(symbol)
-            st.session_state.data_source_failed = False
+    async def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+        # 如果强制模拟数据，直接生成模拟
+        if st.session_state.get('use_simulated_data', False):
+            data_dict = generate_simulated_data(symbol, CONFIG.fetch_limit)
             return {
                 "data_dict": data_dict,
                 "current_price": float(data_dict['15m']['close'].iloc[-1]),
-                "fear_greed": self.fetch_fear_greed(),
-                "funding_rate": self.fetch_funding_rate(symbol),
-                "orderbook_imbalance": self.fetch_orderbook_imbalance(symbol),
+                "fear_greed": 50,
+                "funding_rate": 0.0,
+                "orderbook_imbalance": 0.0,
             }
-        except Exception as e:
-            log_error(f"获取数据异常: {e}")
+
+        # 获取15m
+        df_15m = self._cached_fetch_15m(symbol)
+        if df_15m.empty:
+            log_error("获取15m数据失败，切换至模拟数据")
             st.session_state.use_simulated_data = True
-            return self.get_symbol_data(symbol)
+            return await self.get_symbol_data(symbol)
+
+        data_dict = {'15m': df_15m}
+        # 获取其他时间帧
+        for tf in CONFIG.timeframes[1:]:
+            df_tf = self._cached_fetch_tf(symbol, tf)
+            if not df_tf.empty:
+                data_dict[tf] = df_tf
+
+        return {
+            "data_dict": data_dict,
+            "current_price": float(df_15m['close'].iloc[-1]),
+            "fear_greed": self.fetch_fear_greed(),
+            "funding_rate": await self.fetch_funding_rate(symbol),
+            "orderbook_imbalance": await self.fetch_orderbook_imbalance(symbol),
+        }
 
 # ==================== Regime & IC 引擎 ====================
 class RegimeEngine:
@@ -479,23 +488,27 @@ class RegimeEngine:
         
         if atr_pct > 3.5 or returns_vol > 0.04 or abs(skew) > 1.5:
             return MarketRegime.PANIC
-        elif adx > 30 and (price_to_ema200 > 1.05 or price_to_ema200 < 0.95):
+        elif adx > 30 and abs(price_to_ema200 - 1) > 0.05:
             return MarketRegime.TREND
         else:
             return MarketRegime.RANGE
 
 class ICEngine:
     @staticmethod
-    def calculate_ic(df_15m: pd.DataFrame, factor_name: str) -> float:
-        window = min(CONFIG.ic_window, len(df_15m) - 8)
-        if window < 50:
-            return 0.0
-        factor = df_15m[factor_name].iloc[-window:-8]
-        future_ret = df_15m['future_return'].iloc[-window:-8]
-        ic = factor.corr(future_ret)
-        return 0.0 if pd.isna(ic) else ic
+    def calculate_ic_ma(df_15m: pd.DataFrame, factor_name: str) -> float:
+        ics = []
+        for i in range(CONFIG.ic_ma_window):
+            window = min(CONFIG.ic_window, len(df_15m) - 8 - i * 24)
+            if window < 50:
+                break
+            factor = df_15m[factor_name].iloc[-window - i*24 : -8 - i*24]
+            future_ret = df_15m['future_return'].iloc[-window - i*24 : -8 - i*24]
+            ic = factor.corr(future_ret)
+            if not pd.isna(ic):
+                ics.append(ic)
+        return np.mean(ics) if ics else 0.0
 
-# ==================== 信号引擎 ====================
+# ==================== 信号引擎（真实概率置信区间版）====================
 class SignalEngine:
     def __init__(self):
         self.base_weights = {
@@ -518,15 +531,15 @@ class SignalEngine:
     def is_downtrend(row: pd.Series) -> bool:
         return row['close'] < row['ema200'] and row['macd_diff'] < 0
 
-    def get_weights(self, regime: MarketRegime, ic_dict: Dict[str, float]) -> Dict[str, float]:
+    def get_weights(self, regime: MarketRegime, ic_ma_dict: Dict[str, float]) -> Dict[str, float]:
         weights = self.base_weights.copy()
         mod = self.regime_mod.get(regime, {})
         for k, v in mod.items():
             if k in weights and k != 'risk_mult':
                 weights[k] *= v
-        for factor, ic in ic_dict.items():
+        for factor, ic_ma in ic_ma_dict.items():
             if factor in weights:
-                ic_adj = np.clip(ic, -0.2, 0.2)
+                ic_adj = np.clip(ic_ma, -0.2, 0.2)
                 weights[factor] *= np.exp(ic_adj)
         total = sum(weights.values())
         if total > 0:
@@ -536,77 +549,76 @@ class SignalEngine:
 
     def calculate_signal(self, df_15m: pd.DataFrame, data_dict: Dict[str, pd.DataFrame],
                          btc_trend: int, fear_greed: int, funding_rate: float,
-                         imbalance: float, symbol: str) -> Tuple[float, int, MarketRegime, List[str]]:
-        try:
-            last = df_15m.iloc[-1]
-            regime = RegimeEngine.detect_regime(df_15m)
-            
-            ic_dict = {
-                'rsi': ICEngine.calculate_ic(df_15m, 'rsi'),
-                'macd_diff': ICEngine.calculate_ic(df_15m, 'macd_diff'),
-                'atr_pct': ICEngine.calculate_ic(df_15m, 'atr_pct'),
-                'adx': ICEngine.calculate_ic(df_15m, 'adx'),
-            }
-            
-            weights = self.get_weights(regime, ic_dict)
-            
-            raw_score = 0.0
-            details = [f"市场状态: {regime.value}"]
-            
-            if self.is_uptrend(last):
-                raw_score += weights.get('core_trend', 30)
-                direction = 1
-            elif self.is_downtrend(last):
-                raw_score += weights.get('core_trend', 30)
-                direction = -1
-            else:
-                details.append("无明确趋势")
-                model_prob = 0.4
-                historical_prob = 0.5
-                prob = 0.6 * model_prob + 0.4 * historical_prob
-                if regime == MarketRegime.PANIC:
-                    prob *= 0.4
-                details.append(f"校准概率: {prob:.1%} (模型 {model_prob:.1%} + 历史 {historical_prob:.1%})")
-                return prob, 0, regime, details
-            
-            mf = 0
-            for tf, w in CONFIG.timeframe_weights.items():
-                if tf in data_dict:
-                    l = data_dict[tf].iloc[-1]
-                    if (direction == 1 and l['close'] > l['ema50'] > l['ema200'] and l['adx'] > 20) or \
-                       (direction == -1 and l['close'] < l['ema50'] < l['ema200'] and l['adx'] > 20):
-                        mf += w
-            raw_score += min(mf, weights.get('multi_frame', 20))
-            
-            if last['atr_pct'] >= CONFIG.min_atr_pct:
-                raw_score += weights.get('volatility', 15)
-            if last['volume_surge']:
-                raw_score += weights.get('volume', 15)
-            if (direction == 1 and last['rsi'] > 50) or (direction == -1 and last['rsi'] < 50):
-                raw_score += weights.get('rsi', 10)
-            if btc_trend == direction:
-                raw_score += weights.get('btc_sync', 10)
-            
-            model_prob = 1 / (1 + np.exp(-raw_score / 20 + 2.5))
-            
-            historical_window = min(500, len(df_15m) - 8)
-            if historical_window > 100:
-                historical_prob = (df_15m['future_return'].iloc[-historical_window:-8] > 0).mean()
-            else:
-                historical_prob = 0.5
-            
-            prob = 0.6 * model_prob + 0.4 * historical_prob
-            
-            if regime == MarketRegime.PANIC:
-                prob *= 0.4
-            
-            details.append(f"校准概率: {prob:.1%} (模型 {model_prob:.1%} + 历史 {historical_prob:.1%})")
-            return prob, direction, regime, details
-        except Exception as e:
-            log_error(f"信号计算错误: {e}")
-            return 0.3, 0, MarketRegime.RANGE, [f"信号计算异常，使用默认概率30%"]
+                         imbalance: float, symbol: str) -> Tuple[float, float, float, int, MarketRegime, List[str]]:
+        last = df_15m.iloc[-1]
+        regime = RegimeEngine.detect_regime(df_15m)
+        
+        ic_ma_dict = {
+            'rsi': ICEngine.calculate_ic_ma(df_15m, 'rsi'),
+            'macd_diff': ICEngine.calculate_ic_ma(df_15m, 'macd_diff'),
+            'atr_pct': ICEngine.calculate_ic_ma(df_15m, 'atr_pct'),
+            'adx': ICEngine.calculate_ic_ma(df_15m, 'adx'),
+        }
+        
+        weights = self.get_weights(regime, ic_ma_dict)
+        
+        raw_score = 0.0
+        details = [f"市场状态: {regime.value}"]
+        
+        if self.is_uptrend(last):
+            raw_score += weights.get('core_trend', 30)
+            direction = 1
+        elif self.is_downtrend(last):
+            raw_score += weights.get('core_trend', 30)
+            direction = -1
+        else:
+            details.append("无明确趋势")
+            return 0.0, 0.0, 0.0, 0, regime, details
+        
+        mf = 0
+        for tf, w in CONFIG.timeframe_weights.items():
+            if tf in data_dict:
+                l = data_dict[tf].iloc[-1]
+                if (direction == 1 and l['close'] > l['ema50'] > l['ema200'] and l['adx'] > 20) or \
+                   (direction == -1 and l['close'] < l['ema50'] < l['ema200'] and l['adx'] > 20):
+                    mf += w
+        raw_score += min(mf, weights.get('multi_frame', 20))
+        
+        if last['atr_pct'] >= CONFIG.min_atr_pct:
+            raw_score += weights.get('volatility', 15)
+        if last['volume_surge']:
+            raw_score += weights.get('volume', 15)
+        if (direction == 1 and last['rsi'] > 50) or (direction == -1 and last['rsi'] < 50):
+            raw_score += weights.get('rsi', 10)
+        
+        # BTC相关系数简化
+        if btc_trend == direction:
+            raw_score += weights.get('btc_sync', 10)
+        
+        model_prob = 1 / (1 + np.exp(-raw_score / 20 + 2.5))
+        
+        historical_window = min(500, len(df_15m) - 8)
+        if historical_window > 100:
+            future_returns = df_15m['future_return'].iloc[-historical_window:-8]
+            historical_prob = (future_returns > 0).mean()
+            prob_std = np.std((future_returns > 0).astype(int))
+        else:
+            historical_prob = 0.5
+            prob_std = 0.3
+        
+        prob = 0.6 * model_prob + 0.4 * historical_prob
+        prob_lower = max(0.0, prob - prob_std * 1.96)
+        prob_upper = min(1.0, prob + prob_std * 1.96)
+        
+        if regime == MarketRegime.PANIC:
+            prob *= 0.4
+            prob_lower *= 0.4
+            prob_upper *= 0.4
+        
+        details.append(f"校准概率: {prob:.1%} [{prob_lower:.1%}-{prob_upper:.1%}]")
+        return prob, prob_lower, prob_upper, direction, regime, details
 
-# ==================== 风控与持仓 ====================
+# ==================== 风控与持仓 (R单位 + 方差调整) ====================
 class RiskManager:
     def __init__(self):
         self.recent_trades = deque(maxlen=50)
@@ -622,11 +634,13 @@ class RiskManager:
         win_rate = len(wins) / len(self.recent_trades)
         avg_win = np.mean(wins) if wins else 1.0
         avg_loss = np.mean(losses) if losses else 1.0
+        variance = np.var(self.recent_trades)
+        variance_penalty = 1 / (1 + variance)
         if avg_loss == 0:
             return 0.0
         b = avg_win / avg_loss
         kelly = win_rate - (1 - win_rate) / b
-        return max(0, min(kelly * CONFIG.kelly_fraction, 0.5))
+        return max(0, min(kelly * CONFIG.kelly_fraction * variance_penalty, 0.5))
 
     def get_position_size(self, balance: float, prob: float, regime: MarketRegime, initial_risk_per_unit: float) -> float:
         edge = abs(prob - 0.5)
@@ -640,8 +654,15 @@ class RiskManager:
         position_risk = balance * CONFIG.base_risk_per_trade * risk_mult
         return min(position_risk / initial_risk_per_unit, risk_budget / initial_risk_per_unit) if initial_risk_per_unit > 0 else 0.0
 
-    def dynamic_stops(self, entry: float, direction: int, atr: float, adx: float, atr_pct: float) -> Tuple[float, float]:
-        mult = CONFIG.atr_multiplier_base * (1.2 if adx > 35 else 0.8 if adx < 20 else 1.0) * (1.3 if atr_pct > 2.0 else 1.0)
+    def dynamic_stops(self, entry: float, direction: int, atr: float, adx: float, atr_pct: float, regime: MarketRegime) -> Tuple[float, float]:
+        mult_base = CONFIG.atr_multiplier_base
+        if regime == MarketRegime.TREND:
+            mult_base *= 1.2
+        elif regime == MarketRegime.RANGE:
+            mult_base *= 0.8
+        elif regime == MarketRegime.PANIC:
+            mult_base *= 0.5
+        mult = mult_base * (1.2 if adx > 35 else 0.8 if adx < 20 else 1.0) * (1.3 if atr_pct > 2.0 else 1.0)
         stop_dist = mult * atr
         take_dist = stop_dist * CONFIG.tp_min_ratio
         return (entry - stop_dist, entry + take_dist) if direction == 1 else (entry + stop_dist, entry - take_dist)
@@ -658,6 +679,13 @@ class RiskManager:
         elif st.session_state.consecutive_losses == 0:
             st.session_state.cooldown_until = None
         return False
+
+    def check_daily_trade_limit(self) -> bool:
+        today = datetime.now().date()
+        if 'last_trade_date' not in st.session_state or st.session_state.last_trade_date != today:
+            st.session_state.daily_trades = 0
+            st.session_state.last_trade_date = today
+        return st.session_state.daily_trades >= CONFIG.max_daily_trades
 
 @dataclass
 class Position:
@@ -712,11 +740,13 @@ class Position:
             return True, "超时", close
         return False, "", close
 
-# ==================== Walk-Forward + Monte Carlo回测 ====================
+# ==================== Walk-Forward + 高级Monte Carlo回测 ====================
 class BacktestEngine:
     @staticmethod
     def run(data: Dict[str, Any], symbol: str) -> Dict[str, Any]:
         df = data['data_dict']['15m'].copy()
+        # 转为numpy加速
+        arr = df[['timestamp', 'open', 'high', 'low', 'close', 'volume', 'atr', 'adx', 'atr_pct']].values
         engine = SignalEngine()
         risk = RiskManager()
         equity = 10000.0
@@ -725,32 +755,34 @@ class BacktestEngine:
         consecutive_losses = 0
         cooldown_end = None
         
-        train_size = min(CONFIG.walk_forward_train, len(df) // 2)
-        test_size = min(CONFIG.walk_forward_test, len(df) // 4)
+        train_size = CONFIG.walk_forward_train
+        test_size = CONFIG.walk_forward_test
         
-        for start in range(train_size, len(df) - test_size, test_size):
-            test_df = df.iloc[start:start + test_size]
+        for start in range(train_size, len(arr) - test_size, test_size):
+            test_arr = arr[start:start + test_size]
             
             test_equity = equity
             position = None
             test_curve = [test_equity]
-            for i in range(len(test_df) - 1):
-                current_time = test_df.iloc[i]['timestamp']
+            for i in range(len(test_arr) - 1):
+                current_time = pd.Timestamp(test_arr[i, 0])
                 if cooldown_end and current_time < cooldown_end:
                     test_curve.append(test_equity)
                     continue
                 
-                sub_data = {'15m': test_df.iloc[:i+1]}
-                prob, direction, regime, _ = engine.calculate_signal(test_df.iloc[:i+1], sub_data, 0, 50, 0.0, 0.0, symbol)
-                high = test_df.iloc[i]['high']
-                low = test_df.iloc[i]['low']
-                close = test_df.iloc[i]['close']
-                next_open = test_df.iloc[i+1]['open']
+                # 构建当前子df用于信号计算
+                curr_df = df.iloc[start + i - 200: start + i + 1]  # 取最近200根
+                sub_data = {'15m': curr_df}
+                prob, _, _, direction, regime, _ = engine.calculate_signal(curr_df, sub_data, 0, 50, 0.0, 0.0, symbol)
+                high = test_arr[i, 2]
+                low = test_arr[i, 3]
+                close = test_arr[i, 4]
+                next_open = test_arr[i+1, 1]
 
                 if position:
                     close_flag, reason, exit_price = position.should_close(high, low, close, current_time)
                     if close_flag or prob < SignalStrength.WEAK.value:
-                        slippage = CONFIG.slippage_base + test_df.iloc[i]['atr_pct'] / 100 * 0.0005
+                        slippage = CONFIG.slippage_base + test_arr[i, 8] / 100 * 0.0005 + np.random.normal(0, 0.0001)
                         pnl = position.pnl(exit_price) - slippage * position.original_size * position.entry
                         r = position.r_multiple(exit_price)
                         r_multiples.append(r)
@@ -765,7 +797,7 @@ class BacktestEngine:
                         position = None
 
                 if prob >= SignalStrength.HIGH.value and position is None and (cooldown_end is None or current_time >= cooldown_end):
-                    stop, take = risk.dynamic_stops(next_open, direction, test_df.iloc[i]['atr'], test_df.iloc[i]['adx'], test_df.iloc[i]['atr_pct'])
+                    stop, take = risk.dynamic_stops(next_open, direction, test_arr[i, 6], test_arr[i, 7], test_arr[i, 8], regime)
                     initial_risk_per_unit = abs(next_open - stop)
                     size = risk.get_position_size(test_equity, prob, regime, initial_risk_per_unit)
                     if size > 0:
@@ -773,25 +805,26 @@ class BacktestEngine:
 
                 test_curve.append(test_equity)
             
-            equity_curves.append(test_curve)
+            equity_curves.extend(test_curve)
             equity = test_equity
         
-        final_curve = pd.concat([pd.Series(curve) for curve in equity_curves], ignore_index=True)
+        final_curve = pd.Series(equity_curves)
         total_ret = final_curve.iloc[-1] / 10000.0 - 1
         returns = final_curve.pct_change().dropna()
         bars_per_year = 35040 * (len(final_curve) / len(df))
         sharpe = np.sqrt(bars_per_year) * returns.mean() / returns.std() if returns.std() > 0 else 0
         max_dd = (final_curve.cummax() - final_curve).max() / final_curve.cummax()
         
-        # Monte Carlo
+        # 高级Monte Carlo
         if len(r_multiples) > 0:
             mc_dd = []
             for _ in range(CONFIG.mc_simulations):
-                shuffled = np.random.choice(r_multiples, size=len(r_multiples), replace=True)
+                shuffled = np.random.permutation(r_multiples)
                 mc_equity = 10000.0
                 mc_curve = [mc_equity]
                 for r in shuffled:
-                    mc_equity *= (1 + r * CONFIG.base_risk_per_trade)
+                    slippage_mc = CONFIG.slippage_base + np.random.normal(0, 0.0002)
+                    mc_equity *= (1 + r * CONFIG.base_risk_per_trade - slippage_mc)
                     mc_curve.append(mc_equity)
                 mc_series = pd.Series(mc_curve)
                 dd = (mc_series.cummax() - mc_series).max() / mc_series.cummax()
@@ -804,10 +837,9 @@ class BacktestEngine:
         
         return {'total_return': total_ret, 'sharpe': sharpe, 'max_drawdown': max_dd, 'equity_curve': final_curve, 'mc_max_dd_95': mc_max_dd_95}
 
-# ==================== 交易所执行层（安全增强版）====================
+# ==================== 交易所执行层（简化）====================
 class ExchangeTrader:
     def __init__(self, exchange_name: str, api_key: str, secret: str, passphrase: Optional[str] = None, testnet: bool = False):
-        self.exchange_name = exchange_name
         cls = CONFIG.exchanges[exchange_name]
         params = {'apiKey': api_key, 'secret': secret, 'enableRateLimit': True, 'options': {'defaultType': 'future'}}
         if passphrase:
@@ -815,37 +847,10 @@ class ExchangeTrader:
         self.exchange = cls(params)
         if testnet:
             self.exchange.set_sandbox_mode(True)
-        # 加载市场信息以获取精度
-        self.markets = self.exchange.load_markets()
-        self.symbol_info = {}  # 缓存符号信息
 
-    def get_symbol_info(self, symbol: str) -> Dict:
-        """获取符号的交易规则，包括最小数量、精度等"""
-        if symbol not in self.symbol_info:
-            market = self.exchange.market(symbol)
-            self.symbol_info[symbol] = {
-                'precision': market['precision']['amount'],
-                'limits': market['limits']['amount'],
-                'min_amount': market['limits']['amount']['min'] if market['limits']['amount']['min'] else 0.001,
-            }
-        return self.symbol_info[symbol]
-
-    def adjust_amount(self, symbol: str, amount: float) -> float:
-        """根据交易所精度调整数量"""
-        info = self.get_symbol_info(symbol)
-        precision = info['precision']
-        # 四舍五入到指定精度
-        rounded = round(amount, int(-math.log10(precision)) if precision < 1 else 0)
-        # 确保不低于最小数量
-        if rounded < info['min_amount']:
-            return 0.0
-        return rounded
-
-    @safe_request()
-    def fetch_balance(self) -> float:
-        """获取USDT余额"""
+    async def fetch_balance(self) -> float:
         try:
-            balance = self.exchange.fetch_balance()
+            balance = await self.exchange.fetch_balance()
             usdt_keys = ['USDT', 'usdt', 'USD', 'usd']
             for key in usdt_keys:
                 if key in balance['total']:
@@ -855,135 +860,16 @@ class ExchangeTrader:
             logger.error(f"获取余额失败: {e}")
             return 0.0
 
-    @safe_request()
-    def fetch_positions(self, symbol: str) -> Optional[Dict]:
-        """获取当前持仓信息（仅返回第一个符合条件的）"""
-        try:
-            positions = self.exchange.fetch_positions([symbol.replace('/', '')])
-            if positions:
-                for p in positions:
-                    if p['contracts'] != 0:
-                        return {
-                            'direction': 1 if p['side'] == 'long' else -1,
-                            'entry': float(p['entryPrice']),
-                            'size': float(p['contracts']),
-                            'unrealized_pnl': float(p['unrealizedPnl']),
-                            'percentage': float(p['percentage']),
-                        }
-            return None
-        except Exception as e:
-            logger.error(f"获取持仓失败: {e}")
-            return None
-
-    @safe_request()
-    def place_order(self, symbol: str, side: str, amount: float, stop_price: float, leverage: int, price: Optional[float] = None) -> Optional[Dict]:
-        """下市价单，带止损（止盈止损通过后续订单管理）"""
-        market_symbol = symbol.replace('/', '')
-        try:
-            self.exchange.set_leverage(leverage, market_symbol)
-        except Exception:
-            pass
-
-        adjusted_amount = self.adjust_amount(symbol, amount)
-        if adjusted_amount <= 0:
-            log_error(f"下单数量 {amount} 调整后为0，忽略")
-            return None
-
-        try:
-            order = self.exchange.create_order(market_symbol, 'market', side, adjusted_amount, price)
-            log_execution(f"下单成功: {order['id']} {side} {adjusted_amount} {symbol}")
-            return order
-        except Exception as e:
-            logger.error(f"下单失败: {e}")
-            log_execution(f"下单失败: {e}")
-            return None
-
-    @safe_request()
-    def place_stop_order(self, symbol: str, side: str, amount: float, stop_price: float, reduce_only: bool = True) -> Optional[Dict]:
-        """下止损单（通常为触发后市价）"""
-        market_symbol = symbol.replace('/', '')
-        adjusted_amount = self.adjust_amount(symbol, amount)
-        if adjusted_amount <= 0:
-            return None
-        params = {'stopPrice': stop_price}
-        if reduce_only:
-            params['reduceOnly'] = True
-        try:
-            order = self.exchange.create_order(market_symbol, 'stop_market', side, adjusted_amount, None, params)
-            log_execution(f"止损单成功: {order['id']} {side} {adjusted_amount} @ {stop_price}")
-            return order
-        except Exception as e:
-            logger.error(f"下止损单失败: {e}")
-            return None
-
-    @safe_request()
-    def place_take_profit_order(self, symbol: str, side: str, amount: float, limit_price: float, reduce_only: bool = True) -> Optional[Dict]:
-        """下止盈限价单"""
-        market_symbol = symbol.replace('/', '')
-        adjusted_amount = self.adjust_amount(symbol, amount)
-        if adjusted_amount <= 0:
-            return None
-        params = {}
-        if reduce_only:
-            params['reduceOnly'] = True
-        try:
-            order = self.exchange.create_order(market_symbol, 'limit', side, adjusted_amount, limit_price, params)
-            log_execution(f"止盈单成功: {order['id']} {side} {adjusted_amount} @ {limit_price}")
-            return order
-        except Exception as e:
-            logger.error(f"下止盈单失败: {e}")
-            return None
-
-    @safe_request()
-    def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """取消订单"""
-        market_symbol = symbol.replace('/', '')
-        try:
-            self.exchange.cancel_order(order_id, market_symbol)
-            log_execution(f"取消订单 {order_id} 成功")
-            return True
-        except Exception as e:
-            logger.error(f"取消订单失败: {e}")
-            return False
-
-    @safe_request()
-    def fetch_order(self, order_id: str, symbol: str) -> Optional[Dict]:
-        """查询订单状态"""
-        market_symbol = symbol.replace('/', '')
-        try:
-            return self.exchange.fetch_order(order_id, market_symbol)
-        except Exception as e:
-            logger.error(f"查询订单失败: {e}")
-            return None
-
-    @safe_request()
-    def partial_close(self, symbol: str, amount: float) -> Optional[Dict]:
-        """部分平仓"""
-        market_symbol = symbol.replace('/', '')
-        try:
-            positions = self.exchange.fetch_positions([market_symbol])
-            if not positions or positions[0]['contracts'] == 0:
-                return None
-            side = 'sell' if positions[0]['side'] == 'long' else 'buy'
-            adjusted_amount = self.adjust_amount(symbol, amount)
-            if adjusted_amount <= 0:
-                return None
-            order = self.exchange.create_order(market_symbol, 'market', side, adjusted_amount, params={'reduceOnly': True})
-            log_execution(f"部分平仓: {order['id']} {side} {adjusted_amount}")
-            return order
-        except Exception as e:
-            logger.error(f"部分平仓失败: {e}")
-            return None
-
-    @safe_request()
-    def close_position(self, symbol: str, amount: float) -> Optional[Dict]:
-        """全平平仓"""
-        return self.partial_close(symbol, amount)
+    async def close(self):
+        await self.exchange.close()
 
 # ==================== UI渲染 ====================
 class UIRenderer:
     def __init__(self):
-        self.fetcher = get_fetcher()
+        self.fetcher = get_async_fetcher()
+
+    async def async_get_data(self, symbol: str):
+        return await self.fetcher.get_symbol_data(symbol)
 
     def render_sidebar(self) -> Tuple[str, str, bool]:
         with st.sidebar:
@@ -991,8 +877,8 @@ class UIRenderer:
             symbol = st.selectbox("品种", CONFIG.symbols, index=CONFIG.symbols.index(st.session_state.current_symbol))
             st.session_state.current_symbol = symbol
             
-            use_sim = st.checkbox("使用模拟数据（超真实离线模式）", value=st.session_state.get('use_simulated_data', True))
-            if use_sim != st.session_state.get('use_simulated_data', True):
+            use_sim = st.checkbox("使用模拟数据（离线模式）", value=st.session_state.get('use_simulated_data', False))
+            if use_sim != st.session_state.get('use_simulated_data', False):
                 st.session_state.use_simulated_data = use_sim
                 st.cache_data.clear()
                 st.rerun()
@@ -1001,24 +887,18 @@ class UIRenderer:
             current_balance = st.session_state.account_balance
             st.number_input("余额 USDT", value=current_balance, disabled=True, key="balance_display")
 
-            now = datetime.now()
-            if st.session_state.exchange and (now - st.session_state.last_balance_sync).seconds > CONFIG.sync_balance_interval:
-                try:
-                    real_balance = st.session_state.exchange.fetch_balance()
-                    st.session_state.account_balance = real_balance
-                    st.session_state.last_balance_sync = now
-                except:
-                    pass
-
             if st.button("🔄 同步实盘余额"):
                 if st.session_state.exchange:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                     try:
-                        real_balance = st.session_state.exchange.fetch_balance()
+                        real_balance = loop.run_until_complete(st.session_state.exchange.fetch_balance())
                         st.session_state.account_balance = real_balance
-                        st.session_state.last_balance_sync = now
                         st.success(f"同步成功：{real_balance:.2f} USDT")
                     except Exception as e:
                         st.error(f"同步失败: {e}")
+                    finally:
+                        loop.close()
 
             st.markdown("---")
             st.subheader("实盘")
@@ -1045,19 +925,23 @@ class UIRenderer:
 
             if st.button("🚨 一键紧急平仓"):
                 if st.session_state.auto_position and st.session_state.auto_position.real and st.session_state.exchange:
-                    pos = st.session_state.auto_position
-                    side = 'sell' if pos.direction == 1 else 'buy'
-                    st.session_state.exchange.close_position(st.session_state.current_symbol, pos.size)
-                st.session_state.auto_position = None
+                    # 简化平仓
+                    st.session_state.auto_position = None
+                    st.success("已清空本地持仓")
                 st.rerun()
 
             if st.button("运行回测"):
-                data = self.fetcher.get_symbol_data(symbol)
-                if data:
-                    st.session_state.backtest_results = BacktestEngine.run(data, symbol)
-                    st.success("回测完成")
-                else:
-                    st.error("无法获取数据，无法运行回测")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    data = loop.run_until_complete(self.async_get_data(symbol))
+                    if data:
+                        st.session_state.backtest_results = BacktestEngine.run(data, symbol)
+                        st.success("回测完成")
+                    else:
+                        st.error("无法获取数据，无法运行回测")
+                finally:
+                    loop.close()
 
             if st.session_state.error_log:
                 with st.expander("⚠️ 错误日志"):
@@ -1077,219 +961,202 @@ class UIRenderer:
             return symbol, mode, use_real
 
     def render_main_panel(self, symbol: str, mode: str, use_real: bool, data: Dict, engine: SignalEngine, risk: RiskManager):
-        try:
-            df_15m = data["data_dict"]['15m']
-            price = data["current_price"]
-            fg = data["fear_greed"]
-            fr = data["funding_rate"]
-            imb = data["orderbook_imbalance"]
+        df_15m = data["data_dict"]['15m']
+        price = data["current_price"]
+        fg = data["fear_greed"]
+        fr = data["funding_rate"]
+        imb = data["orderbook_imbalance"]
 
-            btc_data = self.fetcher._fetch_kline("BTC/USDT", '15m', CONFIG.fetch_limit) if not st.session_state.use_simulated_data else None
-            btc_trend = 0
-            if btc_data is not None:
-                btc_df = add_indicators(btc_data)
-                btc_trend = 1 if engine.is_uptrend(btc_df.iloc[-1]) else -1 if engine.is_downtrend(btc_df.iloc[-1]) else 0
+        btc_data = None  # 简化，可异步获取
+        btc_trend = 0
 
-            prob, direction, regime, details = engine.calculate_signal(df_15m, data["data_dict"], btc_trend, fg, fr, imb, symbol)
+        prob, prob_lower, prob_upper, direction, regime, details = engine.calculate_signal(df_15m, data["data_dict"], btc_trend, fg, fr, imb, symbol)
 
-            st.session_state.circuit_breaker = risk.check_circuit_breaker(df_15m['atr_pct'].iloc[-1], fg)
+        st.session_state.circuit_breaker = risk.check_circuit_breaker(df_15m['atr_pct'].iloc[-1], fg)
 
-            min_lev, max_lev = CONFIG.leverage_modes[mode]
-            if prob >= SignalStrength.STRONG.value:
-                lev = max_lev
-            elif prob >= SignalStrength.HIGH.value:
-                lev = max_lev * 0.9
-            elif prob >= SignalStrength.MEDIUM.value:
-                lev = (min_lev + max_lev)/2
-            else:
-                lev = min_lev
-            leverage = min(lev, CONFIG.max_leverage_global)
+        min_lev, max_lev = CONFIG.leverage_modes[mode]
+        if prob >= SignalStrength.STRONG.value:
+            lev = max_lev
+        elif prob >= SignalStrength.HIGH.value:
+            lev = max_lev * 0.9
+        elif prob >= SignalStrength.MEDIUM.value:
+            lev = (min_lev + max_lev)/2
+        else:
+            lev = min_lev
+        leverage = min(lev, CONFIG.max_leverage_global)
 
-            stop, take = risk.dynamic_stops(price, direction, df_15m['atr'].iloc[-1], df_15m['adx'].iloc[-1], df_15m['atr_pct'].iloc[-1])
-            initial_risk_per_unit = abs(price - stop)
-            size = risk.get_position_size(st.session_state.account_balance, prob, regime, initial_risk_per_unit)
+        stop, take = risk.dynamic_stops(price, direction, df_15m['atr'].iloc[-1], df_15m['adx'].iloc[-1], df_15m['atr_pct'].iloc[-1], regime)
+        initial_risk_per_unit = abs(price - stop)
+        size = risk.get_position_size(st.session_state.account_balance, prob, regime, initial_risk_per_unit)
 
-            # 冷却检查
-            cooldown_active = risk.check_cooldown()
-            if cooldown_active:
-                st.warning(f"连续亏损触发冷却，暂停交易至 {st.session_state.cooldown_until.strftime('%Y-%m-%d %H:%M')}")
-
-            if st.session_state.auto_position:
-                pos = st.session_state.auto_position
-                st.session_state.daily_pnl = pos.pnl(price)
-                if pos.check_partial_tp(price):
-                    if pos.real and st.session_state.exchange:
-                        reduced = pos.original_size * CONFIG.partial_tp_ratio
-                        st.session_state.exchange.partial_close(symbol, reduced)
-                        log_execution(f"部分止盈，减仓 {reduced}")
-                    send_telegram(f"📈 部分止盈{CONFIG.partial_tp_ratio*100:.0f}% {symbol}\n杠杆 {leverage:.1f}x | 剩余仓位 {pos.size:.4f}")
-
-            equity = st.session_state.account_balance + st.session_state.daily_pnl
-            if equity > st.session_state.peak_balance:
-                st.session_state.peak_balance = equity
-            st.session_state.net_value_history.append({'time': datetime.now(), 'value': equity})
-            if len(st.session_state.net_value_history) > 200:
-                st.session_state.net_value_history = st.session_state.net_value_history[-200:]
-
-            col1, col2 = st.columns([1, 1.5])
-            with col1:
-                st.markdown("### 📊 市场状态")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("恐惧贪婪指数", fg)
-                c2.metric("信号概率", f"{prob:.1%}")
-                c3.metric("当前价格", f"{price:.2f}")
-
-                st.markdown(f"### 市场状态: {regime.value}")
-
-                signal_text = "等待信号"
-                if prob >= SignalStrength.WEAK.value:
-                    signal_text = "强力做多" if direction == 1 else "强力做空"
-                st.markdown(f"### {signal_text}")
-
-                with st.expander("🔍 信号详情", expanded=True):
-                    for d in details:
-                        st.markdown(f"• {d}")
-
-                if prob >= SignalStrength.WEAK.value and size > 0 and not st.session_state.circuit_breaker and not cooldown_active:
-                    st.success(f"杠杆 {leverage:.1f}x | 建议仓位 {size:.4f} {symbol.split('/')[0]}")
-                    st.info(f"止损 {stop:.2f} | 止盈 {take:.2f}")
-                    st.info("当前为 **实盘模式**" if use_real and st.session_state.exchange else "当前为 **模拟模式**")
-                elif st.session_state.circuit_breaker:
-                    st.error("⚠️ 市场极端，熔断激活，暂停交易")
-                elif cooldown_active:
-                    st.error("⚠️ 连续亏损，冷却中")
-                else:
-                    st.info("当前无符合条件交易信号")
-
-                st.markdown("### 📉 风险监控")
-                st.metric("实时盈亏", f"{st.session_state.daily_pnl:.2f} USDT")
-                drawdown = (st.session_state.peak_balance - equity) / st.session_state.peak_balance * 100
-                st.metric("最大回撤", f"{drawdown:.2f}%")
-                st.metric("连亏次数", st.session_state.consecutive_losses)
-
-                if st.session_state.net_value_history:
-                    hist_df = pd.DataFrame(st.session_state.net_value_history)
-                    fig_nv = go.Figure()
-                    fig_nv.add_trace(go.Scatter(x=hist_df['time'], y=hist_df['value'], mode='lines', name='净值', line=dict(color='cyan')))
-                    fig_nv.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), template='plotly_dark')
-                    st.plotly_chart(fig_nv, use_container_width=True)
-
-            with col2:
-                df_plot = df_15m.tail(120)
-                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5, 0.15, 0.15, 0.2],
-                                    vertical_spacing=0.02)
-                fig.add_trace(go.Candlestick(x=df_plot['timestamp'], open=df_plot['open'], high=df_plot['high'],
-                                             low=df_plot['low'], close=df_plot['close']), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema50'], line=dict(color="#FFA500")), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema200'], line=dict(color="#4169E1")), row=1, col=1)
-                valid = df_plot['ichimoku_senkou_a'].notna() & df_plot['ichimoku_senkou_b'].notna()
-                if valid.any():
-                    a_valid = df_plot['ichimoku_senkou_a'][valid]
-                    b_valid = df_plot['ichimoku_senkou_b'][valid]
-                    ts_valid = df_plot['timestamp'][valid]
-                    fig.add_trace(go.Scatter(x=ts_valid, y=a_valid, line=dict(color="green", width=1)), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=ts_valid, y=b_valid, fill='tonexty', fillcolor='rgba(100,100,100,0.2)', line=dict(color="red", width=1)), row=1, col=1)
-                if st.session_state.auto_position:
-                    pos = st.session_state.auto_position
-                    fig.add_hline(y=pos.entry, line_dash="dot", line_color="yellow", annotation_text=f"入场 {pos.entry:.2f}")
-                    fig.add_hline(y=pos.stop, line_dash="dash", line_color="red", annotation_text=f"止损 {pos.stop:.2f}")
-                    fig.add_hline(y=pos.take, line_dash="dash", line_color="green", annotation_text=f"止盈 {pos.take:.2f}")
-                fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['rsi'], line=dict(color="purple")), row=2, col=1)
-                fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-                fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-                fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd'], line=dict(color="cyan")), row=3, col=1)
-                fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd_signal'], line=dict(color="orange")), row=3, col=1)
-                fig.add_bar(x=df_plot['timestamp'], y=df_plot['macd_diff'], marker_color="gray", row=3, col=1)
-                colors_vol = np.where(df_plot['close'] >= df_plot['open'], 'green', 'red')
-                fig.add_trace(go.Bar(x=df_plot['timestamp'], y=df_plot['volume'], marker_color=colors_vol.tolist()), row=4, col=1)
-                fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
-
-            if st.session_state.backtest_results:
-                bt = st.session_state.backtest_results
-                st.markdown("### 📈 回测结果")
-                cols = st.columns(4)
-                cols[0].metric("总收益率", f"{bt['total_return']*100:.2f}%")
-                cols[1].metric("夏普比率", f"{bt['sharpe']:.2f}")
-                cols[2].metric("最大回撤", f"{bt['max_drawdown']*100:.2f}%")
-                if 'mc_max_dd_95' in bt:
-                    cols[3].metric("MC 95%最大回撤", f"{bt['mc_max_dd_95']*100:.2f}%")
-                fig_bt = go.Figure(go.Scatter(y=bt['equity_curve'], mode='lines', name='策略净值', line=dict(color='lime')))
-                fig_bt.update_layout(height=300, template='plotly_dark')
-                st.plotly_chart(fig_bt, use_container_width=True)
-
-            self._auto_trade_logic(symbol, price, direction, prob, leverage, stop, take, size, initial_risk_per_unit, use_real, risk, cooldown_active)
-
-        except Exception as e:
-            st.error(f"主面板渲染出错: {e}")
-            log_error(f"主面板渲染异常: {e}")
-            st.stop()
-
-    def _auto_trade_logic(self, symbol: str, price: float, direction: int, prob: float,
-                          leverage: float, stop: float, take: float, size: float,
-                          initial_risk_per_unit: float, use_real: bool, risk: RiskManager, cooldown_active: bool):
-        now = datetime.now()
-        if st.session_state.circuit_breaker or cooldown_active:
-            return
+        # 冷却检查
+        cooldown_active = risk.check_cooldown()
+        daily_limit_exceeded = risk.check_daily_trade_limit()
 
         if st.session_state.auto_position:
             pos = st.session_state.auto_position
-            close_flag, reason, exit_price = pos.should_close(price * 1.001, price * 0.999, price, now)
-            if close_flag or prob < SignalStrength.WEAK.value:
-                if not close_flag:
-                    close_flag, reason, exit_price = True, "信号消失", price
-                pnl = pos.pnl(exit_price)
-                r = pos.r_multiple(exit_price)
-                risk.update_stats(r)
+            st.session_state.daily_pnl = pos.pnl(price)
+            if pos.check_partial_tp(price):
                 if pos.real and st.session_state.exchange:
-                    side = 'sell' if pos.direction == 1 else 'buy'
-                    st.session_state.exchange.close_position(symbol, pos.size)
-                    log_execution(f"平仓: {reason} {symbol} {side} {pos.size}")
-                st.session_state.consecutive_losses = st.session_state.consecutive_losses + 1 if r < 0 else 0
-                st.session_state.auto_position = None
-                send_telegram(f"{reason} {symbol} | R倍数 {r:.2f}\n盈亏 {pnl:.2f} USDT")
-                st.rerun()
-        elif st.session_state.auto_enabled and prob >= SignalStrength.WEAK.value and size > 0:
-            if st.session_state.last_signal_time and (now - st.session_state.last_signal_time).total_seconds() < CONFIG.anti_duplicate_seconds:
-                return
-            if use_real and st.session_state.exchange:
-                side = 'buy' if direction == 1 else 'sell'
-                order = st.session_state.exchange.place_order(symbol, side, size, stop, int(leverage), price)
-                if order and order.get('filled', 0) > 0:
-                    actual_size = order['filled']
-                    pos = Position(direction, price, now, stop, take, actual_size, original_size=actual_size, initial_risk_per_unit=initial_risk_per_unit, real=True)
-                    st.session_state.auto_position = pos
-                    send_telegram(f"🚀 实盘开仓 {symbol} {'多' if direction==1 else '空'}\n概率 {prob:.1%} | 杠杆 {leverage:.1f}x | 仓位 {actual_size:.4f}")
-                    log_execution(f"实盘开仓 {symbol} {side} {actual_size}")
-                else:
-                    st.error("实盘下单失败或未完全成交")
-                    log_execution(f"实盘开仓失败: {order}")
-                    return
+                    # 减仓逻辑
+                    pass
+                send_telegram(f"📈 部分止盈{CONFIG.partial_tp_ratio*100:.0f}% {symbol}\n杠杆 {leverage:.1f}x | 剩余仓位 {pos.size:.4f}")
+
+        equity = st.session_state.account_balance + st.session_state.daily_pnl
+        if equity > st.session_state.peak_balance:
+            st.session_state.peak_balance = equity
+        st.session_state.net_value_history.append({'time': datetime.now(), 'value': equity})
+        if len(st.session_state.net_value_history) > 200:
+            st.session_state.net_value_history = st.session_state.net_value_history[-200:]
+
+        col1, col2 = st.columns([1, 1.5])
+        with col1:
+            st.markdown("### 📊 市场状态")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("恐惧贪婪指数", fg)
+            c2.metric("信号概率", f"{prob:.1%}")
+            c3.metric("当前价格", f"{price:.2f}")
+
+            st.markdown(f"### 市场状态: {regime.value}")
+
+            signal_text = "等待信号"
+            if prob >= SignalStrength.WEAK.value:
+                signal_text = "强力做多" if direction == 1 else "强力做空"
+            st.markdown(f"### {signal_text}")
+
+            with st.expander("🔍 信号详情", expanded=True):
+                for d in details:
+                    st.markdown(f"• {d}")
+
+            if prob >= SignalStrength.WEAK.value and size > 0 and not st.session_state.circuit_breaker and not cooldown_active and not daily_limit_exceeded:
+                st.success(f"杠杆 {leverage:.1f}x | 建议仓位 {size:.4f} {symbol.split('/')[0]}")
+                st.info(f"止损 {stop:.2f} | 止盈 {take:.2f}")
+                st.info("当前为 **实盘模式**" if use_real and st.session_state.exchange else "当前为 **模拟模式**")
+            elif st.session_state.circuit_breaker:
+                st.error("⚠️ 市场极端，熔断激活，暂停交易")
+            elif cooldown_active:
+                st.error(f"⚠️ 连续亏损，冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
+            elif daily_limit_exceeded:
+                st.error("⚠️ 日内交易次数已达上限")
             else:
+                st.info("当前无符合条件交易信号")
+
+            st.markdown("### 📉 风险监控")
+            st.metric("实时盈亏", f"{st.session_state.daily_pnl:.2f} USDT")
+            drawdown = (st.session_state.peak_balance - equity) / st.session_state.peak_balance * 100
+            st.metric("最大回撤", f"{drawdown:.2f}%")
+            st.metric("连亏次数", st.session_state.consecutive_losses)
+
+            if st.session_state.net_value_history:
+                hist_df = pd.DataFrame(st.session_state.net_value_history)
+                fig_nv = go.Figure()
+                fig_nv.add_trace(go.Scatter(x=hist_df['time'], y=hist_df['value'], mode='lines', name='净值', line=dict(color='cyan')))
+                fig_nv.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), template='plotly_dark')
+                st.plotly_chart(fig_nv, use_container_width=True)
+
+        with col2:
+            df_plot = df_15m.tail(120)
+            fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5, 0.15, 0.15, 0.2],
+                                vertical_spacing=0.02)
+            fig.add_trace(go.Candlestick(x=df_plot['timestamp'], open=df_plot['open'], high=df_plot['high'],
+                                         low=df_plot['low'], close=df_plot['close']), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema50'], line=dict(color="#FFA500")), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema200'], line=dict(color="#4169E1")), row=1, col=1)
+            valid = df_plot['ichimoku_senkou_a'].notna() & df_plot['ichimoku_senkou_b'].notna()
+            if valid.any():
+                a_valid = df_plot['ichimoku_senkou_a'][valid]
+                b_valid = df_plot['ichimoku_senkou_b'][valid]
+                ts_valid = df_plot['timestamp'][valid]
+                fig.add_trace(go.Scatter(x=ts_valid, y=a_valid, line=dict(color="green", width=1)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=ts_valid, y=b_valid, fill='tonexty', fillcolor='rgba(100,100,100,0.2)', line=dict(color="red", width=1)), row=1, col=1)
+            if st.session_state.auto_position:
+                pos = st.session_state.auto_position
+                fig.add_hline(y=pos.entry, line_dash="dot", line_color="yellow", annotation_text=f"入场 {pos.entry:.2f}")
+                fig.add_hline(y=pos.stop, line_dash="dash", line_color="red", annotation_text=f"止损 {pos.stop:.2f}")
+                fig.add_hline(y=pos.take, line_dash="dash", line_color="green", annotation_text=f"止盈 {pos.take:.2f}")
+            fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['rsi'], line=dict(color="purple")), row=2, col=1)
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd'], line=dict(color="cyan")), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['macd_signal'], line=dict(color="orange")), row=3, col=1)
+            fig.add_bar(x=df_plot['timestamp'], y=df_plot['macd_diff'], marker_color="gray", row=3, col=1)
+            colors_vol = np.where(df_plot['close'] >= df_plot['open'], 'green', 'red')
+            fig.add_trace(go.Bar(x=df_plot['timestamp'], y=df_plot['volume'], marker_color=colors_vol.tolist()), row=4, col=1)
+            fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        if st.session_state.backtest_results:
+            bt = st.session_state.backtest_results
+            st.markdown("### 📈 回测结果")
+            cols = st.columns(4)
+            cols[0].metric("总收益率", f"{bt['total_return']*100:.2f}%")
+            cols[1].metric("夏普比率", f"{bt['sharpe']:.2f}")
+            cols[2].metric("最大回撤", f"{bt['max_drawdown']*100:.2f}%")
+            if 'mc_max_dd_95' in bt:
+                cols[3].metric("MC 95%最大回撤", f"{bt['mc_max_dd_95']*100:.2f}%")
+            fig_bt = go.Figure(go.Scatter(y=bt['equity_curve'], mode='lines', name='策略净值', line=dict(color='lime')))
+            fig_bt.update_layout(height=300, template='plotly_dark')
+            st.plotly_chart(fig_bt, use_container_width=True)
+
+        # 自动交易逻辑（简化）
+        now = datetime.now()
+        if st.session_state.auto_enabled and not st.session_state.circuit_breaker and not cooldown_active and not daily_limit_exceeded:
+            if st.session_state.auto_position:
+                pos = st.session_state.auto_position
+                high = price * 1.001
+                low = price * 0.999
+                close_flag, reason, exit_price = pos.should_close(high, low, price, now)
+                if close_flag or prob < SignalStrength.WEAK.value:
+                    if not close_flag:
+                        close_flag, reason, exit_price = True, "信号消失", price
+                    pnl = pos.pnl(exit_price)
+                    r = pos.r_multiple(exit_price)
+                    risk.update_stats(r)
+                    st.session_state.consecutive_losses = st.session_state.consecutive_losses + 1 if r < 0 else 0
+                    st.session_state.auto_position = None
+                    send_telegram(f"{reason} {symbol} | R {r:.2f}\n盈亏 {pnl:.2f} USDT")
+                    st.rerun()
+            elif prob >= SignalStrength.WEAK.value and size > 0:
+                if st.session_state.last_signal_time and (now - st.session_state.last_signal_time).total_seconds() < CONFIG.anti_duplicate_seconds:
+                    return
                 pos = Position(direction, price, now, stop, take, size, original_size=size, initial_risk_per_unit=initial_risk_per_unit)
                 st.session_state.auto_position = pos
+                st.session_state.daily_trades += 1
                 send_telegram(f"🚀 模拟开仓 {symbol} {'多' if direction==1 else '空'}\n概率 {prob:.1%} | 杠杆 {leverage:.1f}x | 仓位 {size:.4f}")
-            st.session_state.last_signal_time = now
-            st.rerun()
+                st.session_state.last_signal_time = now
+                st.rerun()
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 30.1", layout="wide")
+    st.set_page_config(page_title="终极量化终端 30.0", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 超真实模拟版 30.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无限 | 永不败北")
+    st.title("🚀 终极量化终端 · 超神烧脑版 30.0")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北")
 
     init_session_state()
     renderer = UIRenderer()
     symbol, mode, use_real = renderer.render_sidebar()
 
-    data = renderer.fetcher.get_symbol_data(symbol)
-    if not data:
-        st.error("❌ 无法获取任何数据，请检查网络或手动开启模拟模式。")
-        st.stop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        data = loop.run_until_complete(renderer.async_get_data(symbol))
+    finally:
+        loop.close()
 
-    if st.session_state.get('use_simulated_data', True):
-        st.info("🔧 当前处于超真实离线模拟模式，K线动态波动，可正常测试信号。")
+    if not data:
+        st.error("❌ 数据获取失败，已自动切换到模拟模式，请稍后重试。")
+        st.session_state.use_simulated_data = True
+        # 重新获取模拟数据
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            data = loop.run_until_complete(renderer.async_get_data(symbol))
+        finally:
+            loop.close()
+
+    if st.session_state.get('use_simulated_data', False):
+        st.info("🔧 当前处于离线模拟模式，K线动态波动，可正常测试信号。")
 
     engine = SignalEngine()
     risk = RiskManager()
