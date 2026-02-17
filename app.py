@@ -351,6 +351,15 @@ class SignalEngine:
             MarketRegime.PANIC: {'volatility': 0.4, 'risk_mult': 0.4},
         }
 
+    # 补全方法
+    @staticmethod
+    def is_uptrend(row: pd.Series) -> bool:
+        return row['close'] > row['ema200'] and row['macd_diff'] > 0
+
+    @staticmethod
+    def is_downtrend(row: pd.Series) -> bool:
+        return row['close'] < row['ema200'] and row['macd_diff'] < 0
+
     def get_weights(self, regime: MarketRegime, ic_dict: Dict[str, float]) -> Dict[str, float]:
         weights = self.base_weights.copy()
         mod = self.regime_mod.get(regime, {})
@@ -385,10 +394,10 @@ class SignalEngine:
         raw_score = 0.0
         details = [f"市场状态: {regime.value}"]
         
-        if last['close'] > last['ema200'] and last['macd_diff'] > 0:
+        if self.is_uptrend(last):
             raw_score += weights.get('core_trend', 30)
             direction = 1
-        elif last['close'] < last['ema200'] and last['macd_diff'] < 0:
+        elif self.is_downtrend(last):
             raw_score += weights.get('core_trend', 30)
             direction = -1
         else:
