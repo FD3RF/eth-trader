@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超真实模拟版 30.0（动态K线·永不横盘）
-超真实模拟引擎 · 动态波动 · 信号自动触发 · 一键实盘安全提示
+🚀 终极量化终端 · 超真实模拟版 30.1（动态K线·信号可触发·永不败北）
+超真实模拟引擎 · 动态波动 · 阈值可调 · 一键实盘安全提示
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ class SignalStrength(Enum):
     STRONG = 0.70
     HIGH = 0.62
     MEDIUM = 0.55
-    WEAK = 0.50
+    WEAK = 0.50   # 将此值调低（如0.30）可让低概率信号触发交易
     NONE = 0.0
 
 class MarketRegime(Enum):
@@ -97,10 +97,10 @@ class TradingConfig:
     order_poll_max_attempts: int = 8
     sync_balance_interval: int = 60
     max_workers: int = 4
-    # 超真实模拟参数
-    sim_volatility: float = 0.03  # 波动率
-    sim_trend_strength: float = 0.1  # 趋势强度
-    sim_cycle_period: int = 100  # 周期长度
+    # 超真实模拟参数（可调节）
+    sim_volatility: float = 0.05      # 波动率（越大K线起伏越剧烈）
+    sim_trend_strength: float = 0.15  # 趋势强度（越大趋势越明显）
+    sim_cycle_period: int = 100       # 周期长度
 
 CONFIG = TradingConfig()
 
@@ -220,7 +220,7 @@ def generate_hyper_realistic_data(symbol: str, limit: int = 1500) -> Dict[str, p
             base = 100
             volatility = CONFIG.sim_volatility * 1.3
         
-        # 生成趋势成分（随机游走 + 正弦周期）
+        # 生成趋势成分（随机游走 + 正弦周期 + 长期趋势）
         t = np.linspace(0, 4*np.pi, limit)
         # 长期趋势（缓慢上涨或下跌）
         trend_direction = np.random.choice([-1, 1])
@@ -438,7 +438,6 @@ class AggregatedDataFetcher:
 
     def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         try:
-            # 如果用户强制使用模拟数据，直接返回模拟数据
             if st.session_state.get('use_simulated_data', True):
                 data_dict = generate_hyper_realistic_data(symbol, CONFIG.fetch_limit)
                 return {
@@ -629,7 +628,7 @@ class RiskManager:
         kelly = win_rate - (1 - win_rate) / b
         return max(0, min(kelly * CONFIG.kelly_fraction, 0.5))
 
-    def get_position_size(self, balance: float, prob: float, regime: MarketRegime, initial_risk: float) -> float:
+    def get_position_size(self, balance: float, prob: float, regime: MarketRegime, initial_risk_per_unit: float) -> float:
         edge = abs(prob - 0.5)
         if edge < 0.1:
             return 0.0
@@ -639,7 +638,7 @@ class RiskManager:
             risk_mult *= 0.4
         risk_budget = balance * CONFIG.risk_budget_ratio
         position_risk = balance * CONFIG.base_risk_per_trade * risk_mult
-        return min(position_risk / initial_risk, risk_budget / initial_risk) if initial_risk > 0 else 0.0
+        return min(position_risk / initial_risk_per_unit, risk_budget / initial_risk_per_unit) if initial_risk_per_unit > 0 else 0.0
 
     def dynamic_stops(self, entry: float, direction: int, atr: float, adx: float, atr_pct: float) -> Tuple[float, float]:
         mult = CONFIG.atr_multiplier_base * (1.2 if adx > 35 else 0.8 if adx < 20 else 1.0) * (1.3 if atr_pct > 2.0 else 1.0)
@@ -662,7 +661,7 @@ class RiskManager:
 
 @dataclass
 class Position:
-    direction: int  # 1 多头, -1 空头, 0 无持仓
+    direction: int
     entry: float
     time: datetime
     stop: float
@@ -749,13 +748,6 @@ class BacktestEngine:
                 next_open = test_df.iloc[i+1]['open']
 
                 if position:
-                    for p in [high, low, close]:
-                        position.check_partial_tp(p)
-                        if position.direction == 1 and p > position.entry * CONFIG.breakeven_trigger_pct:
-                            position.stop = max(position.stop, p - CONFIG.trailing_stop_pct * (p - position.entry))
-                        elif position.direction == -1 and p < position.entry * (2 - CONFIG.breakeven_trigger_pct):
-                            position.stop = min(position.stop, p + CONFIG.trailing_stop_pct * (position.entry - p))
-
                     close_flag, reason, exit_price = position.should_close(high, low, close, current_time)
                     if close_flag or prob < SignalStrength.WEAK.value:
                         slippage = CONFIG.slippage_base + test_df.iloc[i]['atr_pct'] / 100 * 0.0005
@@ -784,13 +776,14 @@ class BacktestEngine:
             equity_curves.append(test_curve)
             equity = test_equity
         
-        final_curve = pd.Series([item for sublist in equity_curves for item in sublist])
+        final_curve = pd.concat([pd.Series(curve) for curve in equity_curves], ignore_index=True)
         total_ret = final_curve.iloc[-1] / 10000.0 - 1
         returns = final_curve.pct_change().dropna()
         bars_per_year = 35040 * (len(final_curve) / len(df))
         sharpe = np.sqrt(bars_per_year) * returns.mean() / returns.std() if returns.std() > 0 else 0
         max_dd = (final_curve.cummax() - final_curve).max() / final_curve.cummax()
         
+        # Monte Carlo
         if len(r_multiples) > 0:
             mc_dd = []
             for _ in range(CONFIG.mc_simulations):
@@ -803,13 +796,189 @@ class BacktestEngine:
                 mc_series = pd.Series(mc_curve)
                 dd = (mc_series.cummax() - mc_series).max() / mc_series.cummax()
                 mc_dd.append(dd)
-            mc_max_dd_95 = np.percentile(mc_dd, 95) if mc_dd else 0.0
+            mc_max_dd_95 = np.percentile(mc_dd, 95)
         else:
             mc_max_dd_95 = 0.0
         
         st.session_state.mc_results = {"mc_max_dd_95": mc_max_dd_95}
         
         return {'total_return': total_ret, 'sharpe': sharpe, 'max_drawdown': max_dd, 'equity_curve': final_curve, 'mc_max_dd_95': mc_max_dd_95}
+
+# ==================== 交易所执行层（安全增强版）====================
+class ExchangeTrader:
+    def __init__(self, exchange_name: str, api_key: str, secret: str, passphrase: Optional[str] = None, testnet: bool = False):
+        self.exchange_name = exchange_name
+        cls = CONFIG.exchanges[exchange_name]
+        params = {'apiKey': api_key, 'secret': secret, 'enableRateLimit': True, 'options': {'defaultType': 'future'}}
+        if passphrase:
+            params['password'] = passphrase
+        self.exchange = cls(params)
+        if testnet:
+            self.exchange.set_sandbox_mode(True)
+        # 加载市场信息以获取精度
+        self.markets = self.exchange.load_markets()
+        self.symbol_info = {}  # 缓存符号信息
+
+    def get_symbol_info(self, symbol: str) -> Dict:
+        """获取符号的交易规则，包括最小数量、精度等"""
+        if symbol not in self.symbol_info:
+            market = self.exchange.market(symbol)
+            self.symbol_info[symbol] = {
+                'precision': market['precision']['amount'],
+                'limits': market['limits']['amount'],
+                'min_amount': market['limits']['amount']['min'] if market['limits']['amount']['min'] else 0.001,
+            }
+        return self.symbol_info[symbol]
+
+    def adjust_amount(self, symbol: str, amount: float) -> float:
+        """根据交易所精度调整数量"""
+        info = self.get_symbol_info(symbol)
+        precision = info['precision']
+        # 四舍五入到指定精度
+        rounded = round(amount, int(-math.log10(precision)) if precision < 1 else 0)
+        # 确保不低于最小数量
+        if rounded < info['min_amount']:
+            return 0.0
+        return rounded
+
+    @safe_request()
+    def fetch_balance(self) -> float:
+        """获取USDT余额"""
+        try:
+            balance = self.exchange.fetch_balance()
+            usdt_keys = ['USDT', 'usdt', 'USD', 'usd']
+            for key in usdt_keys:
+                if key in balance['total']:
+                    return float(balance['total'][key])
+            return 0.0
+        except Exception as e:
+            logger.error(f"获取余额失败: {e}")
+            return 0.0
+
+    @safe_request()
+    def fetch_positions(self, symbol: str) -> Optional[Dict]:
+        """获取当前持仓信息（仅返回第一个符合条件的）"""
+        try:
+            positions = self.exchange.fetch_positions([symbol.replace('/', '')])
+            if positions:
+                for p in positions:
+                    if p['contracts'] != 0:
+                        return {
+                            'direction': 1 if p['side'] == 'long' else -1,
+                            'entry': float(p['entryPrice']),
+                            'size': float(p['contracts']),
+                            'unrealized_pnl': float(p['unrealizedPnl']),
+                            'percentage': float(p['percentage']),
+                        }
+            return None
+        except Exception as e:
+            logger.error(f"获取持仓失败: {e}")
+            return None
+
+    @safe_request()
+    def place_order(self, symbol: str, side: str, amount: float, stop_price: float, leverage: int, price: Optional[float] = None) -> Optional[Dict]:
+        """下市价单，带止损（止盈止损通过后续订单管理）"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            self.exchange.set_leverage(leverage, market_symbol)
+        except Exception:
+            pass
+
+        adjusted_amount = self.adjust_amount(symbol, amount)
+        if adjusted_amount <= 0:
+            log_error(f"下单数量 {amount} 调整后为0，忽略")
+            return None
+
+        try:
+            order = self.exchange.create_order(market_symbol, 'market', side, adjusted_amount, price)
+            log_execution(f"下单成功: {order['id']} {side} {adjusted_amount} {symbol}")
+            return order
+        except Exception as e:
+            logger.error(f"下单失败: {e}")
+            log_execution(f"下单失败: {e}")
+            return None
+
+    @safe_request()
+    def place_stop_order(self, symbol: str, side: str, amount: float, stop_price: float, reduce_only: bool = True) -> Optional[Dict]:
+        """下止损单（通常为触发后市价）"""
+        market_symbol = symbol.replace('/', '')
+        adjusted_amount = self.adjust_amount(symbol, amount)
+        if adjusted_amount <= 0:
+            return None
+        params = {'stopPrice': stop_price}
+        if reduce_only:
+            params['reduceOnly'] = True
+        try:
+            order = self.exchange.create_order(market_symbol, 'stop_market', side, adjusted_amount, None, params)
+            log_execution(f"止损单成功: {order['id']} {side} {adjusted_amount} @ {stop_price}")
+            return order
+        except Exception as e:
+            logger.error(f"下止损单失败: {e}")
+            return None
+
+    @safe_request()
+    def place_take_profit_order(self, symbol: str, side: str, amount: float, limit_price: float, reduce_only: bool = True) -> Optional[Dict]:
+        """下止盈限价单"""
+        market_symbol = symbol.replace('/', '')
+        adjusted_amount = self.adjust_amount(symbol, amount)
+        if adjusted_amount <= 0:
+            return None
+        params = {}
+        if reduce_only:
+            params['reduceOnly'] = True
+        try:
+            order = self.exchange.create_order(market_symbol, 'limit', side, adjusted_amount, limit_price, params)
+            log_execution(f"止盈单成功: {order['id']} {side} {adjusted_amount} @ {limit_price}")
+            return order
+        except Exception as e:
+            logger.error(f"下止盈单失败: {e}")
+            return None
+
+    @safe_request()
+    def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """取消订单"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            self.exchange.cancel_order(order_id, market_symbol)
+            log_execution(f"取消订单 {order_id} 成功")
+            return True
+        except Exception as e:
+            logger.error(f"取消订单失败: {e}")
+            return False
+
+    @safe_request()
+    def fetch_order(self, order_id: str, symbol: str) -> Optional[Dict]:
+        """查询订单状态"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            return self.exchange.fetch_order(order_id, market_symbol)
+        except Exception as e:
+            logger.error(f"查询订单失败: {e}")
+            return None
+
+    @safe_request()
+    def partial_close(self, symbol: str, amount: float) -> Optional[Dict]:
+        """部分平仓"""
+        market_symbol = symbol.replace('/', '')
+        try:
+            positions = self.exchange.fetch_positions([market_symbol])
+            if not positions or positions[0]['contracts'] == 0:
+                return None
+            side = 'sell' if positions[0]['side'] == 'long' else 'buy'
+            adjusted_amount = self.adjust_amount(symbol, amount)
+            if adjusted_amount <= 0:
+                return None
+            order = self.exchange.create_order(market_symbol, 'market', side, adjusted_amount, params={'reduceOnly': True})
+            log_execution(f"部分平仓: {order['id']} {side} {adjusted_amount}")
+            return order
+        except Exception as e:
+            logger.error(f"部分平仓失败: {e}")
+            return None
+
+    @safe_request()
+    def close_position(self, symbol: str, amount: float) -> Optional[Dict]:
+        """全平平仓"""
+        return self.partial_close(symbol, amount)
 
 # ==================== UI渲染 ====================
 class UIRenderer:
@@ -863,15 +1032,7 @@ class UIRenderer:
 
             if use_real and api_key and secret_key:
                 try:
-                    st.session_state.exchange = ccxt.binance({
-                        'apiKey': api_key,
-                        'secret': secret_key,
-                        'enableRateLimit': True,
-                        'options': {'defaultType': 'future'}
-                    })
-                    if testnet:
-                        st.session_state.exchange.set_sandbox_mode(True)
-                    st.session_state.exchange.fetch_balance()
+                    st.session_state.exchange = ExchangeTrader(exchange_choice, api_key, secret_key, passphrase, testnet)
                     st.success("连接成功")
                 except Exception as e:
                     st.error(f"连接失败: {e}")
@@ -884,19 +1045,9 @@ class UIRenderer:
 
             if st.button("🚨 一键紧急平仓"):
                 if st.session_state.auto_position and st.session_state.auto_position.real and st.session_state.exchange:
-                    # 执行市价平仓
                     pos = st.session_state.auto_position
                     side = 'sell' if pos.direction == 1 else 'buy'
-                    try:
-                        st.session_state.exchange.create_order(
-                            symbol.replace('/', ''),
-                            'market',
-                            side,
-                            pos.size
-                        )
-                        log_execution(f"紧急平仓 {symbol} {side} {pos.size}")
-                    except Exception as e:
-                        st.error(f"平仓失败: {e}")
+                    st.session_state.exchange.close_position(st.session_state.current_symbol, pos.size)
                 st.session_state.auto_position = None
                 st.rerun()
 
@@ -958,23 +1109,19 @@ class UIRenderer:
             initial_risk_per_unit = abs(price - stop)
             size = risk.get_position_size(st.session_state.account_balance, prob, regime, initial_risk_per_unit)
 
+            # 冷却检查
+            cooldown_active = risk.check_cooldown()
+            if cooldown_active:
+                st.warning(f"连续亏损触发冷却，暂停交易至 {st.session_state.cooldown_until.strftime('%Y-%m-%d %H:%M')}")
+
             if st.session_state.auto_position:
                 pos = st.session_state.auto_position
                 st.session_state.daily_pnl = pos.pnl(price)
                 if pos.check_partial_tp(price):
                     if pos.real and st.session_state.exchange:
                         reduced = pos.original_size * CONFIG.partial_tp_ratio
-                        side = 'sell' if pos.direction == 1 else 'buy'
-                        try:
-                            st.session_state.exchange.create_order(
-                                symbol.replace('/', ''),
-                                'market',
-                                side,
-                                reduced
-                            )
-                            log_execution(f"部分止盈减仓 {reduced}")
-                        except Exception as e:
-                            log_error(f"部分止盈失败: {e}")
+                        st.session_state.exchange.partial_close(symbol, reduced)
+                        log_execution(f"部分止盈，减仓 {reduced}")
                     send_telegram(f"📈 部分止盈{CONFIG.partial_tp_ratio*100:.0f}% {symbol}\n杠杆 {leverage:.1f}x | 剩余仓位 {pos.size:.4f}")
 
             equity = st.session_state.account_balance + st.session_state.daily_pnl
@@ -992,19 +1139,25 @@ class UIRenderer:
                 c2.metric("信号概率", f"{prob:.1%}")
                 c3.metric("当前价格", f"{price:.2f}")
 
-                signal_text = "⚪ 等待信号" if prob < SignalStrength.WEAK.value else "🔴 强力做多" if direction == 1 else "🔵 强力做空"
+                st.markdown(f"### 市场状态: {regime.value}")
+
+                signal_text = "等待信号"
+                if prob >= SignalStrength.WEAK.value:
+                    signal_text = "强力做多" if direction == 1 else "强力做空"
                 st.markdown(f"### {signal_text}")
 
-                with st.expander("🔍 信号条件详细检查", expanded=True):
+                with st.expander("🔍 信号详情", expanded=True):
                     for d in details:
                         st.markdown(f"• {d}")
 
-                if prob >= SignalStrength.WEAK.value and size > 0 and not st.session_state.circuit_breaker:
+                if prob >= SignalStrength.WEAK.value and size > 0 and not st.session_state.circuit_breaker and not cooldown_active:
                     st.success(f"杠杆 {leverage:.1f}x | 建议仓位 {size:.4f} {symbol.split('/')[0]}")
                     st.info(f"止损 {stop:.2f} | 止盈 {take:.2f}")
                     st.info("当前为 **实盘模式**" if use_real and st.session_state.exchange else "当前为 **模拟模式**")
                 elif st.session_state.circuit_breaker:
                     st.error("⚠️ 市场极端，熔断激活，暂停交易")
+                elif cooldown_active:
+                    st.error("⚠️ 连续亏损，冷却中")
                 else:
                     st.info("当前无符合条件交易信号")
 
@@ -1013,10 +1166,6 @@ class UIRenderer:
                 drawdown = (st.session_state.peak_balance - equity) / st.session_state.peak_balance * 100
                 st.metric("最大回撤", f"{drawdown:.2f}%")
                 st.metric("连亏次数", st.session_state.consecutive_losses)
-
-                if risk.recent_trades:
-                    st.metric("平均R", f"{np.mean(risk.recent_trades):.2f}")
-                    st.metric("胜率", f"{sum(1 for r in risk.recent_trades if r>0)/len(risk.recent_trades):.0%}")
 
                 if st.session_state.net_value_history:
                     hist_df = pd.DataFrame(st.session_state.net_value_history)
@@ -1063,12 +1212,13 @@ class UIRenderer:
                 cols[0].metric("总收益率", f"{bt['total_return']*100:.2f}%")
                 cols[1].metric("夏普比率", f"{bt['sharpe']:.2f}")
                 cols[2].metric("最大回撤", f"{bt['max_drawdown']*100:.2f}%")
-                cols[3].metric("MC 95% 最大回撤", f"{bt.get('mc_max_dd_95', 0)*100:.2f}%")
+                if 'mc_max_dd_95' in bt:
+                    cols[3].metric("MC 95%最大回撤", f"{bt['mc_max_dd_95']*100:.2f}%")
                 fig_bt = go.Figure(go.Scatter(y=bt['equity_curve'], mode='lines', name='策略净值', line=dict(color='lime')))
                 fig_bt.update_layout(height=300, template='plotly_dark')
                 st.plotly_chart(fig_bt, use_container_width=True)
 
-            self._auto_trade_logic(symbol, price, direction, prob, leverage, stop, take, size, use_real, risk)
+            self._auto_trade_logic(symbol, price, direction, prob, leverage, stop, take, size, initial_risk_per_unit, use_real, risk, cooldown_active)
 
         except Exception as e:
             st.error(f"主面板渲染出错: {e}")
@@ -1076,71 +1226,46 @@ class UIRenderer:
             st.stop()
 
     def _auto_trade_logic(self, symbol: str, price: float, direction: int, prob: float,
-                          leverage: float, stop: float, take: float, size: float, use_real: bool, risk: RiskManager):
+                          leverage: float, stop: float, take: float, size: float,
+                          initial_risk_per_unit: float, use_real: bool, risk: RiskManager, cooldown_active: bool):
         now = datetime.now()
-        if st.session_state.circuit_breaker or (st.session_state.pause_until and now < st.session_state.pause_until):
-            return
-        if risk.check_cooldown():
+        if st.session_state.circuit_breaker or cooldown_active:
             return
 
         if st.session_state.auto_position:
             pos = st.session_state.auto_position
-            high = price * 1.001
-            low = price * 0.999
-            close_flag, reason, exit_price = pos.should_close(high, low, price, now)
+            close_flag, reason, exit_price = pos.should_close(price * 1.001, price * 0.999, price, now)
             if close_flag or prob < SignalStrength.WEAK.value:
                 if not close_flag:
                     close_flag, reason, exit_price = True, "信号消失", price
                 pnl = pos.pnl(exit_price)
                 r = pos.r_multiple(exit_price)
                 risk.update_stats(r)
-                st.session_state.trade_log.append(r)
                 if pos.real and st.session_state.exchange:
-                    # 市价平仓
                     side = 'sell' if pos.direction == 1 else 'buy'
-                    try:
-                        st.session_state.exchange.create_order(
-                            symbol.replace('/', ''),
-                            'market',
-                            side,
-                            pos.size
-                        )
-                        log_execution(f"平仓: {reason} {symbol} {side} {pos.size}")
-                    except Exception as e:
-                        log_error(f"平仓失败: {e}")
-                st.session_state.consecutive_losses = st.session_state.consecutive_losses + 1 if pnl < 0 else 0
+                    st.session_state.exchange.close_position(symbol, pos.size)
+                    log_execution(f"平仓: {reason} {symbol} {side} {pos.size}")
+                st.session_state.consecutive_losses = st.session_state.consecutive_losses + 1 if r < 0 else 0
                 st.session_state.auto_position = None
-                send_telegram(f"{reason} {symbol}\n盈亏 {pnl:.2f} USDT | R {r:.2f}\n杠杆 {leverage:.1f}x | 仓位 {pos.original_size:.4f}")
+                send_telegram(f"{reason} {symbol} | R倍数 {r:.2f}\n盈亏 {pnl:.2f} USDT")
                 st.rerun()
         elif st.session_state.auto_enabled and prob >= SignalStrength.WEAK.value and size > 0:
             if st.session_state.last_signal_time and (now - st.session_state.last_signal_time).total_seconds() < CONFIG.anti_duplicate_seconds:
                 return
             if use_real and st.session_state.exchange:
                 side = 'buy' if direction == 1 else 'sell'
-                try:
-                    order = st.session_state.exchange.create_order(
-                        symbol.replace('/', ''),
-                        'market',
-                        side,
-                        size
-                    )
-                    if order and order.get('filled', 0) > 0:
-                        actual_size = order['filled']
-                        initial_risk_per_unit = abs(price - stop)
-                        pos = Position(direction, price, now, stop, take, actual_size, original_size=actual_size, initial_risk_per_unit=initial_risk_per_unit, real=True)
-                        st.session_state.auto_position = pos
-                        send_telegram(f"🚀 实盘开仓 {symbol} {'多' if direction==1 else '空'}\n概率 {prob:.1%} | 杠杆 {leverage:.1f}x | 仓位 {actual_size:.4f}")
-                        log_execution(f"实盘开仓 {symbol} {side} {actual_size}")
-                    else:
-                        st.error("实盘下单失败或未完全成交")
-                        log_execution(f"实盘开仓失败: {order}")
-                        return
-                except Exception as e:
-                    st.error(f"下单异常: {e}")
-                    log_error(f"下单异常: {e}")
+                order = st.session_state.exchange.place_order(symbol, side, size, stop, int(leverage), price)
+                if order and order.get('filled', 0) > 0:
+                    actual_size = order['filled']
+                    pos = Position(direction, price, now, stop, take, actual_size, original_size=actual_size, initial_risk_per_unit=initial_risk_per_unit, real=True)
+                    st.session_state.auto_position = pos
+                    send_telegram(f"🚀 实盘开仓 {symbol} {'多' if direction==1 else '空'}\n概率 {prob:.1%} | 杠杆 {leverage:.1f}x | 仓位 {actual_size:.4f}")
+                    log_execution(f"实盘开仓 {symbol} {side} {actual_size}")
+                else:
+                    st.error("实盘下单失败或未完全成交")
+                    log_execution(f"实盘开仓失败: {order}")
                     return
             else:
-                initial_risk_per_unit = abs(price - stop)
                 pos = Position(direction, price, now, stop, take, size, original_size=size, initial_risk_per_unit=initial_risk_per_unit)
                 st.session_state.auto_position = pos
                 send_telegram(f"🚀 模拟开仓 {symbol} {'多' if direction==1 else '空'}\n概率 {prob:.1%} | 杠杆 {leverage:.1f}x | 仓位 {size:.4f}")
@@ -1149,9 +1274,9 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 30.0", layout="wide")
+    st.set_page_config(page_title="终极量化终端 30.1", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 超真实模拟版 30.0")
+    st.title("🚀 终极量化终端 · 超真实模拟版 30.1")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无限 | 永不败北")
 
     init_session_state()
