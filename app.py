@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 完美极限版 40.0
+🚀 终极量化终端 · 完美极限版 41.0
 ==================================================
 核心特性：
 1. 协方差矩阵风险平价（动态品种相关性）
@@ -8,11 +8,12 @@
 3. 组合VaR实时监控（每日95% VaR）
 4. 严格Walk Forward验证（训练/测试完全隔离）
 5. 因子IC显著性检验（p值 + 信息比率）
-6. 多品种持仓显示修复（按品种名称排序，数据永不串位）
-7. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
-8. 高性能并行数据获取 + 自动回退模拟
-9. 完整日志持久化（CSV + 按日文件）
-10. 一键紧急平仓、Telegram通知
+6. 多品种持仓显示修复（按品种名称严格匹配，数据永不串位）
+7. 数据一致性验证：自动清理无效持仓，一键修复
+8. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
+9. 高性能并行数据获取 + 自动回退模拟
+10. 完整日志持久化（CSV + 按日文件）
+11. 一键紧急平仓、Telegram通知
 ==================================================
 """
 
@@ -875,21 +876,23 @@ class Position:
                 return True, "部分止盈", self.entry_price - self.stop_distance() * CONFIG.partial_tp_r_multiple
         return False, "", 0
 
-# ==================== 下单执行（动态滑点）====================
+# ==================== 下单执行（动态滑点，带符号标准化）====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
+    # 标准化symbol，去除两端空格
+    sym = symbol.strip()
     dir_str = "多" if direction == 1 else "空"
     volume = 0
-    if symbol in st.session_state.multi_df:
-        df = st.session_state.multi_df[symbol]['15m']
+    if sym in st.session_state.multi_df:
+        df = st.session_state.multi_df[sym]['15m']
         volume = df['volume'].iloc[-1] if not df.empty else 0
     vola = 0.02
-    if symbol in st.session_state.multi_df:
-        rets = st.session_state.multi_df[symbol]['15m']['close'].pct_change().dropna().values[-20:]
+    if sym in st.session_state.multi_df:
+        rets = st.session_state.multi_df[sym]['15m']['close'].pct_change().dropna().values[-20:]
         vola = np.std(rets) if len(rets) > 5 else 0.02
     slippage = dynamic_slippage(price, size, volume, vola)
     exec_price = price + slippage if direction == 1 else price - slippage
-    st.session_state.positions[symbol] = Position(
-        symbol=symbol,
+    st.session_state.positions[sym] = Position(
+        symbol=sym,
         direction=direction,
         entry_price=exec_price,
         entry_time=datetime.now(),
@@ -901,21 +904,22 @@ def execute_order(symbol: str, direction: int, size: float, price: float, stop: 
         slippage_paid=slippage
     )
     st.session_state.daily_trades += 1
-    log_execution(f"开仓 {symbol} {dir_str} 仓位 {size:.4f} @ {exec_price:.2f} (原价 {price:.2f}, 滑点 {slippage:.4f}) 止损 {stop:.2f} 止盈 {take:.2f}")
-    send_telegram(f"🔔 开仓 {dir_str} {symbol}\n价格: {exec_price:.2f}\n仓位: {size:.4f}")
-    st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': symbol, 'slippage': slippage})
+    log_execution(f"开仓 {sym} {dir_str} 仓位 {size:.4f} @ {exec_price:.2f} (原价 {price:.2f}, 滑点 {slippage:.4f}) 止损 {stop:.2f} 止盈 {take:.2f}")
+    send_telegram(f"🔔 开仓 {dir_str} {sym}\n价格: {exec_price:.2f}\n仓位: {size:.4f}")
+    st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage})
 
 def close_position(symbol: str, exit_price: float, reason: str):
-    pos = st.session_state.positions.pop(symbol, None)
+    sym = symbol.strip()
+    pos = st.session_state.positions.pop(sym, None)
     if pos is None:
         return
     volume = 0
-    if symbol in st.session_state.multi_df:
-        df = st.session_state.multi_df[symbol]['15m']
+    if sym in st.session_state.multi_df:
+        df = st.session_state.multi_df[sym]['15m']
         volume = df['volume'].iloc[-1] if not df.empty else 0
     vola = 0.02
-    if symbol in st.session_state.multi_df:
-        rets = st.session_state.multi_df[symbol]['15m']['close'].pct_change().dropna().values[-20:]
+    if sym in st.session_state.multi_df:
+        rets = st.session_state.multi_df[sym]['15m']['close'].pct_change().dropna().values[-20:]
         vola = np.std(rets) if len(rets) > 5 else 0.02
     slippage = dynamic_slippage(exit_price, pos.size, volume, vola)
     exec_exit = exit_price - slippage if pos.direction == 1 else exit_price + slippage
@@ -929,7 +933,7 @@ def close_position(symbol: str, exit_price: float, reason: str):
     
     trade_record = {
         'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'symbol': symbol,
+        'symbol': sym,
         'direction': '多' if pos.direction == 1 else '空',
         'entry': pos.entry_price,
         'exit': exec_exit,
@@ -944,12 +948,25 @@ def close_position(symbol: str, exit_price: float, reason: str):
         st.session_state.trade_log.pop(0)
     
     append_to_csv(TRADE_LOG_FILE, trade_record)
-    st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': symbol, 'slippage': slippage})
+    st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage})
     
     win = pnl > 0
     RiskManager().update_losses(win)
-    log_execution(f"平仓 {symbol} {reason} 盈亏 {pnl:.2f} 余额 {st.session_state.account_balance:.2f}")
+    log_execution(f"平仓 {sym} {reason} 盈亏 {pnl:.2f} 余额 {st.session_state.account_balance:.2f}")
     send_telegram(f"🔔 平仓 {reason}\n盈亏: {pnl:.2f}")
+
+# ==================== 数据一致性修复 ====================
+def fix_data_consistency(symbols):
+    """清理无效持仓，确保positions中的symbol在symbols中，且对应的数据存在"""
+    to_remove = []
+    for sym in list(st.session_state.positions.keys()):
+        if sym not in symbols or sym not in st.session_state.multi_df:
+            to_remove.append(sym)
+    for sym in to_remove:
+        log_execution(f"数据修复：移除无效持仓 {sym}")
+        del st.session_state.positions[sym]
+    # 同时清理可能存在的空仓位
+    st.session_state.positions = {k: v for k, v in st.session_state.positions.items() if v.size > 0}
 
 # ==================== 回测引擎（多品种组合，带动态滑点）====================
 def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], initial_balance: float = 10000) -> Dict[str, Any]:
@@ -1241,6 +1258,10 @@ class UIRenderer:
                 else:
                     st.info("暂无历史交易记录")
 
+            if st.button("🔧 数据修复"):
+                fix_data_consistency(st.session_state.current_symbols)
+                st.success("数据一致性已修复")
+
             if st.session_state.error_log:
                 with st.expander("⚠️ 错误日志（实时）"):
                     for err in list(st.session_state.error_log)[-10:]:
@@ -1280,6 +1301,9 @@ class UIRenderer:
 
         cov = calculate_cov_matrix(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, CONFIG.cov_matrix_window)
         st.session_state.cov_matrix = cov
+
+        # 自动修复数据一致性
+        fix_data_consistency(symbols)
 
         if st.session_state.mode == 'backtest':
             self.render_backtest_panel(symbols, multi_data)
@@ -1430,6 +1454,7 @@ class UIRenderer:
 
             if st.session_state.positions:
                 st.markdown("### 📈 当前持仓")
+                # 按品种名称排序显示，确保数据对应正确
                 for sym in sorted(st.session_state.positions.keys()):
                     pos = st.session_state.positions[sym]
                     pnl = pos.pnl(multi_data[sym]['current_price']) if sym in multi_data else 0
@@ -1486,10 +1511,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 40.0 · 完美极限", layout="wide")
+    st.set_page_config(page_title="终极量化终端 41.0 · 完美极限", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 完美极限版 40.0")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 协方差风险平价 · 动态滑点 · 组合VaR · 严格Walk Forward · IC显著性 · 多品种显示修复")
+    st.title("🚀 终极量化终端 · 完美极限版 41.0")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 协方差风险平价 · 动态滑点 · 组合VaR · 严格Walk Forward · IC显著性 · 数据一致性修复")
 
     init_session_state()
     renderer = UIRenderer()
