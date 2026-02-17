@@ -1,17 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神终极版 36.0
+🚀 终极量化终端 · 超神终极版 36.1
 ==================================================
-核心特性：
-1. 多交易所并行数据获取（币安优先，其他备援）
-2. 自适应 ATR 倍数（根据近期波动率动态调整）
-3. 在线学习因子权重（基于历史 IC 指数加权）
-4. 高级风控：VaR 仓位计算、持仓相关性预警（预留）
-5. 实时绩效面板：近20笔交易胜率、盈亏比、夏普比率
-6. 内置回测引擎（支持历史数据回测，显示收益曲线）
-7. 完善的日志持久化（CSV + 按日期文件）
-8. 用户可配置参数界面（信号阈值、杠杆等）
-9. 一键切换回测/实盘模式
+修复：因子IC计算中的KeyError，添加连续因子列，完善在线学习逻辑。
 ==================================================
 """
 
@@ -38,7 +29,6 @@ import csv
 import os
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 warnings.filterwarnings('ignore')
 
@@ -94,7 +84,7 @@ class TradingConfig:
     tp_min_ratio: float = 2.0
     partial_tp_ratio: float = 0.5
     partial_tp_r_multiple: float = 1.2
-    trailing_stop_pct: float = 0.3        # 移动止损回调百分比（相对于最高点的ATR倍数）
+    trailing_stop_pct: float = 0.3
     breakeven_trigger_pct: float = 1.5
     max_hold_hours: int = 36
     max_consecutive_losses: int = 3
@@ -146,6 +136,15 @@ factor_weights = {
     'bb': 1.0,
     'volume': 1.0,
     'adx': 1.0
+}
+# 因子到实际列名的映射（用于IC计算）
+factor_to_col = {
+    'trend': 'trend_factor',
+    'rsi': 'rsi',
+    'macd': 'macd_diff',
+    'bb': 'bb_factor',
+    'volume': 'volume_ratio',
+    'adx': 'adx'
 }
 factor_performance = deque(maxlen=100)  # 存储 (factor_name, ic) 用于学习
 
@@ -243,7 +242,7 @@ def update_performance_metrics():
     win_rate = len(wins) / len(df) if len(df) > 0 else 0
     avg_win = wins['pnl'].mean() if not wins.empty else 0
     avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 1
-    returns = df['pnl'].values / st.session_state.account_balance  # 简易收益率
+    returns = df['pnl'].values / st.session_state.account_balance
     sharpe = (returns.mean() / returns.std() * np.sqrt(252)) if len(returns) > 1 and returns.std() != 0 else 0
     st.session_state.performance_metrics = {
         'win_rate': win_rate,
@@ -254,12 +253,11 @@ def update_performance_metrics():
 
 # ==================== 自适应ATR倍数 ====================
 def adaptive_atr_multiplier(price_series: pd.Series, window: int = 20) -> float:
-    """根据近期波动率动态调整ATR倍数：波动率大时缩小倍数，波动率小时放大倍数"""
     if len(price_series) < window:
         return CONFIG.atr_multiplier_base
     returns = price_series.pct_change().dropna()
-    vol = returns.std() * np.sqrt(365 * 24 * 4)  # 年化波动率
-    base_vol = 0.5  # 基准年化波动率50%
+    vol = returns.std() * np.sqrt(365 * 24 * 4)
+    base_vol = 0.5
     ratio = base_vol / max(vol, 0.1)
     new_mult = CONFIG.atr_multiplier_base * np.clip(ratio, 0.5, 2.0)
     return new_mult
@@ -270,8 +268,7 @@ def update_factor_weights(ic_dict: Dict[str, float]):
     global factor_weights
     lr = CONFIG.factor_learning_rate
     for factor, ic in ic_dict.items():
-        if factor in factor_weights:
-            # 如果IC为正，增强权重；为负则减弱（但保持非负）
+        if factor in factor_weights and not np.isnan(ic):
             adjustment = 1 + lr * ic
             factor_weights[factor] = max(0.1, factor_weights[factor] * adjustment)
 
@@ -338,7 +335,7 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
             data_dict[tf] = resampled
     return data_dict
 
-# ==================== 技术指标计算 ====================
+# ==================== 技术指标计算（新增连续因子列）====================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
@@ -374,12 +371,17 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
+        # 布林带相对位置因子（0-1之间）
+        df['bb_factor'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
     else:
         df['bb_upper'] = np.nan
         df['bb_lower'] = np.nan
         df['bb_width'] = np.nan
+        df['bb_factor'] = np.nan
     df['volume_sma'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_sma']
+    # 趋势因子：价格与EMA20的差值（归一化）
+    df['trend_factor'] = (df['close'] - df['ema20']) / df['close']
     if len(df) >= 6:
         df['future_ret'] = df['close'].pct_change(5).shift(-5)
     else:
@@ -389,6 +391,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ==================== 因子IC计算 ====================
 _ic_cache = {}
 def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
+    """计算指定因子列与未来收益的相关系数"""
     key = (id(df), factor_name)
     if key in _ic_cache:
         return _ic_cache[key]
@@ -445,7 +448,6 @@ class AggregatedDataFetcher:
         return None
 
     def _fetch_kline_parallel(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-        """并行从多个交易所获取数据，返回最先成功的"""
         futures = []
         for name in ["binance"] + [n for n in CONFIG.data_sources if n != "binance"]:
             if name in self.exchanges:
@@ -454,7 +456,6 @@ class AggregatedDataFetcher:
         for future in as_completed(futures):
             result = future.result(timeout=10)
             if result is not None:
-                # 取消其他任务
                 for f in futures:
                     f.cancel()
                 return result
@@ -558,7 +559,8 @@ class SignalEngine:
         total_weight = 0
         tf_votes = []
         regime = st.session_state.market_regime
-        ic_dict = {}
+        ic_dict = {}  # 存储各因子的平均IC
+
         for tf, df in df_dict.items():
             if df.empty or len(df) < 2:
                 continue
@@ -573,38 +575,38 @@ class SignalEngine:
             if pd.isna(last.get('ema20', np.nan)):
                 continue
 
-            # 各因子得分
+            # 各因子得分（使用当前权重）
             factor_scores = {}
             # 趋势因子
             if last['close'] > last['ema20']:
-                factor_scores['trend'] = 1
+                factor_scores['trend'] = 1 * factor_weights['trend']
             elif last['close'] < last['ema20']:
-                factor_scores['trend'] = -1
+                factor_scores['trend'] = -1 * factor_weights['trend']
             else:
                 factor_scores['trend'] = 0
 
             # RSI
             if last['rsi'] > 70:
-                factor_scores['rsi'] = -0.7
+                factor_scores['rsi'] = -0.7 * factor_weights['rsi']
             elif last['rsi'] < 30:
-                factor_scores['rsi'] = 0.7
+                factor_scores['rsi'] = 0.7 * factor_weights['rsi']
             else:
                 factor_scores['rsi'] = 0
 
             # MACD
             if last['macd_diff'] > 0:
-                factor_scores['macd'] = 0.8
+                factor_scores['macd'] = 0.8 * factor_weights['macd']
             elif last['macd_diff'] < 0:
-                factor_scores['macd'] = -0.8
+                factor_scores['macd'] = -0.8 * factor_weights['macd']
             else:
                 factor_scores['macd'] = 0
 
             # 布林带
             if not pd.isna(last.get('bb_upper')):
                 if last['close'] > last['bb_upper']:
-                    factor_scores['bb'] = -0.5
+                    factor_scores['bb'] = -0.5 * factor_weights['bb']
                 elif last['close'] < last['bb_lower']:
-                    factor_scores['bb'] = 0.5
+                    factor_scores['bb'] = 0.5 * factor_weights['bb']
                 else:
                     factor_scores['bb'] = 0
             else:
@@ -612,31 +614,28 @@ class SignalEngine:
 
             # 成交量
             if not pd.isna(last.get('volume_ratio')):
-                factor_scores['volume'] = 1.2 if last['volume_ratio'] > 1.5 else 0
+                factor_scores['volume'] = (1.2 if last['volume_ratio'] > 1.5 else 0) * factor_weights['volume']
             else:
                 factor_scores['volume'] = 0
 
-            # ADX 趋势强度调整因子
+            # ADX
             adx = last.get('adx', 25)
             if pd.isna(adx):
                 factor_scores['adx'] = 0
             else:
-                factor_scores['adx'] = 0.3 if adx > 30 else -0.2 if adx < 20 else 0
+                factor_scores['adx'] = (0.3 if adx > 30 else -0.2 if adx < 20 else 0) * factor_weights['adx']
 
-            # 计算IC并更新学习权重
+            # 计算当前周期各因子的IC（用于后续权重更新）
             for fname in factor_scores.keys():
-                ic = calculate_ic(df, fname)  # 注意：需要df中有对应的future_ret，这里简化处理
-                if fname not in ic_dict:
-                    ic_dict[fname] = []
-                ic_dict[fname].append(ic)
+                col = factor_to_col.get(fname)
+                if col and col in df.columns:
+                    ic = calculate_ic(df, col)
+                    if fname not in ic_dict:
+                        ic_dict[fname] = []
+                    ic_dict[fname].append(ic)
 
-            # 加权组合
-            tf_score = 0
-            for fname, score in factor_scores.items():
-                w = factor_weights.get(fname, 1.0)
-                tf_score += score * w
-
-            tf_score *= weight
+            # 加权组合得到本周期得分
+            tf_score = sum(factor_scores.values()) * weight
             total_score += tf_score
             total_weight += weight
             if tf_score > 0:
@@ -644,8 +643,10 @@ class SignalEngine:
             elif tf_score < 0:
                 tf_votes.append(-1)
 
-        # 更新因子权重（使用平均IC）
-        avg_ic = {f: np.nanmean(v) for f, v in ic_dict.items() if v}
+        # 更新因子权重（使用各因子在所有周期上的平均IC）
+        avg_ic = {}
+        for fname, ic_list in ic_dict.items():
+            avg_ic[fname] = np.nanmean(ic_list) if ic_list else 0.0
         update_factor_weights(avg_ic)
 
         if total_weight == 0:
@@ -701,9 +702,8 @@ class RiskManager:
         return drawdown > CONFIG.max_drawdown_pct
 
     def calc_var(self, returns: np.ndarray, confidence: float = 0.95) -> float:
-        """计算VaR（历史模拟法）"""
         if len(returns) < 10:
-            return 0.02  # 默认2%
+            return 0.02
         var = np.percentile(returns, (1 - confidence) * 100)
         return abs(var)
 
@@ -756,18 +756,14 @@ class Position:
             return self.stop_loss - self.entry_price
 
     def update_stops(self, current_price: float, atr: float):
-        # 动态调整ATR倍数
-        self.atr_mult = adaptive_atr_multiplier(pd.Series([self.entry_price, current_price]))  # 简化
+        self.atr_mult = adaptive_atr_multiplier(pd.Series([self.entry_price, current_price]))
         if self.direction == 1:
             if current_price > self.highest_price:
                 self.highest_price = current_price
-            # ATR跟踪止损
             new_stop = current_price - atr * self.atr_mult
             self.stop_loss = max(self.stop_loss, new_stop)
-            # 动态止盈
             new_tp = current_price + atr * self.atr_mult * CONFIG.tp_min_ratio
             self.take_profit = max(self.take_profit, new_tp)
-            # 保本
             if current_price >= self.entry_price + self.stop_distance() * CONFIG.breakeven_trigger_pct:
                 self.stop_loss = max(self.stop_loss, self.entry_price)
         else:
@@ -856,7 +852,6 @@ def close_position(symbol: str, exit_price: float, reason: str):
 
 # ==================== 回测引擎 ====================
 def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10000) -> Dict:
-    """简单回测：逐根K线模拟，返回结果DataFrame和最终净值"""
     df_15m = data_dict['15m'].copy()
     balance = initial_balance
     position = None
@@ -868,11 +863,9 @@ def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10
         high = row['high']
         low = row['low']
         atr = row['atr'] if not pd.isna(row['atr']) else 0
-        # 模拟信号（简化：使用当前指标）
         dummy_dict = {tf: data_dict[tf].iloc[:i+1] for tf in data_dict}
         engine = SignalEngine()
         direction, prob = engine.calc_signal(dummy_dict)
-        # 风控（简化）
         if position is None and direction != 0 and prob >= SignalStrength.WEAK.value:
             if atr == 0 or np.isnan(atr):
                 stop_dist = price * 0.01
@@ -890,7 +883,6 @@ def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10
                 'entry_time': row['timestamp']
             }
         elif position is not None:
-            # 检查止损止盈
             if direction == 1:
                 if low <= position['stop']:
                     exit_price = position['stop']
@@ -924,7 +916,7 @@ def run_backtest(data_dict: Dict[str, pd.DataFrame], initial_balance: float = 10
         equity_curve.append({'time': row['timestamp'], 'balance': balance})
     return {'equity': pd.DataFrame(equity_curve), 'trades': pd.DataFrame(trades) if trades else pd.DataFrame()}
 
-# ==================== UI渲染器 ====================
+# ==================== UI渲染器（与之前相同，略作调整）====================
 class UIRenderer:
     def __init__(self):
         self.fetcher = get_fetcher()
@@ -1071,7 +1063,6 @@ class UIRenderer:
         atr_pct = (atr / current_price * 100) if atr > 0 else 0
         st.session_state.circuit_breaker = risk.check_circuit_breaker(atr_pct, data['fear_greed'])
 
-        # 回测模式处理
         if st.session_state.mode == 'backtest':
             if st.button("▶️ 运行回测"):
                 with st.spinner("回测中..."):
@@ -1087,9 +1078,8 @@ class UIRenderer:
                 st.plotly_chart(fig, use_container_width=True)
                 if not trades.empty:
                     st.dataframe(trades.tail(10))
-            return  # 回测模式下不执行自动交易
+            return
 
-        # 实盘模式：信号与交易
         direction, prob = engine.calc_signal(df_dict)
         recent_returns = df_15m['close'].pct_change().dropna().values[-20:]
         size = risk.calc_position_size(st.session_state.account_balance, prob, atr, current_price, recent_returns)
@@ -1163,7 +1153,6 @@ class UIRenderer:
             if st.session_state.cooldown_until:
                 st.warning(f"冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
 
-            # 绩效指标
             perf = st.session_state.performance_metrics
             st.markdown("### 📈 绩效指标 (近50笔)")
             st.metric("胜率", f"{perf['win_rate']:.2%}")
@@ -1225,9 +1214,9 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 36.0", layout="wide")
+    st.set_page_config(page_title="终极量化终端 36.1", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 超神终极版 36.0")
+    st.title("🚀 终极量化终端 · 超神终极版 36.1")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 多源并行 · 在线学习 · 自适应风控")
 
     init_session_state()
