@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 31.1 最终优化版
-· 多周期信号整合
-· 动态止盈止损追踪
-· 正确 ATR 仓位计算
-· 持仓管理 + 信号防重
-· 日内交易次数限制 + 连续亏损冷却
-· 实盘/模拟自由切换
+🚀 终极量化终端 31.2 增强开仓版
+· 阈值调低至0.40，风险比例0.05
+· 增加手动开仓按钮
+· 调试日志实时显示
 """
 
 import streamlit as st
@@ -34,7 +31,7 @@ class SignalStrength(Enum):
     STRONG = 0.70
     HIGH = 0.62
     MEDIUM = 0.55
-    WEAK = 0.50
+    WEAK = 0.40  # 调低至0.40
     NONE = 0.0
 
 class MarketRegime(Enum):
@@ -45,7 +42,7 @@ class MarketRegime(Enum):
 @dataclass
 class TradingConfig:
     symbols: List[str] = field(default_factory=lambda: ["ETH/USDT", "BTC/USDT", "SOL/USDT", "BNB/USDT"])
-    base_risk_per_trade: float = 0.02
+    base_risk_per_trade: float = 0.05  # 提高风险比例
     risk_budget_ratio: float = 0.10
     daily_loss_limit: float = 300.0
     max_drawdown_pct: float = 20.0
@@ -60,7 +57,7 @@ class TradingConfig:
     cooldown_losses: int = 3
     cooldown_hours: int = 24
     max_daily_trades: int = 5
-    atr_multiplier: float = 1.5  # 止损距离 = ATR * multiplier
+    atr_multiplier: float = 1.5
     leverage_modes: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
         "稳健 (3-5x)": (3, 5),
         "无敌 (5-8x)": (5, 8),
@@ -78,17 +75,14 @@ class TradingConfig:
     anti_duplicate_seconds: int = 300
     slippage_base: float = 0.0003
     fee_rate: float = 0.0004
-    # 模拟数据参数
     sim_volatility: float = 0.05
     sim_trend_strength: float = 0.15
 
 CONFIG = TradingConfig()
 
-# ==================== 日志系统 ====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("UltimateTrader")
 
-# ==================== 辅助函数 ====================
 def init_session_state():
     defaults = {
         'account_balance': 10000.0,
@@ -97,7 +91,7 @@ def init_session_state():
         'consecutive_losses': 0,
         'daily_trades': 0,
         'trade_log': [],
-        'position': None,          # 当前持仓（Position 对象）
+        'position': None,
         'auto_enabled': True,
         'pause_until': None,
         'exchange': None,
@@ -110,12 +104,12 @@ def init_session_state():
         'circuit_breaker': False,
         'cooldown_until': None,
         'mc_results': None,
-        'use_simulated_data': True,  # 默认模拟，开箱即用
+        'use_simulated_data': True,
         'data_source_failed': False,
         'error_log': [],
         'execution_log': [],
         'last_trade_date': None,
-        'multi_df': {},              # 多周期数据缓存
+        'multi_df': {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -132,12 +126,9 @@ def log_execution(msg: str):
     if len(st.session_state.execution_log) > 20:
         st.session_state.execution_log.pop(0)
 
-# ==================== 超真实模拟数据生成器（修复版）====================
 def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
-    """生成动态波动的模拟K线数据，包含所有技术指标"""
     np.random.seed(abs(hash(symbol)) % 2**32)
     end = datetime.now()
-    # 使用 end 和 periods 生成时间戳，避免 start 计算误差
     timestamps = pd.date_range(end=end, periods=limit, freq='15min')
     
     if 'BTC' in symbol:
@@ -150,7 +141,6 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
         base = 100
         volatility = CONFIG.sim_volatility * 1.3
     
-    # 生成价格序列（趋势 + 周期 + 随机）
     t = np.linspace(0, 4*np.pi, limit)
     trend_direction = np.random.choice([-1, 1])
     trend = trend_direction * CONFIG.sim_trend_strength * np.linspace(0, 1, limit) * base
@@ -160,7 +150,6 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
     price_series = base + trend + cycle + random_walk
     price_series = np.maximum(price_series, base * 0.2)
     
-    # 生成OHLC
     opens = price_series * (1 + np.random.randn(limit) * 0.001)
     closes = price_series * (1 + np.random.randn(limit) * 0.002)
     highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility * price_series
@@ -194,23 +183,19 @@ def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.Data
     
     return data_dict
 
-# ==================== 技术指标计算（使用ta库）====================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # 基础指标
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
     df['atr'] = atr
-    df['atr_ma'] = atr  # 直接用ATR，也可平滑
-    # 额外用于信号
+    df['atr_ma'] = atr
     df['macd'] = ta.trend.macd(df['close'])
     df['macd_signal'] = ta.trend.macd_signal(df['close'])
     df['macd_diff'] = df['macd'] - df['macd_signal']
     return df
 
-# ==================== 数据获取器（同步，内置模拟回退）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
@@ -218,7 +203,6 @@ def get_fetcher() -> 'AggregatedDataFetcher':
 class AggregatedDataFetcher:
     def __init__(self):
         self.exchanges = {}
-        # 仅当需要实盘时初始化，避免无网络时卡住
         if not st.session_state.get('use_simulated_data', True):
             for name in CONFIG.exchanges.keys():
                 try:
@@ -228,7 +212,6 @@ class AggregatedDataFetcher:
                     logger.error(f"初始化交易所 {name} 失败: {e}")
 
     def fetch_kline(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-        """从第一个可用的交易所获取K线"""
         for ex in self.exchanges.values():
             try:
                 ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -243,7 +226,6 @@ class AggregatedDataFetcher:
         return None
 
     def get_symbol_data(self, symbol: str) -> Optional[Dict[str, pd.DataFrame]]:
-        """获取多周期数据，失败时返回None"""
         data_dict = {}
         for tf in CONFIG.timeframes:
             df = self.fetch_kline(symbol, tf, CONFIG.fetch_limit)
@@ -254,40 +236,32 @@ class AggregatedDataFetcher:
                 return None
         return data_dict
 
-# ==================== 多周期信号整合 ====================
 def calc_multi_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
-    """返回 (方向, 概率)  方向: 1多, -1空, 0无"""
     score = 0
     total_weight = 0
     for tf, df in multi_df.items():
         last = df.iloc[-1]
         weight = CONFIG.timeframe_weights.get(tf, 1)
         total_weight += weight
-        # 简单趋势判断：价格在EMA20之上且RSI未超买 -> 多头；反之空头
         if last['close'] > last['ema20'] and last['rsi'] < 70:
             score += weight
         elif last['close'] < last['ema20'] and last['rsi'] > 30:
             score -= weight
-        # 否则不加分
     if score > 0:
         direction = 1
     elif score < 0:
         direction = -1
     else:
         direction = 0
-    # 概率映射：|score|/total_weight 映射到 [0.5, 0.9]
     prob = 0.5 + 0.4 * min(1.0, abs(score) / total_weight)
     return direction, prob
 
-# ==================== 风控 & 仓位 ====================
 def calc_position_size(balance: float, prob: float, atr: float, price: float) -> float:
-    """计算开仓数量 (合约数量)"""
-    edge = max(0.05, prob - 0.5)  # 边缘概率增益
-    risk_amount = balance * CONFIG.base_risk_per_trade * edge  # 风险金额
-    stop_distance = atr * CONFIG.atr_multiplier  # 止损距离（价格）
-    # 合约数量 = 风险金额 / 止损距离
+    edge = max(0.05, prob - 0.5)
+    risk_amount = balance * CONFIG.base_risk_per_trade * edge
+    stop_distance = atr * CONFIG.atr_multiplier
     size = risk_amount / stop_distance
-    return size
+    return max(size, 0.001)  # 确保至少0.001
 
 def check_daily_limit() -> bool:
     today = datetime.now().date()
@@ -310,13 +284,11 @@ def update_losses(win: bool):
         st.session_state.cooldown_until = None
 
 def check_circuit_breaker(atr_pct: float, fear_greed: int) -> bool:
-    """熔断检查：波动过大或情绪极端"""
     return atr_pct > 5.0 or fear_greed <= 10 or fear_greed >= 90
 
-# ==================== 持仓管理 ====================
 @dataclass
 class Position:
-    direction: int          # 1多 -1空
+    direction: int
     entry_price: float
     entry_time: datetime
     size: float
@@ -330,22 +302,18 @@ class Position:
         return (current_price - self.entry_price) * self.size * self.direction
 
     def update_stops(self, current_price: float, atr: float):
-        """移动止损/止盈"""
         if self.direction == 1:
-            # 多单：止损上移，止盈上移
             new_stop = current_price - atr * CONFIG.atr_multiplier
             self.stop_loss = max(self.stop_loss, new_stop)
             new_take = current_price + atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
             self.take_profit = max(self.take_profit, new_take)
         else:
-            # 空单：止损下移，止盈下移
             new_stop = current_price + atr * CONFIG.atr_multiplier
             self.stop_loss = min(self.stop_loss, new_stop)
             new_take = current_price - atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
             self.take_profit = min(self.take_profit, new_take)
 
     def should_close(self, high: float, low: float, current_time: datetime) -> Tuple[bool, str, float]:
-        """检查是否触及止损/止盈，返回 (平仓标志, 原因, 平仓价格)"""
         if self.direction == 1:
             if low <= self.stop_loss:
                 return True, "止损", self.stop_loss
@@ -356,12 +324,10 @@ class Position:
                 return True, "止损", self.stop_loss
             if low <= self.take_profit:
                 return True, "止盈", self.take_profit
-        # 超时平仓
         if (current_time - self.entry_time).total_seconds() / 3600 > CONFIG.max_hold_hours:
             return True, "超时", (high + low) / 2
         return False, "", 0
 
-# ==================== Monte Carlo 模拟 ====================
 def monte_carlo_sim(price_series: pd.Series, n_sim: int = 500) -> pd.DataFrame:
     returns = price_series.pct_change().dropna().values
     last_price = price_series.iloc[-1]
@@ -370,11 +336,9 @@ def monte_carlo_sim(price_series: pd.Series, n_sim: int = 500) -> pd.DataFrame:
         sim[i, 0] = last_price
         for t in range(1, len(price_series)):
             sim[i, t] = sim[i, t-1] * (1 + np.random.choice(returns))
-    return pd.DataFrame(sim.T)  # 时间轴为行，模拟路径为列
+    return pd.DataFrame(sim.T)
 
-# ==================== 执行下单（模拟/实盘）====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
-    """记录开仓，实际实盘需扩展"""
     dir_str = "多" if direction == 1 else "空"
     st.session_state.position = Position(
         direction=direction,
@@ -383,14 +347,13 @@ def execute_order(symbol: str, direction: int, size: float, price: float, stop: 
         size=size,
         stop_loss=stop,
         take_profit=take,
-        initial_atr=0,  # 暂不记录
+        initial_atr=0,
         real=st.session_state.get('use_real', False) and st.session_state.exchange is not None
     )
     st.session_state.daily_trades += 1
     log_execution(f"开仓 {symbol} {dir_str} 仓位 {size:.4f} @ {price:.2f} 止损 {stop:.2f} 止盈 {take:.2f}")
 
 def close_position(symbol: str, exit_price: float, reason: str):
-    """平仓并记录盈亏"""
     pos = st.session_state.position
     if pos is None:
         return
@@ -403,10 +366,7 @@ def close_position(symbol: str, exit_price: float, reason: str):
     log_execution(f"平仓 {symbol} {reason} 盈亏 {pnl:.2f}")
     st.session_state.position = None
 
-# ==================== 自动交易循环（每次刷新执行）====================
 def auto_trade_step(symbol: str):
-    """在每次刷新时调用，执行数据更新、信号计算、开平仓判断"""
-    # 获取多周期数据
     if st.session_state.use_simulated_data:
         multi_df = generate_simulated_data(symbol, CONFIG.fetch_limit)
     else:
@@ -420,24 +380,27 @@ def auto_trade_step(symbol: str):
     df_15m = multi_df['15m']
     current_price = df_15m['close'].iloc[-1]
     atr = df_15m['atr'].iloc[-1]
-    fear_greed = 50  # 可扩展获取
+    fear_greed = 50
 
-    # 熔断检查
     if check_circuit_breaker(df_15m['atr'].iloc[-1] / current_price * 100, fear_greed):
         st.session_state.circuit_breaker = True
     else:
         st.session_state.circuit_breaker = False
 
-    # 冷却、交易次数限制
     if st.session_state.circuit_breaker or check_cooldown() or check_daily_limit():
-        # 不进行新开仓
         pass
     else:
-        # 计算信号
         direction, prob = calc_multi_signal(multi_df)
         size = calc_position_size(st.session_state.account_balance, prob, atr, current_price)
 
-        # 如果已有持仓，检查平仓条件
+        # 调试信息（显示在界面上）
+        with st.expander("🔍 开仓调试信息", expanded=False):
+            st.write(f"方向: {direction} (1多 -1空)")
+            st.write(f"概率: {prob:.2%}")
+            st.write(f"计算仓位: {size:.4f}")
+            st.write(f"信号阈值: {SignalStrength.WEAK.value:.2%}")
+            st.write(f"是否满足开仓条件: {direction != 0 and prob >= SignalStrength.WEAK.value and size > 0}")
+
         if st.session_state.position:
             pos = st.session_state.position
             high = df_15m['high'].iloc[-1]
@@ -446,12 +409,9 @@ def auto_trade_step(symbol: str):
             if should_close:
                 close_position(symbol, exit_price, reason)
             else:
-                # 更新移动止损
                 pos.update_stops(current_price, atr)
         else:
-            # 无持仓，且信号足够强，且未超风控
             if direction != 0 and prob >= SignalStrength.WEAK.value and size > 0:
-                # 防重：避免信号过于频繁
                 if st.session_state.last_signal_time and (datetime.now() - st.session_state.last_signal_time).total_seconds() < CONFIG.anti_duplicate_seconds:
                     return
                 stop_distance = atr * CONFIG.atr_multiplier
@@ -460,7 +420,6 @@ def auto_trade_step(symbol: str):
                 execute_order(symbol, direction, size, current_price, stop, take)
                 st.session_state.last_signal_time = datetime.now()
 
-# ==================== UI渲染 ====================
 def render_sidebar():
     with st.sidebar:
         st.header("⚙️ 配置")
@@ -490,7 +449,6 @@ def render_sidebar():
         st.markdown("---")
         st.subheader("实盘")
         exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()))
-        # 从secrets读取密钥（需提前配置）
         api_key = st.text_input("API Key", type="password")
         secret_key = st.text_input("Secret Key", type="password")
         passphrase = st.text_input("Passphrase", type="password") if "OKX" in exchange_choice else None
@@ -525,6 +483,18 @@ def render_sidebar():
 
         if st.button("运行回测"):
             st.info("回测功能暂未集成，可使用外部工具")
+
+        if st.button("🖐️ 手动开仓测试"):
+            # 强制以当前价格开多单（用于测试）
+            multi_df = st.session_state.multi_df
+            if multi_df:
+                price = multi_df['15m']['close'].iloc[-1]
+                atr = multi_df['15m']['atr'].iloc[-1]
+                stop = price - atr * CONFIG.atr_multiplier
+                take = price + atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
+                size = calc_position_size(st.session_state.account_balance, 0.7, atr, price)  # 假设概率70%
+                execute_order(st.session_state.current_symbol, 1, size, price, stop, take)
+                st.rerun()
 
         if st.session_state.error_log:
             with st.expander("⚠️ 错误日志"):
@@ -621,7 +591,6 @@ def render_main_panel():
         fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Monte Carlo 风险模拟
         if st.button("运行 Monte Carlo 风险模拟"):
             sim_df = monte_carlo_sim(df_15m['close'], n_sim=500)
             fig_mc = go.Figure()
@@ -631,21 +600,16 @@ def render_main_panel():
             fig_mc.update_layout(height=300, template='plotly_dark')
             st.plotly_chart(fig_mc, use_container_width=True)
 
-# ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 31.1", layout="wide")
+    st.set_page_config(page_title="终极量化终端 31.2", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 最终优化版 31.1")
+    st.title("🚀 终极量化终端 · 增强开仓版 31.2")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北")
 
     init_session_state()
     render_sidebar()
-
-    # 执行自动交易步骤（每次刷新）
     auto_trade_step(st.session_state.current_symbol)
-
     render_main_panel()
-
     st_autorefresh(interval=CONFIG.auto_refresh_ms, key="auto_refresh")
 
 if __name__ == "__main__":
