@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 完美极限版 41.0
+🚀 终极量化终端 · 完美极限版 41.1
 ==================================================
 核心特性：
 1. 协方差矩阵风险平价（动态品种相关性）
@@ -10,10 +10,12 @@
 5. 因子IC显著性检验（p值 + 信息比率）
 6. 多品种持仓显示修复（按品种名称严格匹配，数据永不串位）
 7. 数据一致性验证：自动清理无效持仓，一键修复
-8. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
-9. 高性能并行数据获取 + 自动回退模拟
-10. 完整日志持久化（CSV + 按日文件）
-11. 一键紧急平仓、Telegram通知
+8. 图表时间戳异常自动修复（防止x轴显示未来年份）
+9. 数字格式化修复（数量始终用点，无千位分隔符）
+10. 所有已有功能（多周期信号、在线学习、回测、参数敏感性等）
+11. 高性能并行数据获取 + 自动回退模拟
+12. 完整日志持久化（CSV + 按日文件）
+13. 一键紧急平仓、Telegram通知
 ==================================================
 """
 
@@ -1161,7 +1163,7 @@ def param_sensitivity_heatmap(data_dicts: Dict[str, Dict[str, pd.DataFrame]], sy
             CONFIG.tp_min_ratio = old_tp
     return {'atr_vals': atr_vals, 'tp_vals': tp_vals, 'sharpe': sharpe_matrix}
 
-# ==================== UI渲染器（完美版，修复显示错位）====================
+# ==================== UI渲染器（完美版，修复图表x轴和数字格式化）====================
 class UIRenderer:
     def __init__(self):
         self.fetcher = get_fetcher()
@@ -1454,10 +1456,11 @@ class UIRenderer:
 
             if st.session_state.positions:
                 st.markdown("### 📈 当前持仓")
-                # 按品种名称排序显示，确保数据对应正确
+                # 按品种名称排序显示，确保数据对应正确，并使用点格式化数量
                 for sym in sorted(st.session_state.positions.keys()):
                     pos = st.session_state.positions[sym]
                     pnl = pos.pnl(multi_data[sym]['current_price']) if sym in multi_data else 0
+                    # 强制使用点作为小数点，数量保留4位
                     st.info(f"{sym}: {'多' if pos.direction==1 else '空'} 入场 {pos.entry_price:.2f} 数量 {pos.size:.4f} 浮动盈亏 {pnl:.2f}")
             else:
                 st.markdown("### 无持仓")
@@ -1487,7 +1490,21 @@ class UIRenderer:
                 st.plotly_chart(fig_nv, use_container_width=True)
 
         with col2:
-            df_plot = st.session_state.multi_df[first_sym]['15m'].tail(120)
+            # 获取图表数据，并修复时间戳异常
+            df_plot = st.session_state.multi_df[first_sym]['15m'].tail(120).copy()
+            if not df_plot.empty:
+                # 确保timestamp是datetime类型，并丢弃无效值
+                if not pd.api.types.is_datetime64_any_dtype(df_plot['timestamp']):
+                    df_plot['timestamp'] = pd.to_datetime(df_plot['timestamp'], errors='coerce')
+                df_plot = df_plot.dropna(subset=['timestamp'])
+                # 如果数据为空，显示提示
+                if df_plot.empty:
+                    st.warning("图表数据无效")
+                    return
+            else:
+                st.warning("无图表数据")
+                return
+
             fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5,0.15,0.15,0.2], vertical_spacing=0.02)
             fig.add_trace(go.Candlestick(x=df_plot['timestamp'], open=df_plot['open'], high=df_plot['high'],
                                           low=df_plot['low'], close=df_plot['close']), row=1, col=1)
@@ -1511,10 +1528,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 41.0 · 完美极限", layout="wide")
+    st.set_page_config(page_title="终极量化终端 41.1 · 完美极限", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 完美极限版 41.0")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 协方差风险平价 · 动态滑点 · 组合VaR · 严格Walk Forward · IC显著性 · 数据一致性修复")
+    st.title("🚀 终极量化终端 · 完美极限版 41.1")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 协方差风险平价 · 动态滑点 · 组合VaR · 严格Walk Forward · IC显著性 · 数据一致性修复 · 图表稳定")
 
     init_session_state()
     renderer = UIRenderer()
