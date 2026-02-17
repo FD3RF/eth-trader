@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 终极版 v4.0
+🚀 终极量化终端 · 终极版 v5.0
 ==================================================
 设计哲学：
-1. 安全至上：只读API + IP白名单 + 模拟模式隔离
-2. 风控为王：动态熔断、冷却、日内限制、最大回撤、凯利仓位
-3. 信号可靠：多周期多因子加权 + 趋势过滤 + IC动态调权 + 市场状态识别
-4. 执行坚决：强制止损止盈 + 移动止损 + 保本止损 + 部分止盈
-5. 极致透明：实时调试信息 + 净值曲线 + 风险指标 + 蒙特卡洛模拟
-6. 开箱即用：内置超真实模拟数据生成器，无需任何API即可体验
+1. 安全至上：自动从 secrets.toml 加载只读密钥，刷新永不丢失
+2. 智能切换：若真实数据获取失败，自动回退到模拟数据并提示
+3. 风控为王：动态熔断、冷却、日内限制、最大回撤、凯利仓位
+4. 信号可靠：多周期多因子加权 + 市场状态识别 + IC动态调权
+5. 执行坚决：强制止损止盈 + 移动止损 + 保本止损 + 部分止盈
+6. 极致透明：实时调试信息 + 净值曲线 + 蒙特卡洛模拟
+7. 开箱即用：内置超真实模拟数据生成器，无需API即可体验
 ==================================================
 作者：AI 极限优化版
 最后更新：2026-02-18
@@ -31,7 +32,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import requests
-import json
 
 warnings.filterwarnings('ignore')
 
@@ -111,11 +111,6 @@ class TradingConfig:
     
     # 恐惧贪婪指数API
     fear_greed_api: str = "https://api.alternative.me/fng/?limit=1"
-    
-    # Telegram 配置
-    telegram_enabled: bool = False
-    telegram_token: str = ""
-    telegram_chat_id: str = ""
 
 CONFIG = TradingConfig()
 
@@ -125,6 +120,18 @@ logger = logging.getLogger("UltimateTrader")
 
 # ==================== 辅助函数 ====================
 def init_session_state():
+    """初始化 session_state，并从 secrets 加载 API 密钥"""
+    # 从 secrets.toml 加载 API 密钥（如果存在）
+    if 'BINANCE_API_KEY' in st.secrets:
+        st.session_state.binance_api_key = st.secrets['BINANCE_API_KEY']
+        st.session_state.binance_secret_key = st.secrets['BINANCE_SECRET_KEY']
+        # 如果有有效密钥，默认关闭模拟模式
+        default_use_sim = False
+    else:
+        st.session_state.binance_api_key = ''
+        st.session_state.binance_secret_key = ''
+        default_use_sim = True
+    
     defaults = {
         'account_balance': 10000.0,
         'daily_pnl': 0.0,
@@ -145,7 +152,7 @@ def init_session_state():
         'circuit_breaker': False,
         'cooldown_until': None,
         'mc_results': None,
-        'use_simulated_data': True,
+        'use_simulated_data': default_use_sim,
         'data_source_failed': False,
         'error_log': [],
         'execution_log': [],
@@ -154,6 +161,9 @@ def init_session_state():
         'ic_cache': {},
         'fear_greed': 50,
         'market_regime': MarketRegime.RANGE,
+        'exchange_choice': 'Binance合约',
+        'testnet': True,
+        'use_real': False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -170,7 +180,7 @@ def log_execution(msg: str):
     if len(st.session_state.execution_log) > 30:
         st.session_state.execution_log.pop(0)
     # Telegram通知（如果启用）
-    if CONFIG.telegram_enabled and st.session_state.telegram_token and st.session_state.telegram_chat_id:
+    if st.session_state.telegram_token and st.session_state.telegram_chat_id:
         try:
             requests.post(f"https://api.telegram.org/bot{st.session_state.telegram_token}/sendMessage",
                           json={"chat_id": st.session_state.telegram_chat_id, "text": msg})
@@ -190,7 +200,6 @@ def fetch_fear_greed() -> int:
 
 def detect_market_regime(df_dict: Dict[str, pd.DataFrame]) -> MarketRegime:
     """根据多周期数据识别市场状态"""
-    # 简化版：用1h和4h的ADX和趋势判断
     if '1h' not in df_dict or '4h' not in df_dict:
         return MarketRegime.RANGE
     df1h = df_dict['1h']
@@ -198,12 +207,10 @@ def detect_market_regime(df_dict: Dict[str, pd.DataFrame]) -> MarketRegime:
     if len(df1h) < 20 or len(df4h) < 20:
         return MarketRegime.RANGE
     
-    # 计算近期趋势强度
     adx1h = df1h['adx'].iloc[-1] if not pd.isna(df1h['adx'].iloc[-1]) else 25
     adx4h = df4h['adx'].iloc[-1] if not pd.isna(df4h['adx'].iloc[-1]) else 25
     avg_adx = (adx1h + adx4h) / 2
     
-    # 计算价格位置相对于均线
     close1h = df1h['close'].iloc[-1]
     ema20_1h = df1h['ema20'].iloc[-1] if not pd.isna(df1h['ema20'].iloc[-1]) else close1h
     close4h = df4h['close'].iloc[-1]
@@ -228,7 +235,6 @@ def detect_market_regime(df_dict: Dict[str, pd.DataFrame]) -> MarketRegime:
 
 # ==================== 超真实模拟数据生成器 ====================
 def generate_simulated_data(symbol: str, limit: int = 1500) -> Dict[str, pd.DataFrame]:
-    """生成带有趋势、周期、噪声的模拟数据，不同币种不同特性"""
     seed = int(hashlib.md5(symbol.encode()).hexdigest()[:8], 16) % 2**32
     np.random.seed(seed)
     
@@ -382,7 +388,7 @@ def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
     ic = factor[valid].corr(future[valid])
     return 0.0 if pd.isna(ic) else ic
 
-# ==================== 数据获取器 ====================
+# ==================== 数据获取器（增强版）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
@@ -390,19 +396,40 @@ def get_fetcher() -> 'AggregatedDataFetcher':
 class AggregatedDataFetcher:
     def __init__(self):
         self.exchanges = {}
-        if not st.session_state.get('use_simulated_data', True):
-            for name in CONFIG.exchanges.keys():
-                try:
-                    cls = CONFIG.exchanges[name]
-                    self.exchanges[name] = cls({
-                        'enableRateLimit': True,
-                        'timeout': 30000,
-                        'options': {'defaultType': 'future'}
-                    })
-                except Exception as e:
-                    logger.error(f"初始化交易所 {name} 失败: {e}")
+        self._init_exchanges()
+    
+    def _init_exchanges(self):
+        if st.session_state.get('use_simulated_data', True):
+            return
+        # 只初始化用户选择的交易所，避免多个连接
+        exchange_name = st.session_state.get('exchange_choice', 'Binance合约')
+        api_key = st.session_state.get('binance_api_key', '')
+        secret = st.session_state.get('binance_secret_key', '')
+        if not api_key or not secret:
+            logger.warning("API密钥为空，无法初始化交易所")
+            return
+        try:
+            cls = CONFIG.exchanges[exchange_name]
+            exchange_params = {
+                'apiKey': api_key,
+                'secret': secret,
+                'enableRateLimit': True,
+                'timeout': 30000,
+                'options': {'defaultType': 'future'}
+            }
+            # OKX需要passphrase
+            if 'OKX' in exchange_name:
+                exchange_params['password'] = st.session_state.get('okx_passphrase', '')
+            self.exchanges[exchange_name] = cls(exchange_params)
+            if st.session_state.get('testnet', True):
+                self.exchanges[exchange_name].set_sandbox_mode(True)
+            logger.info(f"交易所 {exchange_name} 初始化成功")
+        except Exception as e:
+            logger.error(f"初始化交易所 {exchange_name} 失败: {e}")
 
     def fetch_kline(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        if not self.exchanges:
+            return None
         for ex in self.exchanges.values():
             try:
                 ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -429,16 +456,10 @@ class AggregatedDataFetcher:
 
 # ==================== 多周期多因子信号整合 ====================
 def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
-    """
-    返回 (方向, 概率)
-    方向: 1多, -1空, 0无
-    概率基于多因子加权得分计算，并考虑市场状态动态调整
-    """
     total_score = 0
     total_weight = 0
     tf_votes = []
     
-    # 获取市场状态进行权重调整
     regime = st.session_state.get('market_regime', MarketRegime.RANGE)
     
     for tf, df in multi_df.items():
@@ -447,13 +468,10 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
         last = df.iloc[-1]
         weight = CONFIG.timeframe_weights.get(tf, 1)
         
-        # 根据市场状态调整周期权重
-        if regime == MarketRegime.TREND_UP or regime == MarketRegime.TREND_DOWN:
-            # 趋势行情加大长周期权重
+        if regime in [MarketRegime.TREND_UP, MarketRegime.TREND_DOWN]:
             if tf in ['4h', '1d']:
                 weight *= 1.5
         elif regime == MarketRegime.RANGE:
-            # 震荡行情加大短周期权重
             if tf in ['15m', '1h']:
                 weight *= 1.3
         
@@ -461,37 +479,31 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
             continue
         
         factor_score = 0
-        # 趋势方向
         if last['close'] > last['ema20']:
             factor_score += 1
         elif last['close'] < last['ema20']:
             factor_score -= 1
         
-        # RSI超买超卖修正
         if last['rsi'] > 70:
             factor_score -= 0.7
         elif last['rsi'] < 30:
             factor_score += 0.7
         
-        # MACD
         if last['macd_diff'] > 0:
             factor_score += 0.8
         elif last['macd_diff'] < 0:
             factor_score -= 0.8
         
-        # 布林带位置
         if not pd.isna(last.get('bb_upper')) and not pd.isna(last.get('bb_lower')):
             if last['close'] > last['bb_upper']:
                 factor_score -= 0.5
             elif last['close'] < last['bb_lower']:
                 factor_score += 0.5
         
-        # 成交量确认
         if not pd.isna(last.get('volume_ratio')):
             if last['volume_ratio'] > 1.5:
                 factor_score *= 1.2
         
-        # ADX趋势强度调整
         adx = last.get('adx', 25)
         if pd.isna(adx):
             adx_boost = 1.0
@@ -502,7 +514,6 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
         else:
             adx_boost = 1.0
         
-        # 动态IC调整
         ic_rsi = calculate_ic(df, 'rsi')
         ic_macd = calculate_ic(df, 'macd_diff')
         ic_adx = calculate_ic(df, 'adx')
@@ -524,12 +535,10 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
     if total_weight == 0:
         return 0, 0.0
     
-    # 计算概率
     max_possible_score = sum(CONFIG.timeframe_weights.values()) * 4.0
     prob_raw = min(1.0, abs(total_score) / max_possible_score) if max_possible_score > 0 else 0.5
     prob = 0.5 + 0.45 * prob_raw
     
-    # 最终方向：多周期投票为主，若概率高则使用加权得分方向
     if prob >= SignalStrength.WEAK.value:
         direction = 1 if total_score > 0 else -1 if total_score < 0 else 0
     else:
@@ -545,24 +554,21 @@ def calc_signal(multi_df: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
 
 # ==================== 凯利公式仓位计算 ====================
 def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> float:
-    """凯利公式计算最优仓位比例"""
     if avg_loss == 0:
         return 0
-    b = avg_win / avg_loss  # 盈亏比
+    b = avg_win / avg_loss
     p = win_rate
     q = 1 - p
     kelly = (p * b - q) / b
-    return max(0, min(kelly, 0.25))  # 限制最大25%，避免过度冒险
+    return max(0, min(kelly, 0.25))
 
-def calc_position_size(balance: float, prob: float, atr: float, price: float, atr_pct: float, win_rate_history: List[float] = None) -> float:
-    """
-    基于风险预算和凯利公式计算开仓数量
-    """
+def calc_position_size(balance: float, prob: float, atr: float, price: float, atr_pct: float) -> float:
     if price <= 0 or prob < 0.5:
         return 0.0
     
     # 从历史交易中估算胜率和盈亏比
-    if win_rate_history and len(win_rate_history) > 10:
+    win_rate_history = [t['pnl'] for t in st.session_state.trade_log[-50:] if 'pnl' in t]
+    if len(win_rate_history) > 10:
         trades_df = pd.DataFrame(st.session_state.trade_log[-50:])
         if not trades_df.empty:
             wins = trades_df[trades_df['pnl'] > 0]
@@ -572,21 +578,18 @@ def calc_position_size(balance: float, prob: float, atr: float, price: float, at
             avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 1
             kelly = kelly_fraction(win_rate, avg_win, avg_loss)
         else:
-            kelly = 0.02  # 默认2%
+            kelly = 0.02
     else:
         kelly = 0.02
     
-    # 信号置信度调整风险
-    edge = max(0.05, prob - 0.5) * 2  # 将0.5-1.0映射到0-1
+    edge = max(0.05, prob - 0.5) * 2
     risk_amount = balance * kelly * edge
     
-    # 止损距离
     if atr == 0 or np.isnan(atr) or atr < price * CONFIG.min_atr_pct / 100:
         stop_distance = price * 0.01
     else:
         stop_distance = atr * CONFIG.atr_multiplier
     
-    # 杠杆限制
     leverage_mode = st.session_state.get('leverage_mode', "稳健 (3-5x)")
     min_lev, max_lev = CONFIG.leverage_modes.get(leverage_mode, (3,5))
     max_size_by_leverage = balance * max_lev / price
@@ -617,11 +620,9 @@ def update_losses(win: bool):
         st.session_state.cooldown_until = None
 
 def check_circuit_breaker(atr_pct: float, fear_greed: int) -> bool:
-    """熔断条件：波动率过大或极端恐慌/贪婪"""
     return atr_pct > 5.0 or fear_greed <= 15 or fear_greed >= 85
 
 def check_max_drawdown() -> bool:
-    """检查是否超过最大回撤限制"""
     drawdown = (st.session_state.peak_balance - st.session_state.account_balance) / st.session_state.peak_balance * 100
     return drawdown > CONFIG.max_drawdown_pct
 
@@ -657,7 +658,6 @@ class Position:
             self.stop_loss = max(self.stop_loss, trailing_stop)
             new_tp = current_price + atr * CONFIG.atr_multiplier * CONFIG.tp_min_ratio
             self.take_profit = max(self.take_profit, new_tp)
-            # 保本止损
             if current_price >= self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.breakeven_trigger_pct:
                 self.stop_loss = max(self.stop_loss, self.entry_price)
         else:
@@ -692,7 +692,6 @@ class Position:
         if hold_hours > CONFIG.max_hold_hours:
             return True, "超时", (high + low) / 2
         
-        # 部分止盈（可在此实现简化版）
         if not self.partial_taken:
             if self.direction == 1 and high >= self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.partial_tp_r_multiple:
                 return True, "部分止盈", self.entry_price + (self.entry_price - self.stop_loss_original()) * CONFIG.partial_tp_r_multiple
@@ -740,7 +739,6 @@ def close_position(symbol: str, exit_price: float, reason: str):
         st.session_state.peak_balance = st.session_state.account_balance
     st.session_state.net_value_history.append({'time': datetime.now(), 'value': st.session_state.account_balance})
     
-    # 记录交易日志
     st.session_state.trade_log.append({
         'time': datetime.now(),
         'symbol': symbol,
@@ -759,23 +757,29 @@ def close_position(symbol: str, exit_price: float, reason: str):
     log_execution(f"平仓 {symbol} {reason} 盈亏 {pnl:.2f} 余额 {st.session_state.account_balance:.2f}")
     st.session_state.position = None
 
-# ==================== 自动交易循环 ====================
+# ==================== 自动交易循环（增强版）====================
 def auto_trade_step(symbol: str):
+    # 数据源选择
     if st.session_state.use_simulated_data:
         multi_df = generate_simulated_data(symbol, CONFIG.fetch_limit)
+        st.session_state.data_source_failed = False
     else:
         fetcher = get_fetcher()
         multi_df = fetcher.get_symbol_data(symbol)
         if multi_df is None:
-            log_error("获取真实数据失败，请检查网络或切换到模拟模式")
-            return
+            log_error("获取真实数据失败，请检查网络或API权限，已自动切换回模拟数据")
+            st.session_state.use_simulated_data = True
+            st.session_state.data_source_failed = True
+            multi_df = generate_simulated_data(symbol, CONFIG.fetch_limit)
+        else:
+            st.session_state.data_source_failed = False
     
     st.session_state.multi_df = multi_df
     df_15m = multi_df['15m']
     current_price = df_15m['close'].iloc[-1]
     atr = df_15m['atr'].iloc[-1] if not pd.isna(df_15m['atr'].iloc[-1]) else 0
     
-    if not st.session_state.use_simulated_data:
+    if not st.session_state.use_simulated_data and not st.session_state.data_source_failed:
         st.session_state.fear_greed = fetch_fear_greed()
     else:
         st.session_state.fear_greed = 50
@@ -790,10 +794,7 @@ def auto_trade_step(symbol: str):
     st.session_state.circuit_breaker = check_circuit_breaker(atr_pct, st.session_state.fear_greed)
     
     direction, prob = calc_signal(multi_df)
-    
-    # 从历史交易中提取胜率信息用于凯利公式
-    win_rate_history = [t['pnl'] for t in st.session_state.trade_log[-50:] if 'pnl' in t]
-    size = calc_position_size(st.session_state.account_balance, prob, atr, current_price, atr_pct, win_rate_history)
+    size = calc_position_size(st.session_state.account_balance, prob, atr, current_price, atr_pct)
     
     # 调试信息
     with st.expander("🔍 开仓调试信息", expanded=True):
@@ -804,6 +805,7 @@ def auto_trade_step(symbol: str):
         st.write(f"恐惧贪婪: {st.session_state.fear_greed}")
         st.write(f"风控状态: 熔断={st.session_state.circuit_breaker}, 冷却={check_cooldown()}, 日内限制={check_daily_limit()}, 超回撤={check_max_drawdown()}")
         st.write(f"是否满足开仓条件: {direction != 0 and prob >= SignalStrength.WEAK.value and size > 0}")
+        st.write(f"数据源: {'模拟' if st.session_state.use_simulated_data else '实盘'} {'(失败回退)' if st.session_state.data_source_failed else ''}")
     
     if st.session_state.circuit_breaker or check_cooldown() or check_daily_limit() or check_max_drawdown():
         pass
@@ -833,18 +835,28 @@ def auto_trade_step(symbol: str):
                 st.session_state.last_signal_time = datetime.now()
                 st.rerun()
 
-# ==================== UI渲染 ====================
+# ==================== UI渲染（增强版）====================
 def render_sidebar():
     with st.sidebar:
         st.header("⚙️ 配置")
         symbol = st.selectbox("品种", CONFIG.symbols, index=CONFIG.symbols.index(st.session_state.current_symbol))
         st.session_state.current_symbol = symbol
 
+        # 数据源选择
         use_sim = st.checkbox("使用模拟数据（离线模式）", value=st.session_state.get('use_simulated_data', True))
         if use_sim != st.session_state.get('use_simulated_data', True):
             st.session_state.use_simulated_data = use_sim
             st.cache_data.clear()
             st.rerun()
+
+        # 显示当前数据源状态
+        if st.session_state.use_simulated_data:
+            st.info("📡 当前数据源：模拟数据")
+        else:
+            if st.session_state.data_source_failed:
+                st.error("📡 真实数据获取失败，已回退到模拟数据")
+            else:
+                st.success("📡 当前数据源：币安实时数据")
 
         mode = st.selectbox("杠杆模式", list(CONFIG.leverage_modes.keys()))
         st.session_state.leverage_mode = mode
@@ -862,14 +874,17 @@ def render_sidebar():
 
         st.markdown("---")
         st.subheader("实盘")
-        exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()))
-        api_key = st.text_input("API Key", type="password")
-        secret_key = st.text_input("Secret Key", type="password")
+        exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()), key='exchange_choice')
+        
+        # 从 session_state 获取预设的密钥（由 secrets 自动填充）
+        api_key = st.text_input("API Key", value=st.session_state.binance_api_key, type="password")
+        secret_key = st.text_input("Secret Key", value=st.session_state.binance_secret_key, type="password")
         passphrase = st.text_input("Passphrase (仅OKX需要)", type="password") if "OKX" in exchange_choice else None
-        testnet = st.checkbox("测试网", True)
-        use_real = st.checkbox("实盘交易", False)
+        
+        testnet = st.checkbox("测试网", value=st.session_state.get('testnet', True))
+        use_real = st.checkbox("实盘交易", value=st.session_state.get('use_real', False))
 
-        if use_real and api_key and secret_key:
+        if st.button("测试连接"):
             try:
                 ex_class = CONFIG.exchanges[exchange_choice]
                 exchange_params = {
@@ -880,10 +895,18 @@ def render_sidebar():
                 }
                 if passphrase:
                     exchange_params['password'] = passphrase
-                st.session_state.exchange = ex_class(exchange_params)
+                ex = ex_class(exchange_params)
                 if testnet:
-                    st.session_state.exchange.set_sandbox_mode(True)
-                st.success("连接成功")
+                    ex.set_sandbox_mode(True)
+                # 尝试获取 ticker 测试连接
+                ticker = ex.fetch_ticker(symbol)
+                st.success(f"连接成功！当前 {symbol} 价格: {ticker['last']}")
+                # 保存到 session_state
+                st.session_state.exchange = ex
+                st.session_state.binance_api_key = api_key
+                st.session_state.binance_secret_key = secret_key
+                st.session_state.testnet = testnet
+                st.session_state.use_real = use_real
             except Exception as e:
                 st.error(f"连接失败: {e}")
 
@@ -893,7 +916,6 @@ def render_sidebar():
             token = st.text_input("Bot Token", type="password", key="tg_token")
             chat_id = st.text_input("Chat ID", key="tg_chat")
             if token and chat_id:
-                CONFIG.telegram_enabled = True
                 st.session_state.telegram_token = token
                 st.session_state.telegram_chat_id = chat_id
 
@@ -1030,9 +1052,9 @@ def render_main_panel():
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 终极版 v4.0", layout="wide")
+    st.set_page_config(page_title="终极量化终端 终极版 v5.0", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 终极版 v4.0")
+    st.title("🚀 终极量化终端 · 终极版 v5.0")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北")
 
     init_session_state()
