@@ -68,6 +68,8 @@ class TradingConfig:
     })
     # 数据源：国内用户推荐使用 mexc，如需其他可自行添加
     data_sources: List[str] = field(default_factory=lambda: ["mexc"])
+    # 备用数据源（当前数据源全部失败时尝试）
+    fallback_data_sources: List[str] = field(default_factory=lambda: ["binance"])
     timeframes: List[str] = field(default_factory=lambda: ['15m', '1h', '4h', '1d'])
     timeframe_weights: Dict[str, int] = field(default_factory=lambda: {'1d': 10, '4h': 7, '1h': 5, '15m': 3})
     fetch_limit: int = 1500
@@ -140,6 +142,7 @@ def init_session_state():
         'cooldown_until': None,
         'mc_results': None,
         'last_balance_sync': datetime.now(),
+        'data_source_failed': False,  # 标记数据源是否失败
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -169,17 +172,17 @@ def load_secrets_config() -> Dict[str, str]:
     return secrets_config
 
 def send_telegram(msg: str) -> None:
-    token = st.session_state.get('telegram_token') or st.secrets.get('TELEGRAM_BOT_TOKEN')
-    chat_id = st.session_state.get('telegram_chat_id') or st.secrets.get('TELEGRAM_CHAT_ID')
+    token = st.session_state.get('telegram_token') or st.secrets.get('TELEGRAM_BOT_TOKEN', '')
+    chat_id = st.session_state.get('telegram_chat_id') or st.secrets.get('TELEGRAM_CHAT_ID', '')
     if token and chat_id:
         try:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                           json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
                           timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Telegram发送失败: {e}")
 
-# ==================== 数据获取器 ====================
+# ==================== 数据获取器（增强容错版）====================
 @st.cache_resource
 def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
@@ -187,24 +190,38 @@ def get_fetcher() -> 'AggregatedDataFetcher':
 class AggregatedDataFetcher:
     def __init__(self):
         self.exchanges: Dict[str, ccxt.Exchange] = {}
-        for name in CONFIG.data_sources:
+        self._init_exchanges(CONFIG.data_sources)
+        # 如果主数据源全部失败，尝试备用源
+        if not self.exchanges:
+            logger.warning("主数据源全部失败，尝试备用数据源")
+            self._init_exchanges(CONFIG.fallback_data_sources)
+
+    def _init_exchanges(self, sources: List[str]):
+        for name in sources:
             try:
                 cls = getattr(ccxt, name)
                 self.exchanges[name] = cls({'enableRateLimit': True, 'timeout': 30000})
-            except Exception:
-                pass
+                logger.info(f"初始化交易所 {name} 成功")
+            except Exception as e:
+                logger.error(f"初始化交易所 {name} 失败: {e}")
 
     @safe_request()
     def _fetch_kline_single(self, ex: ccxt.Exchange, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-        ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if ohlcv and len(ohlcv) >= 50:
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.astype({col: float for col in ['open','high','low','close','volume']})
-            return df
+        try:
+            ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            if ohlcv and len(ohlcv) >= 50:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df = df.astype({col: float for col in ['open','high','low','close','volume']})
+                return df
+        except Exception as e:
+            logger.warning(f"从 {ex.id} 获取 {symbol} {timeframe} 数据失败: {e}")
         return None
 
     def _fetch_kline(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        if not self.exchanges:
+            logger.error("无可用交易所")
+            return None
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = [executor.submit(self._fetch_kline_single, ex, symbol, timeframe, limit) for ex in self.exchanges.values()]
             for future in concurrent.futures.as_completed(futures):
@@ -218,10 +235,16 @@ class AggregatedDataFetcher:
         fetcher = get_fetcher()
         data_dict = {}
         for tf in CONFIG.timeframes:
-            df = fetcher._fetch_kline(_symbol, tf, CONFIG.fetch_limit)
-            if df is not None and len(df) >= 50:
-                df = fetcher._add_indicators(df)
-                data_dict[tf] = df
+            try:
+                df = fetcher._fetch_kline(_symbol, tf, CONFIG.fetch_limit)
+                if df is not None and len(df) >= 50:
+                    df = fetcher._add_indicators(df)
+                    data_dict[tf] = df
+                else:
+                    logger.warning(f"获取 {tf} 数据不足或失败")
+            except Exception as e:
+                logger.error(f"处理 {tf} 数据时出错: {e}")
+                continue
         return data_dict
 
     @staticmethod
@@ -230,19 +253,25 @@ class AggregatedDataFetcher:
         try:
             r = requests.Session().get("https://api.alternative.me/fng/", timeout=5)
             return int(r.json()['data'][0]['value'])
-        except Exception:
+        except Exception as e:
+            logger.error(f"获取恐惧贪婪指数失败: {e}")
             return 50
 
     def fetch_funding_rate(self, symbol: str) -> float:
+        if not self.exchanges:
+            return 0.0
         rates = []
         for ex in self.exchanges.values():
             try:
                 rates.append(ex.fetch_funding_rate(symbol)['fundingRate'])
-            except Exception:
+            except Exception as e:
+                logger.warning(f"从 {ex.id} 获取资金费率失败: {e}")
                 continue
         return float(np.mean(rates)) if rates else 0.0
 
     def fetch_orderbook_imbalance(self, symbol: str, depth: int = 10) -> float:
+        if not self.exchanges:
+            return 0.0
         for ex in self.exchanges.values():
             try:
                 ob = ex.fetch_order_book(symbol, limit=depth)
@@ -250,21 +279,30 @@ class AggregatedDataFetcher:
                 ask_vol = sum(a[1] for a in ob['asks'])
                 total = bid_vol + ask_vol
                 return (bid_vol - ask_vol) / total if total > 0 else 0.0
-            except Exception:
+            except Exception as e:
+                logger.warning(f"从 {ex.id} 获取订单簿失败: {e}")
                 continue
         return 0.0
 
     def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
-        data_dict = self.fetch_all_timeframes(symbol)
-        if '15m' not in data_dict or data_dict['15m'].empty or len(data_dict['15m']) < 50:
+        try:
+            data_dict = self.fetch_all_timeframes(symbol)
+            if '15m' not in data_dict or data_dict['15m'].empty or len(data_dict['15m']) < 50:
+                logger.error(f"缺少15m数据或数据不足，symbol={symbol}")
+                st.session_state.data_source_failed = True
+                return None
+            st.session_state.data_source_failed = False
+            return {
+                "data_dict": data_dict,
+                "current_price": float(data_dict['15m']['close'].iloc[-1]),
+                "fear_greed": self.fetch_fear_greed(),
+                "funding_rate": self.fetch_funding_rate(symbol),
+                "orderbook_imbalance": self.fetch_orderbook_imbalance(symbol),
+            }
+        except Exception as e:
+            logger.error(f"获取 {symbol} 数据时发生未预期错误: {e}")
+            st.session_state.data_source_failed = True
             return None
-        return {
-            "data_dict": data_dict,
-            "current_price": float(data_dict['15m']['close'].iloc[-1]),
-            "fear_greed": self.fetch_fear_greed(),
-            "funding_rate": self.fetch_funding_rate(symbol),
-            "orderbook_imbalance": self.fetch_orderbook_imbalance(symbol),
-        }
 
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -657,7 +695,11 @@ class ExchangeTrader:
         self.exchange = cls(params)
         if testnet:
             self.exchange.set_sandbox_mode(True)
-        self.exchange.fetch_balance()
+        try:
+            self.exchange.fetch_balance()
+        except Exception as e:
+            logger.error(f"连接交易所 {exchange_name} 失败: {e}")
+            raise
 
     def poll_order_status(self, order_id: str, symbol: str) -> Optional[Dict]:
         market_symbol = symbol.replace('/', '')
@@ -778,8 +820,8 @@ class UIRenderer:
             st.session_state.auto_enabled = st.checkbox("自动交易", True)
 
             with st.expander("Telegram通知"):
-                st.session_state.telegram_token = st.text_input("Bot Token", type="password")
-                st.session_state.telegram_chat_id = st.text_input("Chat ID")
+                st.session_state.telegram_token = st.text_input("Bot Token", value=secrets.get('TELEGRAM_BOT_TOKEN', ''), type="password")
+                st.session_state.telegram_chat_id = st.text_input("Chat ID", value=secrets.get('TELEGRAM_CHAT_ID', ''))
 
             if st.button("🚨 一键紧急平仓"):
                 if st.session_state.auto_position and st.session_state.auto_position.real and st.session_state.exchange:
@@ -994,7 +1036,10 @@ def main():
 
     data = renderer.fetcher.get_symbol_data(symbol)
     if not data:
-        st.error("❌ 数据获取失败，请检查网络或稍后重试")
+        if st.session_state.data_source_failed:
+            st.error("❌ 数据源获取失败，请检查网络或稍后重试。如果您在中国大陆，建议将数据源修改为 `mexc`（已在配置中默认）。")
+        else:
+            st.error("❌ 无法获取交易数据，请检查网络连接。")
         st.stop()
 
     engine = SignalEngine()
