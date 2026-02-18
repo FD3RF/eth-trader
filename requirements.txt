@@ -20,7 +20,7 @@ pyyaml
 dependency-injector
 aiohttp
 stable-baselines3
-gym
+gymnasium
 torch
 prometheus_client
 pytest
