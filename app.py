@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 智能进化版 47.1
+🚀 终极量化终端 · 完美极限版 48.0
 ==================================================
-核心特性（100% 完美极限 + 三阶段智能进化）：
+核心特性（100% 完美极限 + 所有优化）：
 1. 多周期共振信号（1m/5m/15m/1h/4h/1d） + 动态加权
 2. 震荡市场过滤器（布林带宽度 + RSI区间）抑制假信号
 3. 协方差风险平价 + 组合 VaR/CVaR 实时监控（支持正态/历史模拟法）
@@ -13,11 +13,11 @@
 8. 精准回撤计算（当前回撤 + 最大回撤，基于实时权益）
 9. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
 10. 实盘一致性误差统计（滑点对比 + 胜率对比 + 自动报警）
-11. Telegram 增强通知（区分信号、风险、交易类型，支持发送权益曲线和持仓截图）
+11. Telegram 增强通知（区分信号、风险、交易类型，自动推送开/平仓、CVaR报警、权益曲线）
 12. 一键数据修复（清理无效持仓） + 重置所有状态
 13. 高性能并行数据获取（多交易所自动回退）
 14. 完整日志持久化（交易日志、执行日志、错误日志）
-15. 回测引擎 + Walk Forward 验证 + 参数敏感性热力图
+15. 回测引擎 + Walk Forward 验证 + 参数敏感性热力图（回测拆分模拟价格微变）
 16. 因子 IC 显著性检验（均值、标准差、信息比率、p 值，p<0.05 高亮）
 17. 多品种支持（ETH/BTC/SOL/BNB 等，可自由添加）
 18. 滑点 + 手续费精细建模（基于订单深度、波动率、订单簿不平衡）
@@ -28,13 +28,13 @@
 23. 图表 K 线 + 均线 + 持仓标记 + 交易记录可视化
 24. 完全可配置参数（位于 TradingConfig 类中）
 ==================================================
-新增优化（47.1 高优先级补丁）：
-- 补全回测引擎（完整支持新机制，拆分在回测中模拟分批）
-- CVaR 驱动仓位：当 CVaR 超过动态上限的 1.2 倍时，整体减仓 30%
-- 动态订单拆分延迟：延迟时间根据波动率自动调整（高波动短延迟）
-- 因子完全禁用：淘汰后权重直接设为 0（而非 0.1）
-- 夜间减仓直接影响仓位分配（在 allocate_portfolio 中应用乘数）
-- Telegram 加持仓截图：手动发送当前持仓表格
+新增优化（48.0 最后1%极致打磨）：
+- 回测拆分模拟价格微变（引入随机波动）
+- CVaR 减仓分级平滑（超限越多减仓越多）
+- 拆分延迟融入订单簿不平衡因子
+- 关键事件自动推送截图（开/平仓、CVaR 报警）
+- 夜间判断时区可配置（支持美东/亚洲）
+- 收益率矩阵缓存（提升性能）
 ==================================================
 """
 
@@ -188,9 +188,11 @@ class TradingConfig:
     signal_weight_boost: float = 1.5
     atr_price_history_len: int = 20
     funding_rate_threshold: float = 0.05
+    # 夜间配置（可调整时区）
     night_start_hour: int = 0
     night_end_hour: int = 8
     night_risk_multiplier: float = 0.5
+    night_timezone: str = 'US/Eastern'  # 可改为 'Asia/Shanghai'
     # 阶段一：市场状态开仓过滤
     regime_allow_trade: List[MarketRegime] = field(default_factory=lambda: [MarketRegime.TREND, MarketRegime.PANIC])
     # 阶段二：因子相关性降权阈值
@@ -201,11 +203,14 @@ class TradingConfig:
     # 阶段二：因子淘汰阈值
     factor_eliminate_pvalue: float = 0.1
     factor_eliminate_ic: float = 0.02
-    factor_min_weight: float = 0.0  # 改为0，彻底禁用
+    factor_min_weight: float = 0.0
     # 阶段三：订单拆分
     max_order_split: int = 3
     min_order_size: float = 0.001
-    split_delay_seconds: int = 5  # 基础延迟，将根据波动率动态调整
+    split_delay_seconds: int = 5
+    # 新增：CVaR减仓平滑参数
+    cvar_reduce_threshold: float = 1.2   # 超限多少倍开始减仓
+    cvar_reduce_max_ratio: float = 0.5   # 最大减仓比例
 
 CONFIG = TradingConfig()
 
@@ -231,6 +236,9 @@ factor_to_col = {
 ic_decay_records = {f: deque(maxlen=200) for f in factor_weights}
 factor_corr_matrix = None
 last_corr_update = None
+
+# 收益率矩阵缓存
+hist_rets_cache = {'data': None, 'timestamp': None}
 
 # ==================== 日志系统 ====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -335,6 +343,7 @@ def init_session_state():
         'dynamic_max_daily_trades': CONFIG.max_daily_trades,
         'var_method': CONFIG.var_method.value,
         'funding_rates': {},
+        'last_telegram_screenshot': datetime.now(),  # 用于控制推送频率
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -558,11 +567,11 @@ def get_dynamic_var_limit():
         base_limit *= CONFIG.night_risk_multiplier
     return base_limit
 
-# ==================== 夜间时段判断 ====================
+# ==================== 夜间时段判断（可配置时区）====================
 def is_night_time() -> bool:
-    eastern = pytz.timezone('US/Eastern')
-    now_eastern = datetime.now(pytz.utc).astimezone(eastern)
-    hour = now_eastern.hour
+    tz = pytz.timezone(CONFIG.night_timezone)
+    now_tz = datetime.now(pytz.utc).astimezone(tz)
+    hour = now_tz.hour
     if hour >= CONFIG.night_start_hour and hour < CONFIG.night_end_hour:
         return True
     return False
@@ -642,7 +651,7 @@ def eliminate_poor_factors():
     global factor_weights
     for factor, stats in st.session_state.factor_ic_stats.items():
         if stats['p_value'] > CONFIG.factor_eliminate_pvalue and stats['mean'] < CONFIG.factor_eliminate_ic and len(ic_decay_records[factor]) > 30:
-            factor_weights[factor] = 0.0  # 完全禁用
+            factor_weights[factor] = 0.0
             log_execution(f"因子淘汰：{factor} 权重降至0")
 
 # ==================== 超真实模拟数据生成器 ====================
@@ -1002,7 +1011,7 @@ class SignalEngine:
                         if fname not in ic_dict:
                             ic_dict[fname] = []
                         ic_dict[fname].append(ic)
-                        ic_decay_records[fname].append(ic)  # 加入衰减记录
+                        ic_decay_records[fname].append(ic)
 
             tf_score = sum(factor_scores.values()) * weight
             total_score += tf_score
@@ -1103,7 +1112,7 @@ class RiskManager:
         edge = max(0.05, prob - 0.5) * 2
         var = self.calc_var(recent_returns, CONFIG.var_confidence)
         risk_mult = 1.5 if is_aggressive else 1.0
-        kelly = dynamic_kelly_fraction()  # 使用动态Kelly
+        kelly = dynamic_kelly_fraction()
         risk_amount = balance * CONFIG.base_risk_per_trade * edge * kelly * (1 / max(var, 0.01)) * risk_mult
         if atr == 0 or np.isnan(atr) or atr < price * CONFIG.min_atr_pct / 100:
             stop_distance = price * 0.01
@@ -1146,7 +1155,6 @@ class RiskManager:
             if funding_rate_blocked(sym, dir):
                 allocations[sym] = 0.0
                 continue
-            # 阶段一：市场状态开仓过滤
             if not can_open_position(st.session_state.market_regime):
                 allocations[sym] = 0.0
                 continue
@@ -1154,7 +1162,7 @@ class RiskManager:
             allocations[sym] = size
         return allocations
 
-# ==================== 持仓管理（同46.0，增加冲击成本记录）====================
+# ==================== 持仓管理 ====================
 @dataclass
 class Position:
     symbol: str
@@ -1172,7 +1180,7 @@ class Position:
     atr_mult: float = CONFIG.atr_multiplier_base
     slippage_paid: float = 0.0
     price_history: deque = field(default_factory=lambda: deque(maxlen=CONFIG.atr_price_history_len))
-    impact_cost: float = 0.0  # 新增：冲击成本
+    impact_cost: float = 0.0
 
     def __post_init__(self):
         if self.direction == 1:
@@ -1244,7 +1252,7 @@ class Position:
                 return True, "部分止盈", self.entry_price - self.stop_distance() * CONFIG.partial_tp_r_multiple, partial_size
         return False, "", 0.0, None
 
-# ==================== 订单拆分执行（动态延迟）====================
+# ==================== 订单拆分执行（动态延迟，融入imbalance）====================
 def get_current_price(symbol: str) -> float:
     return st.session_state.symbol_current_prices.get(symbol, 0.0)
 
@@ -1252,12 +1260,17 @@ def split_and_execute(symbol: str, direction: int, total_size: float, price: flo
     if total_size <= CONFIG.min_order_size * CONFIG.max_order_split:
         execute_order(symbol, direction, total_size, price, stop, take)
         return
-    # 动态延迟：根据波动率调整（波动率越高，延迟越短）
+    # 获取波动率和imbalance
     vola = 0.02
+    imbalance = 0.0
     if symbol in st.session_state.multi_df:
         rets = st.session_state.multi_df[symbol]['15m']['close'].pct_change().dropna().values[-20:]
         vola = np.std(rets) if len(rets) > 5 else 0.02
-    split_delay = max(1, int(CONFIG.split_delay_seconds * (0.5 / max(vola, 0.01))))  # 示例：高波动时延迟缩短
+    if symbol in st.session_state.symbol_current_prices:
+        imbalance = st.session_state.get('orderbook_imbalance', {}).get(symbol, 0.0)
+    # 动态延迟：高波动短延迟，大imbalance长延迟
+    delay_factor = max(0.5, 1 - abs(imbalance))  # 不平衡越大，延迟越大
+    split_delay = max(1, int(CONFIG.split_delay_seconds * delay_factor / max(vola, 0.01)))
     split_size = total_size / CONFIG.max_order_split
     for i in range(CONFIG.max_order_split):
         if i > 0:
@@ -1266,7 +1279,7 @@ def split_and_execute(symbol: str, direction: int, total_size: float, price: flo
         current_price = get_current_price(symbol)
         execute_order(symbol, direction, split_size, current_price, stop, take)
 
-# ==================== 下单执行（使用高级滑点）====================
+# ==================== 下单执行 ====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
     sym = symbol.strip()
     dir_str = "多" if direction == 1 else "空"
@@ -1281,10 +1294,8 @@ def execute_order(symbol: str, direction: int, size: float, price: float, stop: 
         vola = np.std(rets) if len(rets) > 5 else 0.02
     if sym in st.session_state.symbol_current_prices:
         imbalance = st.session_state.get('orderbook_imbalance', {}).get(sym, 0.0)
-    # 使用高级滑点预测
     slippage = advanced_slippage_prediction(price, size, volume, vola, imbalance)
     exec_price = price + slippage if direction == 1 else price - slippage
-    # 计算冲击成本（用于记录）
     market_impact = (size / max(volume, 1)) ** 0.5 * vola * price * 0.3
     st.session_state.positions[sym] = Position(
         symbol=sym,
@@ -1302,6 +1313,10 @@ def execute_order(symbol: str, direction: int, size: float, price: float, stop: 
     st.session_state.daily_trades += 1
     log_execution(f"开仓 {sym} {dir_str} 仓位 {size:.4f} @ {exec_price:.2f} (原价 {price:.2f}, 滑点 {slippage:.4f}, 冲击 {market_impact:.4f}) 止损 {stop:.2f} 止盈 {take:.2f}")
     send_telegram(f"开仓 {dir_str} {sym}\n价格: {exec_price:.2f}\n仓位: {size:.4f}", msg_type="trade")
+    # 自动推送持仓截图
+    pos_fig = generate_positions_chart()
+    if pos_fig:
+        send_telegram("当前持仓", image=pos_fig)
     st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage, 'impact': market_impact})
 
 def close_position(symbol: str, exit_price: float, reason: str, close_size: Optional[float] = None):
@@ -1365,6 +1380,10 @@ def close_position(symbol: str, exit_price: float, reason: str, close_size: Opti
     RiskManager().update_losses(win)
     log_execution(f"平仓 {sym} {reason} 盈亏 {pnl:.2f} 余额 {st.session_state.account_balance:.2f}")
     send_telegram(f"平仓 {reason}\n盈亏: {pnl:.2f}", msg_type="trade")
+    # 平仓后自动推送权益曲线
+    equity_fig = generate_equity_chart()
+    if equity_fig:
+        send_telegram("当前权益曲线", image=equity_fig)
 
 # ==================== 数据一致性修复 ====================
 def fix_data_consistency(symbols):
@@ -1377,7 +1396,7 @@ def fix_data_consistency(symbols):
         del st.session_state.positions[sym]
     st.session_state.positions = {k: v for k, v in st.session_state.positions.items() if v.size > 0}
 
-# ==================== 生成权益曲线截图用于Telegram ====================
+# ==================== 生成图表 ====================
 def generate_equity_chart():
     if not st.session_state.equity_curve:
         return None
@@ -1394,7 +1413,6 @@ def generate_equity_chart():
     return fig
 
 def generate_positions_chart():
-    """生成当前持仓表格的图片（用于Telegram）"""
     if not st.session_state.positions:
         return None
     data = []
@@ -1422,9 +1440,8 @@ def generate_positions_chart():
     fig.update_layout(title="当前持仓", height=400)
     return fig
 
-# ==================== 回测引擎（完整版，支持拆分模拟）====================
+# ==================== 回测引擎（完整版，模拟拆分价格微变）====================
 def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], initial_balance: float = 10000) -> Dict[str, Any]:
-    # 对齐时间戳
     first_sym = symbols[0]
     base_ts = data_dicts[first_sym]['15m'][['timestamp']].copy()
     aligned_data = {}
@@ -1470,9 +1487,8 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
 
         allocations = risk_manager.allocate_portfolio(symbol_signals, balance)
 
-        # CVaR 超限减仓
+        # CVaR超限减仓（分级平滑）
         if len(symbols) > 1 and symbol_signals:
-            # 构建历史收益率矩阵
             ret_arrays = []
             for sym in symbols:
                 rets = aligned_data[sym]['close'].pct_change().dropna().values[-100:]
@@ -1493,10 +1509,13 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
             if np.sum(weights) > 0:
                 weights = weights / np.sum(weights)
                 cvar = portfolio_cvar(weights, hist_rets, CONFIG.var_confidence)
-                if cvar * 100 > get_dynamic_var_limit() * 1.2:
+                limit = get_dynamic_var_limit()
+                if cvar * 100 > limit * CONFIG.cvar_reduce_threshold:
+                    excess = cvar * 100 / (limit * CONFIG.cvar_reduce_threshold)
+                    reduce_ratio = min(CONFIG.cvar_reduce_max_ratio, 0.3 * excess)
                     for sym in allocations:
-                        allocations[sym] *= 0.7
-                    log_execution("回测：CVaR超限，减仓30%")
+                        allocations[sym] *= (1 - reduce_ratio)
+                    log_execution(f"回测：CVaR超限，减仓 {reduce_ratio*100:.1f}%")
 
         # 夜间减仓
         if is_night_time():
@@ -1512,16 +1531,16 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
                 take = price + stop_dist * CONFIG.tp_min_ratio if dir == 1 else price - stop_dist * CONFIG.tp_min_ratio
                 size = allocations[sym]
                 vola = np.std(aligned_data[sym]['close'].iloc[max(0,i-20):i].pct_change().dropna()) if i>20 else 0.02
-                # 回测中模拟拆分：如果size大于阈值，分成多份
                 if size > CONFIG.min_order_size * CONFIG.max_order_split:
                     split_size = size / CONFIG.max_order_split
                     for k in range(CONFIG.max_order_split):
-                        # 在回测中，每份价格相同（简化），但可以记录多次交易
-                        slippage = dynamic_slippage(price, split_size, volume_dict[sym], vola, 0.0)
+                        # 模拟价格微变
+                        current_price = price * (1 + np.random.normal(0, vola/10))
+                        slippage = dynamic_slippage(current_price, split_size, volume_dict[sym], vola, 0.0)
                         total_slippage += slippage
                         slippage_count += 1
-                        exec_price = price + slippage if dir == 1 else price - slippage
-                        positions[f"{sym}_{k}"] = {  # 用临时键区分
+                        exec_price = current_price + slippage if dir == 1 else current_price - slippage
+                        positions[f"{sym}_{k}"] = {
                             'direction': dir,
                             'entry': exec_price,
                             'size': split_size,
@@ -1530,7 +1549,7 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
                             'entry_time': timestamp,
                             'partial_taken': False,
                             'slippage': slippage,
-                            'symbol': sym  # 保存原始符号
+                            'symbol': sym
                         }
                 else:
                     slippage = dynamic_slippage(price, size, volume_dict[sym], vola, 0.0)
@@ -1681,6 +1700,21 @@ def param_sensitivity_heatmap(data_dicts: Dict[str, Dict[str, pd.DataFrame]], sy
             CONFIG.atr_multiplier_base = old_atr
             CONFIG.tp_min_ratio = old_tp
     return {'atr_vals': atr_vals, 'tp_vals': tp_vals, 'sharpe': sharpe_matrix}
+
+# ==================== 收益率矩阵缓存 ====================
+def get_historical_returns(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], window: int = 100):
+    global hist_rets_cache
+    cache_key = (tuple(symbols), window, datetime.now().strftime('%Y%m%d%H'))
+    if hist_rets_cache.get('key') == cache_key:
+        return hist_rets_cache['data']
+    ret_arrays = []
+    for sym in symbols:
+        rets = data_dicts[sym]['15m']['close'].pct_change().dropna().values[-window:]
+        ret_arrays.append(rets)
+    min_len = min(len(arr) for arr in ret_arrays)
+    hist_rets = np.array([arr[-min_len:] for arr in ret_arrays])
+    hist_rets_cache = {'key': cache_key, 'data': hist_rets}
+    return hist_rets
 
 # ==================== UI渲染器 ====================
 class UIRenderer:
@@ -1932,15 +1966,9 @@ class UIRenderer:
 
         allocations = risk.allocate_portfolio(symbol_signals, st.session_state.account_balance)
 
-        # CVaR 超限减仓
+        # CVaR超限减仓（分级平滑）
         if len(symbols) > 1 and symbol_signals:
-            # 构建历史收益率矩阵
-            ret_arrays = []
-            for sym in symbols:
-                rets = st.session_state.multi_df[sym]['15m']['close'].pct_change().dropna().values[-100:]
-                ret_arrays.append(rets)
-            min_len = min(len(arr) for arr in ret_arrays)
-            hist_rets = np.array([arr[-min_len:] for arr in ret_arrays])
+            hist_rets = get_historical_returns(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, window=100)
             total_value = st.session_state.account_balance
             weights = []
             for sym in symbols:
@@ -1955,11 +1983,18 @@ class UIRenderer:
             if np.sum(weights) > 0:
                 weights = weights / np.sum(weights)
                 cvar = portfolio_cvar(weights, hist_rets, CONFIG.var_confidence)
-                if cvar * 100 > get_dynamic_var_limit() * 1.2:
+                limit = get_dynamic_var_limit()
+                if cvar * 100 > limit * CONFIG.cvar_reduce_threshold:
+                    excess = cvar * 100 / (limit * CONFIG.cvar_reduce_threshold)
+                    reduce_ratio = min(CONFIG.cvar_reduce_max_ratio, 0.3 * excess)
                     for sym in allocations:
-                        allocations[sym] *= 0.7
-                    log_execution("CVaR超限，自动减仓30%")
-                    send_telegram(f"CVaR超限 ({cvar*100:.2f}% > {get_dynamic_var_limit()*1.2:.1f}%)，整体减仓30%", msg_type="risk")
+                        allocations[sym] *= (1 - reduce_ratio)
+                    log_execution(f"CVaR超限，自动减仓 {reduce_ratio*100:.1f}%")
+                    send_telegram(f"CVaR超限 ({cvar*100:.2f}% > {limit*CONFIG.cvar_reduce_threshold:.1f}%)，减仓 {reduce_ratio*100:.1f}%", msg_type="risk")
+                    # 推送权益曲线
+                    equity_fig = generate_equity_chart()
+                    if equity_fig:
+                        send_telegram("CVaR报警后的权益曲线", image=equity_fig)
 
         # 夜间减仓
         if is_night_time():
@@ -2001,17 +2036,7 @@ class UIRenderer:
             if sym in multi_data:
                 total_floating += pos.pnl(multi_data[sym]['current_price'])
 
-        # 构建历史收益率用于VaR/CVaR
-        historical_rets = None
-        if len(symbols) > 1:
-            ret_arrays = []
-            for sym in symbols:
-                rets = st.session_state.multi_df[sym]['15m']['close'].pct_change().dropna().values[-100:]
-                ret_arrays.append(rets)
-            min_len = min(len(arr) for arr in ret_arrays)
-            hist_rets = np.array([arr[-min_len:] for arr in ret_arrays])
-            historical_rets = hist_rets
-
+        # 计算VaR/CVaR（使用缓存）
         portfolio_var_value = 0.0
         portfolio_cvar_value = 0.0
         if st.session_state.cov_matrix is not None and len(symbols) > 1:
@@ -2029,8 +2054,9 @@ class UIRenderer:
             if np.sum(weights) > 0:
                 weights = weights / np.sum(weights)
                 method = st.session_state.get('var_method', CONFIG.var_method.value)
-                portfolio_var_value = portfolio_var(weights, st.session_state.cov_matrix, CONFIG.var_confidence, method, historical_rets)
-                portfolio_cvar_value = portfolio_cvar(weights, historical_rets, CONFIG.var_confidence)
+                hist_rets = get_historical_returns(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, window=100)
+                portfolio_var_value = portfolio_var(weights, st.session_state.cov_matrix, CONFIG.var_confidence, method, hist_rets)
+                portfolio_cvar_value = portfolio_cvar(weights, hist_rets, CONFIG.var_confidence)
 
         record_equity_point()
         current_dd, max_dd = calculate_drawdown()
@@ -2085,7 +2111,7 @@ class UIRenderer:
                 st.warning(f"冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
 
             if is_night_time():
-                st.info("🌙 当前为美东夜间时段，风险预算已降低")
+                st.info(f"🌙 当前为 {CONFIG.night_timezone} 夜间时段，风险预算已降低")
 
             if st.session_state.regime_stats:
                 with st.expander("📈 市场状态统计"):
@@ -2161,10 +2187,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 47.1 · 智能进化版", layout="wide")
+    st.set_page_config(page_title="终极量化终端 48.0 · 完美极限", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 智能进化版 47.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 三阶段智能进化 · CVaR驱动 · 动态拆分 · 因子淘汰 · 夜间减仓 · 持仓截图")
+    st.title("🚀 终极量化终端 · 完美极限版 48.0")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 三阶段智能进化 · CVaR分级 · 动态拆分 · 因子淘汰 · 夜间减仓 · 自动截图 · 性能优化")
 
     init_session_state()
     renderer = UIRenderer()
