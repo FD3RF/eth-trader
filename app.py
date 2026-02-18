@@ -29,7 +29,7 @@
 24. 完全可配置参数（位于 TradingConfig 类中）
 ==================================================
 新增优化（48.1 最后修复）：
-- 修正 portfolio_cvar 调用中的变量名错误（hist_rets 和 CONFIG.var_confidence）
+- 修正 portfolio_cvar 调用中的变量名错误（cvarsportfolio_cvar → cvar = portfolio_cvar）
 - 确保所有引用正确，无拼写错误
 - 增加更多的防御性检查，防止空数据引发异常
 ==================================================
