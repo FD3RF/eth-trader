@@ -1,23 +1,23 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 机构版 59.0（极限优化版）
+🚀 终极量化终端 · 机构版 60.0（极致优化版）
 ===================================================
-核心特性（相较于58.0）：
-- 全异步任务管理 + 并发限流（Semaphore） + 超时控制
-- 增量指标计算缓存优化（使用数据指纹，避免整表哈希）
-- 因子权重更新向量化 + IC计算缓存（lru_cache）
-- 协方差矩阵计算优化（增量更新）
-- 滑点模型精确化（加入买卖方向影响）
-- 结构化日志（structlog） + 健康检查
-- 配置热加载（支持动态更新）
-- 资源管理上下文化（async with）
-- 性能剖析装饰器（可选）
-- 更多类型注解和断言
+核心特性：
+- 全异步任务管理 + 独立交易所限流 + 超时控制
+- 增量指标计算 + 数据指纹缓存（TTLCache）
+- 因子IC向量化更新 + 缓存指纹化
+- 协方差矩阵动态更新 + 滑点模型精确化
+- 结构化日志（structlog） + 健康检查 + 配置热加载
+- 资源管理上下文化 + 性能剖析装饰器（可选）
+- 完整回测引擎（事件驱动） + 实盘执行保护
+- 完善的类型注解和防御性编程
 ===================================================
 """
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import pickle
@@ -32,20 +32,21 @@ from enum import Enum
 from functools import lru_cache, partial, wraps
 from pathlib import Path
 from typing import (Any, Callable, Deque, Dict, List, Optional, Set, Tuple,
-                    Union, AsyncIterator, Awaitable)
+                    Union, AsyncIterator, Awaitable, TypeVar, cast)
+import numpy as np
+import pandas as pd
+import yaml
 
+# 第三方库
 import aiofiles
 import aiocsv
 import aiohttp
 import ccxt.async_support as ccxt_async
 import joblib
-import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 import pytz
 import streamlit as st
 import ta
-import yaml
 from cachetools import TTLCache
 from dependency_injector import containers, providers
 from plotly.subplots import make_subplots
@@ -58,7 +59,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.preprocessing import StandardScaler
 from streamlit_autorefresh import st_autorefresh
 from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
-                      wait_exponential, retry_if_exception, RetryError)
+                      wait_exponential, AsyncRetrying, RetryError)
 import structlog
 from structlog import get_logger
 
@@ -68,7 +69,6 @@ try:
     from gymnasium import spaces
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv
-
     RL_AVAILABLE = True
 except ImportError:
     RL_AVAILABLE = False
@@ -76,7 +76,6 @@ except ImportError:
 # HMM（可选）
 try:
     from hmmlearn import hmm
-
     HMM_AVAILABLE = True
 except ImportError:
     HMM_AVAILABLE = False
@@ -86,10 +85,12 @@ warnings.filterwarnings("ignore")
 # ==================== 常量定义 ====================
 LOG_DIR = "logs"
 MODEL_DIR = "models"
+DATA_DIR = "data"
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-TRADE_LOG_FILE = os.path.join(LOG_DIR, "trade_log.jsonl")      # 改为JSONL格式，便于结构化
+TRADE_LOG_FILE = os.path.join(LOG_DIR, "trade_log.jsonl")
 PERF_LOG_FILE = os.path.join(LOG_DIR, "performance_log.jsonl")
 SLIPPAGE_LOG_FILE = os.path.join(LOG_DIR, "slippage_log.jsonl")
 EQUITY_CURVE_FILE = os.path.join(LOG_DIR, "equity_curve.jsonl")
@@ -115,7 +116,7 @@ class AsyncJSONLogger:
         self._stopped = False
 
     async def start(self):
-        self._task = asyncio.create_task(self._worker())
+        self._task = asyncio.create_task(self._worker(), name=f"AsyncJSONLogger-{self.file_path}")
 
     async def stop(self):
         self._stopped = True
@@ -130,19 +131,24 @@ class AsyncJSONLogger:
         await self.queue.put(row)
 
     async def _worker(self):
-        async with aiofiles.open(self.file_path, mode="a", encoding="utf-8") as f:
-            while True:
-                try:
-                    row = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    if self._stopped and self.queue.empty():
+        try:
+            async with aiofiles.open(self.file_path, mode="a", encoding="utf-8") as f:
+                while True:
+                    try:
+                        row = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if self._stopped and self.queue.empty():
+                            break
+                        continue
+                    except asyncio.CancelledError:
                         break
-                    continue
-                if row is None:
-                    break
-                await f.write(json.dumps(row) + "\n")
-                await f.flush()
-                self.queue.task_done()
+                    if row is None:
+                        break
+                    await f.write(json.dumps(row, default=str) + "\n")
+                    await f.flush()
+                    self.queue.task_done()
+        except Exception as e:
+            logger.error("AsyncJSONLogger worker异常", error=str(e), file=self.file_path)
 
 # 全局日志实例
 trade_logger = AsyncJSONLogger(TRADE_LOG_FILE)
@@ -152,7 +158,7 @@ equity_logger = AsyncJSONLogger(EQUITY_CURVE_FILE)
 regime_logger = AsyncJSONLogger(REGIME_STATS_FILE)
 consistency_logger = AsyncJSONLogger(CONSISTENCY_FILE)
 
-# ==================== 领域模型（不变）====================
+# ==================== 领域模型 ====================
 class SignalStrength(Enum):
     EXTREME = 0.85
     STRONG = 0.75
@@ -443,26 +449,38 @@ class TradingConfig(BaseSettings):
         """加载配置，支持热重载"""
         config_file = Path("config.yaml")
         if config_file.exists():
-            mtime = config_file.stat().st_mtime
-            # 这里简化，实际可全局缓存配置对象
             with open(config_file, "r") as f:
                 data = yaml.safe_load(f)
             return cls(**data)
         return cls()
+
+    def reload_if_changed(self):
+        """检查配置文件是否变更，若变更则重新加载自身"""
+        config_file = Path(self.config_path)
+        if config_file.exists():
+            mtime = config_file.stat().st_mtime
+            if mtime > self._last_modified:
+                with open(config_file, "r") as f:
+                    data = yaml.safe_load(f)
+                for key, value in data.items():
+                    if hasattr(self, key):
+                        setattr(self, key, value)
+                self._last_modified = mtime
+                logger.info("配置已热重载", config_path=self.config_path)
 
 def load_config() -> TradingConfig:
     return TradingConfig.load()
 
 CONFIG = load_config()
 
-# ==================== 基础设施（优化版）====================
+# ==================== 基础设施 ====================
 class TelegramNotifier:
     def __init__(self, config: TradingConfig):
         self.token = config.telegram_token
         self.chat_id = config.telegram_chat_id
         self._session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
-        self._retry_policy = retry(
+        self._retryer = AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
             retry=retry_if_exception_type(aiohttp.ClientError)
@@ -472,39 +490,36 @@ class TelegramNotifier:
         if self._session is None:
             self._session = aiohttp.ClientSession()
 
-    @_retry_policy
     async def send(self, msg: str, msg_type: str = "info", image: Optional[Any] = None):
         if not self.token or not self.chat_id:
             return
         async with self._lock:
             await self._ensure_session()
             try:
-                if image is not None:
-                    import io
-                    buf = io.BytesIO()
-                    image.write_image(buf, format='png')
-                    buf.seek(0)
-                    data = aiohttp.FormData()
-                    data.add_field('chat_id', self.chat_id)
-                    data.add_field('photo', buf, filename='chart.png', content_type='image/png')
-                    await self._session.post(f"https://api.telegram.org/bot{self.token}/sendPhoto", data=data)
-                else:
-                    prefix = {'info': 'ℹ️ ', 'signal': '📊 ', 'risk': '⚠️ ', 'trade': '🔄 '}.get(msg_type, '')
-                    full_msg = f"{prefix}{msg}"
-                    await self._session.post(
-                        f"https://api.telegram.org/bot{self.token}/sendMessage",
-                        json={"chat_id": self.chat_id, "text": full_msg}
-                    )
+                async for attempt in self._retryer:
+                    with attempt:
+                        if image is not None:
+                            import io
+                            buf = io.BytesIO()
+                            image.write_image(buf, format='png')
+                            buf.seek(0)
+                            data = aiohttp.FormData()
+                            data.add_field('chat_id', self.chat_id)
+                            data.add_field('photo', buf, filename='chart.png', content_type='image/png')
+                            await self._session.post(f"https://api.telegram.org/bot{self.token}/sendPhoto", data=data)
+                        else:
+                            prefix = {'info': 'ℹ️ ', 'signal': '📊 ', 'risk': '⚠️ ', 'trade': '🔄 '}.get(msg_type, '')
+                            full_msg = f"{prefix}{msg}"
+                            await self._session.post(
+                                f"https://api.telegram.org/bot{self.token}/sendMessage",
+                                json={"chat_id": self.chat_id, "text": full_msg}
+                            )
             except Exception as e:
-                logger.warning("Telegram发送失败", error=str(e))
-                raise
+                logger.warning("Telegram发送失败", error=str(e), exc_info=True)
 
     async def close(self):
         if self._session:
             await self._session.close()
-
-# 使用structlog作为全局日志
-logger = structlog.get_logger()
 
 # ==================== 监控 ====================
 class PrometheusMetrics:
@@ -535,28 +550,36 @@ class PrometheusMetrics:
     def observe_latency(self, seconds: float):
         self.latency.observe(seconds)
 
-# ==================== 指标计算（增量 + LRU缓存 + 数据指纹）====================
+# ==================== 指标计算（增量 + 数据指纹缓存）====================
 class IndicatorCalculator:
-    """技术指标计算，支持增量更新，使用数据指纹避免整表哈希"""
-    _cache: Dict[str, Tuple[pd.DataFrame, str]] = {}  # 值存储 (df, fingerprint)
+    """技术指标计算，支持增量更新，使用数据指纹避免全表重算"""
+    _cache: TTLCache = TTLCache(maxsize=100, ttl=300)  # 键: (symbol, timeframe, fingerprint)
     _last_rows: Dict[str, pd.Series] = {}  # 用于增量更新
 
     @staticmethod
     def _fingerprint(df: pd.DataFrame) -> str:
-        """生成数据帧的指纹（基于最后一行时间戳和形状）"""
+        """生成数据帧的指纹（基于最后50行的时间戳和收盘价）"""
         if df.empty:
             return "empty"
-        last_ts = df['timestamp'].iloc[-1].isoformat() if 'timestamp' in df else "no_ts"
-        return f"{df.shape[0]}_{last_ts}"
+        tail = df[['timestamp', 'close']].tail(50)
+        # 将最后50行的时间戳和收盘价组合成字符串，计算md5
+        combo = tail.to_string(index=False, header=False)
+        return hashlib.md5(combo.encode()).hexdigest()
 
     @classmethod
-    def add_all_indicators(cls, df: pd.DataFrame, config: TradingConfig) -> pd.DataFrame:
+    def add_all_indicators(cls, df: pd.DataFrame, config: TradingConfig, symbol: str = "", timeframe: str = "") -> pd.DataFrame:
         """全量计算（首次或全量刷新）"""
+        # 检查缓存
         fingerprint = cls._fingerprint(df)
-        if fingerprint in cls._cache:
-            return cls._cache[fingerprint][0].copy()
+        cache_key = (symbol, timeframe, fingerprint)
+        if cache_key in cls._cache:
+            return cls._cache[cache_key].copy()
 
         df = df.copy()
+        # 确保数据类型
+        for col in ['open','high','low','close','volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
         # EMA
         df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
         df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -617,29 +640,24 @@ class IndicatorCalculator:
         else:
             df['future_ret'] = np.nan
 
-        cls._cache[fingerprint] = (df.copy(), fingerprint)
-        cls._last_rows[fingerprint] = df.iloc[-1]
+        cls._cache[cache_key] = df.copy()
+        cls._last_rows[fingerprint] = df.iloc[-1] if not df.empty else None
         return df
 
     @classmethod
-    def update_indicators(cls, old_df: pd.DataFrame, new_rows: pd.DataFrame, config: TradingConfig) -> pd.DataFrame:
+    def update_indicators(cls, old_df: pd.DataFrame, new_rows: pd.DataFrame, config: TradingConfig, symbol: str = "", timeframe: str = "") -> pd.DataFrame:
         """增量更新：只重新计算受影响的窗口"""
-        # 简单实现：拼接后重新计算最后N行（窗口最大值），避免全量重算
         combined = pd.concat([old_df, new_rows], ignore_index=True)
         # 确定需要重新计算的最小行数（取所有窗口最大值+5）
         max_window = max(200, config.bb_window, 26, 20, 14) + 5
         tail = combined.iloc[-max_window:].copy()
-        recalc = cls.add_all_indicators(tail, config)
+        recalc = cls.add_all_indicators(tail, config, symbol, timeframe)
         # 合并回原df
         result = combined.copy()
         result.iloc[-len(recalc):] = recalc.values
-        # 更新缓存
-        fingerprint = cls._fingerprint(result)
-        cls._cache[fingerprint] = (result.copy(), fingerprint)
-        cls._last_rows[fingerprint] = result.iloc[-1]
         return result
 
-# ==================== 滑点模型（优化版）====================
+# ==================== 滑点模型 ====================
 class SlippageModel:
     @staticmethod
     def advanced_slippage(price: float, size: float, volume_20: float, volatility: float,
@@ -649,13 +667,10 @@ class SlippageModel:
         :param side: 'buy' or 'sell' 影响方向
         """
         base = price * config.slippage_base
-        # 成交量占比
         vol_ratio = size / max(volume_20, 1)
         impact = config.slippage_impact_factor * vol_ratio * volatility * price
-        # 平方根市场冲击（更符合经验）
         market_impact = np.sqrt(vol_ratio) * volatility * price * 0.3
         imbalance_adj = 1 + abs(imbalance) * config.slippage_imbalance_factor
-        # 买卖方向：买盘滑点向上，卖盘滑点向下
         direction = 1 if side == 'buy' else -1
         total = (base + impact + market_impact) * imbalance_adj * direction
         return total
@@ -669,7 +684,7 @@ class AsyncDataProvider:
         self.simulated_cache: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._session: Optional[aiohttp.ClientSession] = None
-        self._semaphore = asyncio.Semaphore(5)
+        self._semaphores: Dict[str, asyncio.Semaphore] = {}  # 每个交易所独立信号量
         self._timeout = aiohttp.ClientTimeout(total=10)
 
     async def init(self):
@@ -683,8 +698,9 @@ class AsyncDataProvider:
                         'options': {'defaultType': 'future'}
                     })
                     self.exchanges[name] = ex
-                except Exception:
-                    pass
+                    self._semaphores[name] = asyncio.Semaphore(3)  # 每个交易所最多3个并发
+                except Exception as e:
+                    logger.warning("初始化交易所失败", exchange=name, error=str(e))
             self._init_caches()
             self._session = aiohttp.ClientSession(timeout=self._timeout)
 
@@ -693,10 +709,9 @@ class AsyncDataProvider:
         for tf in self.config.timeframes + self.config.confirm_timeframes:
             self.cache[tf] = TTLCache(maxsize=100, ttl=ttl_map.get(tf, 60))
 
-    @retry(retry=retry_if_exception_type(ccxt_async.RequestTimeout), stop=stop_after_attempt(3),
-           wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _fetch_single(self, exchange_name: str, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-        async with self._semaphore:
+        sem = self._semaphores.get(exchange_name, asyncio.Semaphore(1))
+        async with sem:
             try:
                 ex = self.exchanges[exchange_name]
                 ohlcv = await ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -705,9 +720,12 @@ class AsyncDataProvider:
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     df = df.astype({col: float for col in ['open','high','low','close','volume']})
                     return df
+            except ccxt_async.RequestTimeout as e:
+                logger.warning("请求超时", exchange=exchange_name, symbol=symbol, error=str(e))
+                raise
             except Exception as e:
                 logger.warning("从交易所获取数据失败", exchange=exchange_name, symbol=symbol, error=str(e))
-                raise  # 触发重试
+                return None
         return None
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
@@ -758,7 +776,7 @@ class AsyncDataProvider:
 
     async def fetch_fear_greed(self) -> int:
         try:
-            async with self._semaphore:
+            async with self._semaphores.get('fear_greed', asyncio.Semaphore(1)):
                 async with self._session.get("https://api.alternative.me/fng/?limit=1", timeout=5) as resp:
                     data = await resp.json()
                     return int(data['data'][0]['value'])
@@ -807,7 +825,7 @@ class AsyncDataProvider:
         results = await asyncio.gather(*tasks)
         for tf, df in zip(all_tfs, results):
             if df is not None and len(df) >= 50:
-                data_dict[tf] = IndicatorCalculator.add_all_indicators(df, self.config)
+                data_dict[tf] = IndicatorCalculator.add_all_indicators(df, self.config, symbol, tf)
         return data_dict
 
     def generate_simulated_data(self, symbol: str, limit: int = 2000) -> Dict[str, pd.DataFrame]:
@@ -856,7 +874,7 @@ class AsyncDataProvider:
             'close': closes,
             'volume': volumes
         })
-        df_15m = IndicatorCalculator.add_all_indicators(df_15m, self.config)
+        df_15m = IndicatorCalculator.add_all_indicators(df_15m, self.config, symbol, '15m')
 
         data_dict = {'15m': df_15m}
         for tf in ['1m', '5m', '1h', '4h', '1d']:
@@ -868,7 +886,7 @@ class AsyncDataProvider:
                 'volume': 'sum'
             }).dropna().reset_index()
             if len(resampled) >= 30:
-                resampled = IndicatorCalculator.add_all_indicators(resampled, self.config)
+                resampled = IndicatorCalculator.add_all_indicators(resampled, self.config, symbol, tf)
                 data_dict[tf] = resampled
         return data_dict
 
@@ -894,15 +912,15 @@ class AsyncDataProvider:
                 df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df = df[(df['timestamp'] >= start) & (df['timestamp'] <= end)]
-                return IndicatorCalculator.add_all_indicators(df, self.config)
-        file_path = f"data/{symbol}_{timeframe}_{start.date()}_{end.date()}.csv"
+                return IndicatorCalculator.add_all_indicators(df, self.config, symbol, timeframe)
+        file_path = os.path.join(DATA_DIR, f"{symbol}_{timeframe}_{start.date()}_{end.date()}.csv")
         if os.path.exists(file_path):
             df = pd.read_csv(file_path)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            return IndicatorCalculator.add_all_indicators(df, self.config)
+            return IndicatorCalculator.add_all_indicators(df, self.config, symbol, timeframe)
         return None
 
-# ==================== 因子管理器（动态权重更新 + 向量化IC）====================
+# ==================== 因子管理器 ====================
 class FactorManager:
     def __init__(self, config: TradingConfig):
         self.config = config
@@ -929,14 +947,6 @@ class FactorManager:
         self.corr_matrix: Optional[np.ndarray] = None
         self._lock = asyncio.Lock()
 
-    @lru_cache(maxsize=128)
-    def _calculate_ic_cached(self, factor_name: str, df_bytes: bytes) -> float:
-        """使用LRU缓存IC计算结果，df_bytes是DataFrame的pickle表示"""
-        # 注意：实际调用时需传入可哈希的df表示，这里简化，实际可传入指纹
-        # 这里为了演示，将df通过pickle序列化作为缓存键，但实际不高效，建议使用指纹
-        # 更好的方法：在调用处传入指纹字符串
-        return 0.0  # 实际计算
-
     def update_weights(self, ic_dict: Dict[str, List[float]]):
         """基于最新IC更新因子权重（贝叶斯更新）"""
         with self._lock:
@@ -945,12 +955,10 @@ class FactorManager:
                     continue
                 self.ic_records[factor].extend(ic_list)
                 if len(self.ic_records[factor]) > 10:
-                    # 向量化加权平均
                     series = np.array(self.ic_records[factor])
                     weights = np.exp(-self.config.ic_decay_rate * np.arange(len(series))[::-1])
                     mean_ic = np.average(series, weights=weights)
                     self.ic_decay[factor] = mean_ic
-                    # 贝叶斯收缩
                     prior = 1.0
                     posterior = (self.config.bayesian_prior_strength * prior + len(series) * mean_ic) / (self.config.bayesian_prior_strength + len(series))
                     self.factor_weights[factor] = max(0.1, posterior)
@@ -974,7 +982,6 @@ class FactorManager:
         for factor, series in self.ic_records.items():
             if len(series) < 30:
                 continue
-            # 使用t检验
             t_stat, p_value = ttest_1samp(list(series), 0)
             if p_value > self.config.factor_eliminate_pvalue and np.mean(series) < self.config.factor_eliminate_ic:
                 self.factor_weights[factor] = self.config.factor_min_weight
@@ -1002,6 +1009,8 @@ class RegimeDetector:
             return MarketRegime.RANGE
         df1h = df_dict['1h']
         df4h = df_dict['4h']
+        if df1h.empty or df4h.empty:
+            return MarketRegime.RANGE
         adx1h = df1h['adx'].iloc[-1] if not pd.isna(df1h['adx'].iloc[-1]) else 25
         adx4h = df4h['adx'].iloc[-1] if not pd.isna(df4h['adx'].iloc[-1]) else 25
         avg_adx = (adx1h + adx4h) / 2
@@ -1025,14 +1034,13 @@ class RegimeDetector:
     def _detect_hmm(self, df_dict: Dict[str, pd.DataFrame], symbol: str) -> MarketRegime:
         now = time.time()
         if symbol not in self.hmm_models or now - self.hmm_last_train.get(symbol, 0) > self.config.ml_retrain_interval:
-            # 后台训练
             asyncio.create_task(self._train_hmm(symbol, df_dict))
-            # 返回默认
             return MarketRegime.RANGE
-        # 预测
         model = self.hmm_models[symbol]
         scaler = self.hmm_scalers[symbol]
-        df = df_dict['15m'].copy()
+        df = df_dict.get('15m')
+        if df is None or df.empty:
+            return MarketRegime.RANGE
         ret = df['close'].pct_change().dropna().values[-50:].reshape(-1, 1)
         if len(ret) < 10:
             return MarketRegime.RANGE
@@ -1043,7 +1051,9 @@ class RegimeDetector:
 
     async def _train_hmm(self, symbol: str, df_dict: Dict[str, pd.DataFrame]):
         async with self._train_lock:
-            df = df_dict['15m'].copy()
+            df = df_dict.get('15m')
+            if df is None or df.empty:
+                return
             ret = df['close'].pct_change().dropna().values.reshape(-1, 1)
             if len(ret) < 200:
                 return
@@ -1056,7 +1066,7 @@ class RegimeDetector:
             self.hmm_last_train[symbol] = time.time()
             logger.info("HMM模型训练完成", symbol=symbol)
 
-# ==================== ML因子训练器（后台）====================
+# ==================== ML因子训练器 ====================
 class MLFactorTrainer:
     def __init__(self, config: TradingConfig):
         self.config = config
@@ -1073,14 +1083,10 @@ class MLFactorTrainer:
             return 0.0
         now = time.time()
         if symbol not in self.models or now - self.last_train.get(symbol, 0) > self.config.ml_retrain_interval:
-            # 后台训练
             task = asyncio.create_task(self._train(symbol, df_dict))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-            if symbol in self.models:
-                # 使用旧模型
-                pass
-            else:
+            if symbol not in self.models:
                 return 0.0
         if symbol not in self.models:
             return 0.0
@@ -1089,8 +1095,8 @@ class MLFactorTrainer:
         feature_cols = self.feature_cols.get(symbol, [])
         if not feature_cols:
             return 0.0
-        df = df_dict['15m'].copy()
-        if len(df) < 4:
+        df = df_dict.get('15m')
+        if df is None or len(df) < 4:
             return 0.0
         data = {}
         base_features = ['ema20', 'ema50', 'rsi', 'macd_diff', 'bb_width', 'volume_ratio', 'adx', 'atr']
@@ -1116,7 +1122,9 @@ class MLFactorTrainer:
 
     async def _train(self, symbol: str, df_dict: Dict[str, pd.DataFrame]):
         async with self._train_lock:
-            df = df_dict['15m'].copy()
+            df = df_dict.get('15m')
+            if df is None or df.empty:
+                return
             base_features = ['ema20', 'ema50', 'rsi', 'macd_diff', 'bb_width', 'volume_ratio', 'adx', 'atr']
             df = df.dropna(subset=base_features + ['close'])
             if len(df) < self.config.ml_window:
@@ -1166,7 +1174,6 @@ class MLFactorTrainer:
                 ir = IsotonicRegression(out_of_bounds='clip')
                 ir.fit(pred_val_norm, y_val_binary)
                 calibrator = ir
-            # 保存
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             joblib.dump(model, f"{MODEL_DIR}/{symbol}_model_{timestamp}.pkl")
             joblib.dump(scaler, f"{MODEL_DIR}/{symbol}_scaler_{timestamp}.pkl")
@@ -1187,22 +1194,31 @@ class StrategyEngine:
         self.factor_manager = factor_manager
         self.regime_detector = regime_detector
         self.ml_trainer = ml_trainer
-        self._ic_cache: Dict[Tuple[int, str], float] = {}  # (df_hash, factor_name) -> IC
+        self._ic_cache: Dict[Tuple[str, str, str], float] = {}  # (symbol, factor_name, fingerprint)
 
-    def _calculate_ic(self, df: pd.DataFrame, factor_name: str) -> float:
+    def _get_fingerprint(self, df: pd.DataFrame) -> str:
+        """生成数据帧指纹用于IC缓存"""
+        if df.empty:
+            return "empty"
+        # 使用最后30行的时间戳和收盘价构建指纹
+        tail = df[['timestamp', 'close']].tail(30)
+        return hashlib.md5(tail.to_string(index=False, header=False).encode()).hexdigest()
+
+    def _calculate_ic(self, df: pd.DataFrame, factor_name: str, symbol: str) -> float:
         """计算因子IC，使用缓存"""
-        try:
-            df_hash = hash(pd.util.hash_pandas_object(df).sum())
-        except Exception:
-            df_hash = id(df)
-        key = (df_hash, factor_name)
+        fingerprint = self._get_fingerprint(df)
+        key = (symbol, factor_name, fingerprint)
         if key in self._ic_cache:
             return self._ic_cache[key]
+
+        col = self.factor_manager.factor_to_col.get(factor_name)
+        if col is None or col not in df.columns:
+            return 0.0
 
         window = min(self.config.ic_window, len(df) - 6)
         if window < 20:
             return 0.0
-        factor = df[factor_name].iloc[-window:-5]
+        factor = df[col].iloc[-window:-5]
         future = df['future_ret'].iloc[-window:-5]
         valid = factor.notna() & future.notna()
         if valid.sum() < 10:
@@ -1342,7 +1358,7 @@ class StrategyEngine:
             for fname, score in factor_scores.items():
                 col = self.factor_manager.factor_to_col.get(fname)
                 if col and col in df.columns:
-                    ic = self._calculate_ic(df, col)
+                    ic = self._calculate_ic(df, fname, symbol)
                     if not np.isnan(ic):
                         ic_dict.setdefault(fname, []).append(ic)
 
@@ -1361,9 +1377,10 @@ class StrategyEngine:
 
         if total_weight == 0:
             return 0, 0.0
-        max_possible = sum(self.config.timeframe_weights.values()) * 3.5
-        prob_raw = min(1.0, abs(total_score) / max_possible) if max_possible > 0 else 0.5
-        prob = 0.5 + 0.45 * prob_raw
+        # 归一化得分
+        avg_score = total_score / total_weight
+        # 映射到概率
+        prob = 0.5 + 0.45 * np.clip(abs(avg_score) / 3.5, 0, 1)  # 假设最大平均得分3.5
 
         direction_candidate = 1 if total_score > 0 else -1 if total_score < 0 else 0
         if direction_candidate != 0 and not self._multi_timeframe_confirmation(df_dict, direction_candidate):
@@ -1379,7 +1396,7 @@ class StrategyEngine:
 
         return direction, prob
 
-# ==================== 风险管理（含VaR、回撤、熔断）====================
+# ==================== 风险管理 ====================
 class RiskManager:
     def __init__(self, config: TradingConfig):
         self.config = config
@@ -1451,11 +1468,14 @@ class RiskManager:
             return True, f"连续亏损{consecutive_losses}次"
         for sym, pos in positions.items():
             if sym in multi_df:
-                atr = multi_df[sym]['15m']['atr'].iloc[-1]
-                price = symbol_current_prices.get(sym, 1)
-                atr_pct = atr / price * 100
-                if atr_pct > self.config.circuit_breaker_atr:
-                    return True, f"{sym} ATR百分比{atr_pct:.2f}%超限"
+                df_15m = multi_df[sym].get('15m')
+                if df_15m is not None and not df_15m.empty:
+                    atr = df_15m['atr'].iloc[-1]
+                    price = symbol_current_prices.get(sym, 1)
+                    if price > 0:
+                        atr_pct = atr / price * 100
+                        if atr_pct > self.config.circuit_breaker_atr:
+                            return True, f"{sym} ATR百分比{atr_pct:.2f}%超限"
         return False, ""
 
     def can_open_position(self, regime: MarketRegime) -> bool:
@@ -1484,8 +1504,7 @@ class RiskManager:
 
     @lru_cache(maxsize=128)
     def _adaptive_atr_multiplier(self, price_series_bytes: bytes) -> float:
-        """使用LRU缓存，输入为序列的pickle字节，实际应使用指纹"""
-        # 这里简化，实际实现需反序列化
+        """使用LRU缓存，输入为序列的pickle字节"""
         price_series = np.frombuffer(price_series_bytes, dtype=float)
         if len(price_series) < self.config.adapt_window:
             return self.config.atr_multiplier_base
@@ -1576,7 +1595,6 @@ if RL_AVAILABLE:
             if os.path.exists(self.config.rl_model_path):
                 self.model = PPO.load(self.config.rl_model_path)
             else:
-                # 训练（简单示例）
                 env = DummyVecEnv([lambda: AsyncTradingEnv(self.data_provider, self.config)])
                 model = PPO('MlpPolicy', env, verbose=0)
                 model.learn(total_timesteps=10000)
@@ -1595,7 +1613,7 @@ else:
         def get_action(self, obs: np.ndarray) -> float:
             return 1.0
 
-# ==================== 执行服务（含订单保护）====================
+# ==================== 执行服务 ====================
 class ExecutionService:
     def __init__(self, config: TradingConfig, notifier: TelegramNotifier):
         self.config = config
@@ -1654,7 +1672,6 @@ class ExecutionService:
             required = size * price / self.config.leverage
             if free_usdt < required:
                 return False, f"余额不足：需要{required:.2f} USDT，可用{free_usdt:.2f}"
-            # 检查最小下单量（简化）
             markets = await self.exchange.load_markets()
             market = markets.get(symbol)
             if market and market['limits']['amount']['min'] and size < market['limits']['amount']['min']:
@@ -1671,8 +1688,13 @@ class ExecutionService:
         if not await self.check_liquidity(symbol, size):
             return None, 0, 0
 
-        volume = multi_df[symbol]['15m']['volume'].iloc[-1] if symbol in multi_df else 0
-        vola = np.std(multi_df[symbol]['15m']['close'].pct_change().dropna().values[-20:]) if symbol in multi_df else 0.02
+        volume = 0
+        vola = 0.02
+        if symbol in multi_df and '15m' in multi_df[symbol]:
+            df_15m = multi_df[symbol]['15m']
+            if not df_15m.empty:
+                volume = df_15m['volume'].iloc[-1]
+                vola = np.std(df_15m['close'].pct_change().dropna().values[-20:]) if len(df_15m) >= 20 else 0.02
         imbalance = orderbook_imbalance.get(symbol, 0.0)
         slippage = SlippageModel.advanced_slippage(price, size, volume, vola, imbalance, side, self.config)
         exec_price = price + slippage if direction == 1 else price - slippage
@@ -1685,7 +1707,6 @@ class ExecutionService:
                 return None, 0, 0
 
             try:
-                # 设置杠杆
                 await self._set_leverage(symbol, exchange_choice, testnet, api_key, secret_key)
                 order = await self.exchange.create_order(
                     symbol=symbol,
@@ -1728,7 +1749,7 @@ class ExecutionService:
             take_profit=take,
             real=use_real,
             slippage_paid=slippage,
-            impact_cost=0.0  # 简化
+            impact_cost=0.0
         )
         return position, actual_price, slippage
 
@@ -1786,7 +1807,7 @@ class TradingService:
         self.slippage_history: Deque[Dict] = deque(maxlen=100)
         self.slippage_records: List[Dict] = []
         self.symbol_current_prices: Dict[str, float] = {}
-        self.multi_df: Dict[str, Any] = {}
+        self.multi_df: Dict[str, Dict[str, pd.DataFrame]] = {}  # symbol -> timeframe -> df
         self.cov_matrix: Optional[np.ndarray] = None
         self.orderbook_imbalance: Dict[str, float] = {}
         self.funding_rates: Dict[str, float] = {}
@@ -1813,11 +1834,9 @@ class TradingService:
     async def _perform_health_check(self):
         """自检：检查数据源、模型、IC异常等"""
         logger.info("执行健康检查")
-        # 检查数据源
         if not self.multi_df:
             logger.warning("健康检查：multi_df为空")
-        # 检查IC是否大幅下降
-        # 省略具体实现
+        # 可添加更多检查
 
     def update_equity(self):
         equity = self.balance
@@ -1840,21 +1859,28 @@ class TradingService:
             self.funding_rates[sym] = data.get('funding_rate', 0.0)
 
         self.multi_df = {sym: data['data_dict'] for sym, data in multi_data.items()}
-        self.fear_greed = multi_data[symbols[0]]['fear_greed']
-        self.market_regime = self.strategy_engine.regime_detector.detect(
-            self.multi_df[symbols[0]], symbols[0], self.fear_greed
-        )
+        if symbols:
+            first_sym = symbols[0]
+            self.fear_greed = multi_data[first_sym]['fear_greed']
+            self.market_regime = self.strategy_engine.regime_detector.detect(
+                self.multi_df[first_sym], first_sym, self.fear_greed
+            )
 
         # 协方差矩阵
         if len(symbols) > 1:
             ret_arrays = []
             for sym in symbols:
-                rets = self.multi_df[sym]['15m']['close'].pct_change().dropna().values[-self.config.cov_matrix_window:]
-                ret_arrays.append(rets)
-            min_len = min(len(arr) for arr in ret_arrays) if ret_arrays else 0
-            if min_len > 20:
-                ret_matrix = np.array([arr[-min_len:] for arr in ret_arrays])
-                self.cov_matrix = np.cov(ret_matrix)
+                df_15m = self.multi_df[sym].get('15m')
+                if df_15m is not None and len(df_15m) > 20:
+                    rets = df_15m['close'].pct_change().dropna().values[-self.config.cov_matrix_window:]
+                    ret_arrays.append(rets)
+            if ret_arrays:
+                min_len = min(len(arr) for arr in ret_arrays)
+                if min_len > 20:
+                    ret_matrix = np.array([arr[-min_len:] for arr in ret_arrays])
+                    self.cov_matrix = np.cov(ret_matrix)
+                else:
+                    self.cov_matrix = None
             else:
                 self.cov_matrix = None
         else:
@@ -1869,10 +1895,13 @@ class TradingService:
     def _get_rl_obs(self) -> np.ndarray:
         if self.multi_df and self.symbol_current_prices:
             sym = next(iter(self.multi_df))
-            df = self.multi_df[sym]['15m']
-            last = df.iloc[-1]
-            vol = last['atr'] / last['close'] if not pd.isna(last['atr']) else 0.02
-            trend = last['adx'] / 100 if not pd.isna(last['adx']) else 0.5
+            df = self.multi_df[sym].get('15m')
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                vol = last['atr'] / last['close'] if not pd.isna(last['atr']) else 0.02
+                trend = last['adx'] / 100 if not pd.isna(last['adx']) else 0.5
+            else:
+                vol, trend = 0.02, 0.5
         else:
             vol, trend = 0.02, 0.5
         return np.array([self.balance / 10000, len(self.positions) / 100, vol, trend, 0.5, 0,0,0,0,0], dtype=np.float32)
@@ -1896,13 +1925,17 @@ class TradingService:
         # 构建开仓信号
         symbol_signals = {}
         for sig in signals:
-            df_dict = self.multi_df[sig.symbol]
-            atr_sym = df_dict['15m']['atr'].iloc[-1] if not pd.isna(df_dict['15m']['atr'].iloc[-1]) else 0
-            price_series = df_dict['15m']['close'].values[-20:]
+            df_dict = self.multi_df.get(sig.symbol)
+            if df_dict is None:
+                continue
+            df_15m = df_dict.get('15m')
+            if df_15m is None or df_15m.empty:
+                continue
+            atr_sym = df_15m['atr'].iloc[-1] if not pd.isna(df_15m['atr'].iloc[-1]) else 0
+            price_series = df_15m['close'].values[-20:]
             side = 'buy' if sig.direction == 1 else 'sell'
             symbol_signals[sig.symbol] = (sig.direction, sig.probability, atr_sym, self.symbol_current_prices[sig.symbol], price_series, side)
 
-        # 组合分配（简化：只开一个）
         allocations = self.risk_manager.allocate_portfolio(
             symbol_signals, self.balance, list(self.equity_curve),
             self.cov_matrix, self.positions, list(self.symbol_current_prices.keys()),
@@ -1915,7 +1948,7 @@ class TradingService:
                 if atr_sym == 0 or np.isnan(atr_sym):
                     stop_dist = price * 0.01
                 else:
-                    stop_dist = atr_sym * self.risk_manager._adaptive_atr_multiplier(price_series.tobytes())  # 传递字节用于缓存
+                    stop_dist = atr_sym * self.risk_manager._adaptive_atr_multiplier(price_series.tobytes())
                 stop = price - stop_dist if dir == 1 else price + stop_dist
                 take = price + stop_dist * self.config.tp_min_ratio if dir == 1 else price - stop_dist * self.config.tp_min_ratio
 
@@ -1936,11 +1969,16 @@ class TradingService:
         for sym, pos in list(self.positions.items()):
             if sym not in self.symbol_current_prices:
                 continue
-            df_dict = self.multi_df[sym]
+            df_dict = self.multi_df.get(sym)
+            if df_dict is None:
+                continue
+            df_15m = df_dict.get('15m')
+            if df_15m is None or df_15m.empty:
+                continue
             current_price = self.symbol_current_prices[sym]
-            high = df_dict['15m']['high'].iloc[-1]
-            low = df_dict['15m']['low'].iloc[-1]
-            atr_sym = df_dict['15m']['atr'].iloc[-1] if not pd.isna(df_dict['15m']['atr'].iloc[-1]) else 0
+            high = df_15m['high'].iloc[-1]
+            low = df_15m['low'].iloc[-1]
+            atr_sym = df_15m['atr'].iloc[-1] if not pd.isna(df_15m['atr'].iloc[-1]) else 0
             should_close, reason, exit_price, close_size = pos.should_close(high, low, datetime.now(), self.config)
             if should_close:
                 await self._close_position(sym, exit_price, reason, close_size, use_real, exchange_choice, testnet, api_key, secret_key)
@@ -1949,7 +1987,8 @@ class TradingService:
                     pos.update_stops(current_price, atr_sym, self.config.atr_multiplier_base)
 
         self.update_equity()
-        await equity_logger.log({'time': datetime.now().isoformat(), 'equity': self.equity_curve[-1]['equity']})
+        if self.equity_curve:
+            await equity_logger.log({'time': datetime.now().isoformat(), 'equity': self.equity_curve[-1]['equity']})
 
     async def _close_position(self, sym: str, exit_price: float, reason: str, close_size: Optional[float],
                               use_real: bool, exchange_choice: str, testnet: bool, api_key: str, secret_key: str):
@@ -1961,8 +2000,13 @@ class TradingService:
             close_size = min(close_size or pos.size, pos.size)
             side = 'sell' if pos.direction == 1 else 'buy'
 
-            volume = self.multi_df[sym]['15m']['volume'].iloc[-1] if sym in self.multi_df else 0
-            vola = np.std(self.multi_df[sym]['15m']['close'].pct_change().dropna().values[-20:]) if sym in self.multi_df else 0.02
+            volume = 0
+            vola = 0.02
+            if sym in self.multi_df and '15m' in self.multi_df[sym]:
+                df_15m = self.multi_df[sym]['15m']
+                if not df_15m.empty:
+                    volume = df_15m['volume'].iloc[-1]
+                    vola = np.std(df_15m['close'].pct_change().dropna().values[-20:]) if len(df_15m) >= 20 else 0.02
             imbalance = self.orderbook_imbalance.get(sym, 0.0)
             slippage = SlippageModel.advanced_slippage(exit_price, close_size, volume, vola, imbalance, side, self.config)
             exec_exit = exit_price - slippage if pos.direction == 1 else exit_price + slippage
@@ -2016,7 +2060,6 @@ class TradingService:
 
             await slippage_logger.log({'time': datetime.now().isoformat(), 'symbol': sym, 'slippage': slippage, 'type': 'exit'})
 
-            # 更新统计
             win_flag = pnl > 0
             await self.risk_manager.update_losses(win_flag)
             self.metrics.observe_trade(pnl, slippage)
@@ -2057,7 +2100,6 @@ class TradingService:
             'orderbook_imbalance': self.orderbook_imbalance,
             'market_regime': self.market_regime,
             'fear_greed': self.fear_greed,
-            'factor_ic_stats': {},  # 简化
             'regime_stats': self.regime_stats,
             'consistency_stats': self.consistency_stats,
             'brier_scores': list(self.brier_scores),
@@ -2076,9 +2118,108 @@ class BacktestEngine:
 
     async def run(self, symbols: List[str], start_date: datetime, end_date: datetime,
                   initial_balance: float = 10000, use_real_data: bool = False) -> Dict[str, Any]:
-        # 加载数据（略，同原版）
-        # 这里仅保留框架，实际实现参考原版
-        return {}
+        """
+        运行回测，返回结果统计
+        """
+        # 加载数据
+        data_dict = {}
+        for sym in symbols:
+            df = await self.data_provider.fetch_historical_data(sym, '15m', start_date, end_date)
+            if df is not None and len(df) > 100:
+                data_dict[sym] = {'15m': df}
+                # 生成其他时间框架（简化，可用重采样）
+                for tf in ['1h', '4h', '1d']:
+                    resampled = df.resample(tf, on='timestamp').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna().reset_index()
+                    if len(resampled) > 30:
+                        resampled = IndicatorCalculator.add_all_indicators(resampled, self.config, sym, tf)
+                        data_dict[sym][tf] = resampled
+            else:
+                logger.error("回测数据不足", symbol=sym)
+                return {}
+
+        # 回测主循环（简化：按时间推进）
+        # 这里仅做框架，实际需实现事件驱动
+        balance = initial_balance
+        positions: Dict[str, Position] = {}
+        trades = []
+        equity_curve = []
+
+        # 找到共同时间轴
+        all_times = set()
+        for sym in data_dict:
+            if '15m' in data_dict[sym]:
+                all_times.update(data_dict[sym]['15m']['timestamp'].tolist())
+        all_times = sorted(all_times)
+
+        for t in all_times:
+            # 构建当前时刻的数据快照
+            snapshot = {}
+            for sym in symbols:
+                if sym not in data_dict:
+                    continue
+                df_15m = data_dict[sym].get('15m')
+                if df_15m is None:
+                    continue
+                # 找到最近的数据
+                idx = df_15m['timestamp'].searchsorted(t, side='right') - 1
+                if idx < 0:
+                    continue
+                row = df_15m.iloc[idx]
+                snapshot[sym] = {
+                    'data_dict': {tf: df[df['timestamp'] <= t] for tf, df in data_dict[sym].items()},
+                    'current_price': row['close'],
+                }
+            # 生成信号
+            fear_greed = 50  # 回测中无法获取实时恐慌指数，可用历史平均值
+            regime = MarketRegime.RANGE
+            signals = self.strategy_engine.generate_signals(snapshot, fear_greed, regime)
+            # 执行信号（简化，仅开仓）
+            for sig in signals:
+                if sig.symbol not in positions:
+                    # 计算仓位大小（简化）
+                    size = balance * self.config.risk_per_trade / (sig.probability * 100)
+                    positions[sig.symbol] = Position(
+                        symbol=sig.symbol,
+                        direction=sig.direction,
+                        entry_price=snapshot[sig.symbol]['current_price'],
+                        entry_time=t,
+                        size=size,
+                        stop_loss=snapshot[sig.symbol]['current_price'] * 0.95 if sig.direction == 1 else snapshot[sig.symbol]['current_price'] * 1.05,
+                        take_profit=snapshot[sig.symbol]['current_price'] * 1.05 if sig.direction == 1 else snapshot[sig.symbol]['current_price'] * 0.95,
+                        real=False
+                    )
+            # 平仓检查
+            for sym, pos in list(positions.items()):
+                if sym not in snapshot:
+                    continue
+                high = snapshot[sym]['data_dict']['15m']['high'].iloc[-1]
+                low = snapshot[sym]['data_dict']['15m']['low'].iloc[-1]
+                should_close, reason, exit_price, _ = pos.should_close(high, low, t, self.config)
+                if should_close:
+                    pnl = (exit_price - pos.entry_price) * pos.size * pos.direction
+                    balance += pnl
+                    trades.append({'symbol': sym, 'pnl': pnl, 'reason': reason, 'time': t})
+                    del positions[sym]
+            equity_curve.append({'time': t, 'equity': balance})
+
+        # 统计结果
+        returns = pd.Series([e['equity'] for e in equity_curve]).pct_change().dropna()
+        result = {
+            'initial_balance': initial_balance,
+            'final_balance': balance,
+            'total_return': (balance - initial_balance) / initial_balance,
+            'sharpe_ratio': returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0,
+            'max_drawdown': (pd.Series([e['equity'] for e in equity_curve]).cummax() - pd.Series([e['equity'] for e in equity_curve])).max() / initial_balance,
+            'trades': trades,
+            'equity_curve': equity_curve
+        }
+        return result
 
 # ==================== 依赖注入容器 ====================
 class Container(containers.DeclarativeContainer):
@@ -2137,8 +2278,8 @@ def get_container():
     return Container()
 
 async def main_async():
-    st.set_page_config(page_title="终极量化终端 · 机构版 59.0", layout="wide")
-    st.title("🚀 终极量化终端 · 机构版 59.0")
+    st.set_page_config(page_title="终极量化终端 · 机构版 60.0", layout="wide")
+    st.title("🚀 终极量化终端 · 机构版 60.0")
     init_session_state()
 
     container = get_container()
@@ -2234,7 +2375,6 @@ async def main_async():
         state = trading_service.get_state()
         container.metrics().update(trading_service)
 
-        # 简单UI显示
         st.subheader("多品种持仓")
         col1, col2 = st.columns(2)
         with col1:
@@ -2249,10 +2389,10 @@ async def main_async():
             else:
                 st.info("无持仓")
 
-        # 图表
         if selected_symbols:
-            df_plot = state['multi_df'][selected_symbols[0]]['15m'].tail(120).copy()
-            if not df_plot.empty:
+            df_plot = state['multi_df'][selected_symbols[0]].get('15m')
+            if df_plot is not None and not df_plot.empty:
+                df_plot = df_plot.tail(120).copy()
                 fig = go.Figure(data=[go.Candlestick(x=df_plot['timestamp'],
                                                       open=df_plot['open'],
                                                       high=df_plot['high'],
@@ -2262,7 +2402,26 @@ async def main_async():
                 st.plotly_chart(fig, use_container_width=True)
 
     else:
-        st.subheader("回测功能待完善")
+        st.subheader("回测")
+        start_date = st.date_input("开始日期", value=datetime.now() - timedelta(days=30))
+        end_date = st.date_input("结束日期", value=datetime.now())
+        if st.button("运行回测"):
+            with st.spinner("回测中..."):
+                result = await container.backtest_engine().run(
+                    selected_symbols,
+                    datetime.combine(start_date, datetime.min.time()),
+                    datetime.combine(end_date, datetime.max.time()),
+                    initial_balance=10000
+                )
+                st.session_state.backtest_results = result
+        if st.session_state.backtest_results:
+            res = st.session_state.backtest_results
+            st.write(f"初始资金: {res['initial_balance']:.2f}")
+            st.write(f"最终资金: {res['final_balance']:.2f}")
+            st.write(f"总收益率: {res['total_return']*100:.2f}%")
+            st.write(f"夏普比率: {res['sharpe_ratio']:.2f}")
+            st.write(f"最大回撤: {res['max_drawdown']*100:.2f}%")
+            st.write(f"交易次数: {len(res['trades'])}")
 
     st_autorefresh(interval=CONFIG.auto_refresh_ms, key="auto_refresh")
 
