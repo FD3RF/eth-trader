@@ -24,7 +24,7 @@
 5. 交易成本建模（冲击成本 + 滑点纳入训练标签）
 
 最终修复：
-- 修复 StreamlitDuplicateElementId 错误（为所有 plotly_chart 添加唯一 key）
+- 修复 StreamlitDuplicateElementKey 错误（为所有 plotly_chart 添加唯一 key 前缀）
 - 修复所有已知的属性错误和值错误
 - 强化防御式编程，确保极端数据下系统稳定
 ===================================================
@@ -790,7 +790,6 @@ def optimize_parameters():
         return
     # 示例：优化因子权重（使用贝叶斯优化或网格搜索）
     # 这里简化为更新因子权重为历史IC的加权平均
-    # 实际可使用hyperopt或optuna
     global factor_weights
     for factor in factor_weights.keys():
         if factor in st.session_state.factor_ic_stats:
@@ -1898,7 +1897,7 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
     return {}
 
 # ==================== 实时监控仪表盘增强（修复重复ID）===================
-def render_dashboard_panel():
+def render_dashboard_panel(key_prefix=""):
     """渲染高级监控仪表盘（修复重复ID错误）"""
     st.markdown("## 📊 高级监控仪表盘")
     col1, col2 = st.columns(2)
@@ -1915,7 +1914,7 @@ def render_dashboard_panel():
                 y=list(factor_weights.keys()),
                 colorscale='Viridis'))
             fig_corr.update_layout(title="因子相关性矩阵", height=400)
-            st.plotly_chart(fig_corr, use_container_width=True, key="factor_corr")
+            st.plotly_chart(fig_corr, use_container_width=True, key=f"{key_prefix}_factor_corr")
     with col2:
         st.subheader("滑点监控")
         if st.session_state.slippage_history:
@@ -1923,7 +1922,7 @@ def render_dashboard_panel():
             fig_slip = go.Figure()
             fig_slip.add_trace(go.Scatter(x=df_slip['time'], y=df_slip['slippage'], mode='lines+markers', name='滑点'))
             fig_slip.update_layout(title="实时滑点", xaxis_title="时间", yaxis_title="滑点 (USDT)", height=300)
-            st.plotly_chart(fig_slip, use_container_width=True, key="slippage_chart")
+            st.plotly_chart(fig_slip, use_container_width=True, key=f"{key_prefix}_slippage_chart")
         # 持仓相关性热力图
         if len(st.session_state.positions) >= 2:
             ret_matrix = []
@@ -1941,7 +1940,7 @@ def render_dashboard_panel():
                     colorscale='RdBu',
                     zmid=0))
                 fig_heat.update_layout(title="持仓收益率相关性", height=400)
-                st.plotly_chart(fig_heat, use_container_width=True, key="position_corr")
+                st.plotly_chart(fig_heat, use_container_width=True, key=f"{key_prefix}_position_corr")
 
     # 另类数据显示
     if CONFIG.use_chain_data:
@@ -2124,9 +2123,9 @@ class UIRenderer:
         with tab1:
             self.render_trading_tab(symbols, multi_data)
         with tab2:
-            render_dashboard_panel()
+            render_dashboard_panel(key_prefix="tab2")   # 传入前缀
         with tab3:
-            render_dashboard_panel()  # 与tab2相同，可合并
+            render_dashboard_panel(key_prefix="tab3")   # 不同前缀
 
     def render_trading_tab(self, symbols, multi_data):
         st.subheader("多品种持仓")
@@ -2350,7 +2349,7 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True, key="main_chart")
 
     def render_dashboard_tab(self, symbols, multi_data):
-        render_dashboard_panel()
+        render_dashboard_panel(key_prefix="dashboard")
 
 def main():
     st.set_page_config(page_title="终极量化终端 · 超神版 49.0", layout="wide")
