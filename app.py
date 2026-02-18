@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终修复版)
+🚀 终极量化终端 · 职业版 48.1 (最终容错版)
 ===================================================
 核心特性：
 - 风险预算模型（每日风险消耗控制）
 - 波动率动态仓位（ATR定仓）
 - 期望收益排序（正期望筛选）
 - 完整机构级风控与机器学习
+- 增强的防御式编程，防止因数据缺失导致崩溃
 ===================================================
 """
 
@@ -216,6 +217,13 @@ class TradingConfig:
     # 模拟数据参数
     sim_volatility: float = 0.06
     sim_trend_strength: float = 0.2
+    # 布林带宽度阈值（用于震荡判断）
+    bb_width_threshold: float = 0.1
+    # 布林带计算窗口
+    bb_window: int = 20
+    # RSI范围
+    rsi_range_low: int = 40
+    rsi_range_high: int = 60
 
 CONFIG = TradingConfig()
 
@@ -861,17 +869,29 @@ def funding_rate_blocked(symbol: str, direction: int) -> bool:
             return True
     return False
 
+# ==================== 修复版 is_range_market（带空值保护和防御）====================
 def is_range_market(df_dict: Dict[str, pd.DataFrame]) -> bool:
+    """判断是否为震荡市场，增加空值保护和异常处理"""
     if '15m' not in df_dict:
         return False
     df = df_dict['15m']
+    if df.empty:
+        return False
     last = df.iloc[-1]
-    if not pd.isna(last.get('bb_width')):
-        if last['bb_width'] < CONFIG.bb_width_threshold:
-            return True
-    if not pd.isna(last.get('rsi')):
-        if CONFIG.rsi_range_low < last['rsi'] < CONFIG.rsi_range_high:
-            return True
+    # 防御：确保 last 是 Series 且包含所需字段
+    try:
+        # 检查 bb_width
+        if hasattr(last, 'get') and last.get('bb_width') is not None and not pd.isna(last.get('bb_width')):
+            if last['bb_width'] < CONFIG.bb_width_threshold:
+                return True
+        # 检查 rsi
+        if hasattr(last, 'get') and last.get('rsi') is not None and not pd.isna(last.get('rsi')):
+            if CONFIG.rsi_range_low < last['rsi'] < CONFIG.rsi_range_high:
+                return True
+    except Exception as e:
+        log_error(f"is_range_market 判断出错: {e}")
+        # 出错时保守处理，假设不是震荡
+        return False
     return False
 
 def multi_timeframe_confirmation(df_dict: Dict[str, pd.DataFrame], direction: int) -> bool:
@@ -997,6 +1017,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
     return data_dict
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """添加技术指标，确保布林带宽度安全计算"""
     df = df.copy()
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -1026,8 +1047,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
             df['adx'] = np.nan
     else:
         df['adx'] = np.nan
-    if len(df) >= 20:
-        bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+    # 布林带宽度计算（带长度保护）
+    if len(df) >= CONFIG.bb_window:
+        bb = ta.volatility.BollingerBands(df['close'], window=CONFIG.bb_window, window_dev=2)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
@@ -1174,7 +1196,12 @@ class SignalEngine:
         regime = st.session_state.market_regime
         ic_dict = {}
 
-        range_penalty = 0.5 if is_range_market(df_dict) else 1.0
+        # 防御式调用 is_range_market
+        try:
+            range_penalty = 0.5 if is_range_market(df_dict) else 1.0
+        except Exception as e:
+            log_error(f"is_range_market 调用异常: {e}")
+            range_penalty = 1.0  # 默认不惩罚
 
         for tf, df in df_dict.items():
             if df.empty or len(df) < 2:
@@ -2043,10 +2070,10 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.set_page_config(page_title="终极量化终端 · 职业版 48.1", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终容错)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 职业版 48.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错")
 
     init_session_state()
     check_and_fix_anomalies()
