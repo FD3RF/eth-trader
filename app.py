@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (三刀核心升级)
+🚀 终极量化终端 · 职业版 48.1 (含异常捕获)
 ===================================================
-核心特性（职业级风险与收益管理）：
-1. 风险预算模型（每日风险消耗控制）
-2. 波动率动态仓位（ATR定仓，抛弃固定杠杆）
-3. 期望收益排序（正期望筛选，收益驱动）
-4. ...（其余原有全部功能保留）
+核心特性：
+- 风险预算模型（每日风险消耗控制）
+- 波动率动态仓位（ATR定仓）
+- 期望收益排序（正期望筛选）
+- 完整机构级风控与机器学习
 ===================================================
 """
 
@@ -23,6 +23,8 @@ from streamlit_autorefresh import st_autorefresh
 import warnings
 import time
 import logging
+import sys
+import traceback
 from typing import Optional, Dict, List, Tuple, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -43,6 +45,18 @@ from hmmlearn import hmm
 import pickle
 
 warnings.filterwarnings('ignore')
+
+# ==================== 全局异常捕获 ====================
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    with open('crash.log', 'a') as f:
+        f.write(f"\n--- {datetime.now()} ---\n")
+        traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+
+sys.excepthook = global_exception_handler
 
 # ==================== 日志文件持久化 ====================
 LOG_DIR = "logs"
@@ -189,6 +203,15 @@ class TradingConfig:
     # 异常检测阈值
     max_reasonable_balance: float = 1e7
     max_reasonable_daily_pnl_ratio: float = 10.0
+    # HMM
+    regime_detection_method: str = "hmm"
+    hmm_n_components: int = 3
+    hmm_n_iter: int = 100
+    # 成本感知训练
+    cost_aware_training: bool = True
+    # 模拟数据参数
+    sim_volatility: float = 0.06
+    sim_trend_strength: float = 0.2
 
 CONFIG = TradingConfig()
 
@@ -280,7 +303,7 @@ def init_session_state():
     defaults = {
         'account_balance': 10000.0,
         'daily_pnl': 0.0,
-        'daily_risk_consumed': 0.0,          # 新增：今日已消耗风险（已实现亏损）
+        'daily_risk_consumed': 0.0,
         'peak_balance': 10000.0,
         'consecutive_losses': 0,
         'daily_trades': 0,
@@ -325,7 +348,7 @@ def init_session_state():
         'regime_stats': regime_stats,
         'consistency_stats': consistency_stats,
         'aggressive_mode': False,
-        'dynamic_max_daily_trades': 9999,    # 不再使用，保留但无意义
+        'dynamic_max_daily_trades': 9999,
         'var_method': CONFIG.var_method.value,
         'funding_rates': {},
         'ml_factor_scores': {},
@@ -352,7 +375,7 @@ def check_and_fix_anomalies():
         log_error(f"检测到异常每日盈亏 {st.session_state.daily_pnl:.2f}，自动重置为0")
         st.session_state.daily_pnl = 0.0
         fixed = True
-    if abs(st.session_state.daily_risk_consumed) > st.session_state.account_balance * 0.5:  # 风险消耗异常
+    if abs(st.session_state.daily_risk_consumed) > st.session_state.account_balance * 0.5:
         log_error(f"检测到异常风险消耗 {st.session_state.daily_risk_consumed:.2f}，自动重置为0")
         st.session_state.daily_risk_consumed = 0.0
         fixed = True
@@ -1270,10 +1293,9 @@ class RiskManager:
         return until is not None and datetime.now() < until
 
     def update_losses(self, win: bool, loss_amount: float = 0.0):
-        """更新连续亏损计数，并累加风险消耗"""
         if not win:
             st.session_state.consecutive_losses += 1
-            st.session_state.daily_risk_consumed += abs(loss_amount)  # 累加亏损金额
+            st.session_state.daily_risk_consumed += abs(loss_amount)
             if st.session_state.consecutive_losses >= CONFIG.cooldown_losses:
                 st.session_state.cooldown_until = datetime.now() + timedelta(hours=CONFIG.cooldown_hours)
         else:
@@ -1297,17 +1319,14 @@ class RiskManager:
         """波动率动态仓位计算"""
         if price <= 0 or prob < 0.5:
             return 0.0
-        # 单笔风险金额
         risk_amount = balance * CONFIG.risk_per_trade
         if is_aggressive:
-            risk_amount *= 1.5  # 进攻模式提升风险
+            risk_amount *= 1.5
         if atr == 0 or np.isnan(atr) or atr < price * CONFIG.min_atr_pct / 100:
-            stop_distance = price * 0.01  # 保底止损距离
+            stop_distance = price * 0.01
         else:
             stop_distance = atr * adaptive_atr_multiplier(pd.Series(recent_returns))
-        # 仓位 = 风险金额 / 止损距离
         size = risk_amount / stop_distance
-        # 杠杆限制作为安全网（最大10倍）
         max_size_by_leverage = balance * CONFIG.max_leverage_global / price
         size = min(size, max_size_by_leverage)
         return max(size, 0.001)
@@ -1316,33 +1335,22 @@ class RiskManager:
         """期望收益排序 + 协方差分配"""
         if not symbol_signals:
             return {}
-        # 计算每个信号的期望收益
         expected_returns = {}
         for sym, (direction, prob, atr, price, rets) in symbol_signals.items():
-            # 估算止损距离和盈亏比
             if atr == 0 or np.isnan(atr):
                 stop_dist = price * 0.01
             else:
                 stop_dist = atr * adaptive_atr_multiplier(pd.Series(rets))
-            risk_amount = balance * CONFIG.risk_per_trade  # 单笔风险金额
-            # 假设盈亏比固定（可根据止盈价计算，但止盈价尚未确定，此处用 tp_min_ratio 估算）
+            risk_amount = balance * CONFIG.risk_per_trade
             reward_risk_ratio = CONFIG.tp_min_ratio
-            # 期望收益 = 胜率 * 盈利 - 败率 * 亏损
-            # 盈利 = risk_amount * reward_risk_ratio，亏损 = risk_amount
             expected_pnl = prob * (risk_amount * reward_risk_ratio) - (1 - prob) * risk_amount
             expected_returns[sym] = expected_pnl
-        # 只保留正期望的信号，并按期望收益排序
         positive_expected = {sym: er for sym, er in expected_returns.items() if er > 0}
         if not positive_expected:
             return {}
-        # 按期望收益降序排序
         sorted_symbols = sorted(positive_expected.keys(), key=lambda s: positive_expected[s], reverse=True)
-        # 这里简化：只取期望收益最高的一个品种开仓（可配置多个，但先取一个）
-        # 如果需要多品种，可以按比例分配，但这里先实现单品种
-        # 返回字典，只有最佳品种有仓位，其他为0
         allocations = {sym: 0.0 for sym in symbol_signals}
         best_sym = sorted_symbols[0]
-        # 为最佳品种计算实际仓位（基于波动率）
         dir, prob, atr, price, rets = symbol_signals[best_sym]
         is_aggressive = prob > 0.7 and st.session_state.get('aggressive_mode', False)
         size = self.calc_position_size(balance, prob, atr, price, rets, is_aggressive)
@@ -1439,12 +1447,10 @@ class Position:
         return False, "", 0.0, None
 
 def set_leverage(symbol: str):
-    """不再使用杠杆模式，但保留函数以防实盘需要设置杠杆（可设为固定值或由交易所决定）"""
     if not st.session_state.exchange or not st.session_state.use_real:
         return
-    # 为了兼容，设置一个合理杠杆（例如 5x），但实际仓位已由波动率决定
     try:
-        leverage = 5  # 固定5倍杠杆（可根据需要调整）
+        leverage = 5
         exchange_name = st.session_state.exchange_choice.lower()
         if 'binance' in exchange_name:
             st.session_state.exchange.fapiPrivate_post_leverage({
@@ -1605,7 +1611,6 @@ def close_position(symbol: str, exit_price: float, reason: str, close_size: Opti
     update_regime_stats(st.session_state.market_regime, pnl)
     update_consistency_stats(is_backtest=False, slippage=slippage, win=pnl>0)
 
-    # 更新风险消耗和连续亏损
     win_flag = pnl > 0
     RiskManager().update_losses(win_flag, loss_amount=pnl if not win_flag else 0)
 
@@ -1674,7 +1679,6 @@ class UIRenderer:
                 else:
                     st.success("📡 当前数据源：币安实时数据")
 
-            # 移除杠杆模式选择，改为显示单笔风险比例（可读）
             st.write(f"单笔风险: {CONFIG.risk_per_trade*100:.1f}%")
             st.write(f"每日风险预算: {CONFIG.daily_risk_budget_ratio*100:.1f}%")
 
@@ -1772,14 +1776,13 @@ class UIRenderer:
                     del st.session_state[key]
                 st.rerun()
 
-        return selected_symbols, None, use_real  # mode_lev 不再使用
+        return selected_symbols, None, use_real
 
     def render_main_panel(self, symbols, mode, use_real):
         if not symbols:
             st.warning("请至少选择一个交易品种")
             return
 
-        # 每日重置
         check_and_reset_daily()
 
         multi_data = {}
@@ -1805,12 +1808,6 @@ class UIRenderer:
 
         fix_data_consistency(symbols)
 
-        if first_sym in multi_data:
-            rets = multi_data[first_sym]['data_dict']['15m']['close'].pct_change().dropna().values[-20:]
-            volatility = np.std(rets) if len(rets) > 5 else 0
-            # 不再需要动态每日交易次数，但保留调用以防有副作用
-            # update_daily_trades_limit(volatility)
-
         if st.session_state.mode == 'backtest':
             self.render_backtest_panel(symbols, multi_data)
         else:
@@ -1825,7 +1822,6 @@ class UIRenderer:
         risk = RiskManager()
         engine = SignalEngine()
 
-        # 检查冷却和风险预算
         cooldown = risk.check_cooldown()
         risk_budget_ok = check_risk_budget()
         if cooldown:
@@ -1843,10 +1839,8 @@ class UIRenderer:
                 recent = df_dict_sym['15m']['close'].pct_change().dropna().values[-20:]
                 symbol_signals[sym] = (direction, prob, atr_sym, price, recent)
 
-        # 计算仓位分配（期望收益排序）
         allocations = risk.allocate_portfolio(symbol_signals, st.session_state.account_balance)
 
-        # 开新仓（仅当未冷却、风险预算充足、且分配仓位>0）
         can_open = not (cooldown or not risk_budget_ok)
         for sym in symbols:
             if sym not in st.session_state.positions and allocations.get(sym, 0) > 0:
@@ -1863,7 +1857,6 @@ class UIRenderer:
                 else:
                     log_execution(f"开仓被阻止：{sym} (冷却或风险预算耗尽)")
 
-        # 持仓更新与平仓（始终执行）
         for sym, pos in list(st.session_state.positions.items()):
             if sym not in symbols:
                 continue
@@ -1884,7 +1877,6 @@ class UIRenderer:
             if sym in multi_data:
                 total_floating += pos.pnl(multi_data[sym]['current_price'])
 
-        # VaR/CVaR计算
         historical_rets = None
         if len(symbols) > 1:
             ret_arrays = []
@@ -1918,7 +1910,6 @@ class UIRenderer:
         record_equity_point()
         current_dd, max_dd = calculate_drawdown()
 
-        # 计算当前风险预算剩余
         risk_budget_total = st.session_state.account_balance * CONFIG.daily_risk_budget_ratio
         risk_budget_remaining = max(0, risk_budget_total - st.session_state.daily_risk_consumed)
 
