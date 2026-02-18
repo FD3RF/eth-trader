@@ -9,3 +9,5 @@ ccxt
 nest-asyncio
 scikit-learn
 joblib
+scipy
+pytz
