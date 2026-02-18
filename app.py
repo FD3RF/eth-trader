@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神进化版 47.0 (实盘增强)
+🚀 终极量化终端 · 超神进化版 47.0 (最终修复版)
 ===================================================
 核心特性（100% 完美极限 + 新增机器学习与贝叶斯优化）：
 1. 多周期共振信号 + 动态加权
@@ -43,6 +43,10 @@
 - 实盘交易使用 reduceOnly 安全平仓
 - 完善的异常处理和 Telegram 报警
 - 测试网与实盘无缝切换
+
+最终修复：
+- 修复因子相关性矩阵维度不匹配导致的 IndexError
+- 增强数据容错，防止因缺失值导致崩溃
 ===================================================
 """
 
@@ -777,19 +781,38 @@ def dynamic_kelly_fraction() -> float:
     discount = min(1.0, win_rate / 0.55) * min(1.0, sharpe / 1.5)
     return base * max(0.1, discount)
 
+# ==================== 因子相关性动态降权（修复版）====================
 def update_factor_correlation(ic_records: Dict[str, List[float]]):
+    """更新因子相关性矩阵（确保与全因子列表对齐）"""
     global factor_corr_matrix
     if len(ic_records) < 2:
+        # 数据不足时不更新，保留原有矩阵（若为None则后续跳过）
         return
-    ic_df = pd.DataFrame({k: pd.Series(v) for k, v in ic_records.items()})
-    factor_corr_matrix = ic_df.corr().fillna(0).values
+    # 获取所有可能的因子
+    all_factors = list(factor_weights.keys())
+    # 构建数据框：每个因子一列，若无记录则填充NaN
+    df_dict = {}
+    for f in all_factors:
+        if f in ic_records and ic_records[f]:
+            df_dict[f] = pd.Series(ic_records[f])
+        else:
+            df_dict[f] = pd.Series([np.nan])  # 占位，后续corr会忽略
+    ic_df = pd.DataFrame(df_dict)
+    # 计算相关性，缺失值会导致整个列为NaN，因此用0填充
+    corr = ic_df.corr().fillna(0)
+    factor_corr_matrix = corr.values
 
 def apply_factor_correlation_penalty():
+    """对高相关性因子进行降权（增加维度检查）"""
     global factor_weights
     if factor_corr_matrix is None:
         return
     factors = list(factor_weights.keys())
     n = len(factors)
+    # 检查矩阵维度是否至少为 n x n
+    if factor_corr_matrix.shape[0] < n or factor_corr_matrix.shape[1] < n:
+        # 如果矩阵太小，无法应用惩罚，直接返回
+        return
     for i in range(n):
         for j in range(i+1, n):
             if factor_corr_matrix[i, j] > CONFIG.factor_corr_threshold:
@@ -1529,7 +1552,7 @@ def close_position(symbol: str, exit_price: float, reason: str, close_size: Opti
         actual_exit = exec_exit
         actual_size = close_size
 
-    # 统一计算盈亏并记录（以下为原函数中后续部分）
+    # 统一计算盈亏并记录
     pnl = (actual_exit - pos.entry_price) * actual_size * pos.direction - actual_exit * actual_size * CONFIG.fee_rate * 2
     st.session_state.daily_pnl += pnl
     st.session_state.account_balance += pnl
@@ -1982,7 +2005,7 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 47.0 · 超神进化版 (实盘增强)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 47.0 · 超神进化版 (最终修复)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 超神进化版 47.0")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 机器学习 · 贝叶斯优化 · 波动率锥 · 极值理论 · 实盘杠杆自动化")
