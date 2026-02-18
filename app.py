@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 机构级完整版 48.0 (带余额自动修复)
+🚀 终极量化终端 · 机构级完整版 48.0 (终极修复版)
 ===================================================
-（... 其余注释与之前版本相同 ...）
+（... 详细注释同前 ...）
 """
 
 import streamlit as st
@@ -210,8 +210,9 @@ class TradingConfig:
     walk_forward_window: int = 1000
     walk_forward_step: int = 100
     cost_aware_training: bool = True
-    # ========== 新增余额异常检测 ==========
-    max_reasonable_balance: float = 1e7  # 最大合理余额（1000万USDT），超过此值自动重置
+    # 异常检测阈值
+    max_reasonable_balance: float = 1e7  # 最大合理余额
+    max_reasonable_daily_pnl_ratio: float = 10.0  # 每日盈亏最大绝对值与余额的倍数
 
 CONFIG = TradingConfig()
 
@@ -362,19 +363,29 @@ def init_session_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
-def check_and_fix_balance():
-    """检查余额是否异常，若异常则重置为初始值并清空日志"""
+def check_and_fix_anomalies():
+    """检查并修复异常数据（余额、daily_pnl、持仓等）"""
+    fixed = False
+    # 检查余额
     if st.session_state.account_balance > CONFIG.max_reasonable_balance or st.session_state.account_balance < 0:
         log_error(f"检测到异常余额 {st.session_state.account_balance:.2f}，自动重置为10000")
         st.session_state.account_balance = 10000.0
-        st.session_state.daily_pnl = 0.0
         st.session_state.peak_balance = 10000.0
-        st.session_state.trade_log = []
-        st.session_state.equity_curve.clear()
-        # 删除CSV文件以清除历史
+        fixed = True
+
+    # 检查 daily_pnl
+    if abs(st.session_state.daily_pnl) > st.session_state.account_balance * CONFIG.max_reasonable_daily_pnl_ratio:
+        log_error(f"检测到异常每日盈亏 {st.session_state.daily_pnl:.2f}，自动重置为0")
+        st.session_state.daily_pnl = 0.0
+        fixed = True
+
+    # 如果修复了，清空可能损坏的CSV
+    if fixed:
         for f in [EQUITY_CURVE_FILE, TRADE_LOG_FILE, REGIME_STATS_FILE, CONSISTENCY_FILE]:
             if os.path.exists(f):
                 os.remove(f)
+        st.session_state.trade_log = []
+        st.session_state.equity_curve.clear()
         st.rerun()
 
 def log_error(msg: str):
@@ -488,6 +499,7 @@ def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
         })
     pd.DataFrame(rows).to_csv(CONSISTENCY_FILE, index=False)
 
+# ==================== 每日限额与重置 ====================
 def update_daily_trades_limit(volatility: float):
     base = CONFIG.max_daily_trades
     if volatility > CONFIG.daily_trades_volatility_threshold:
@@ -495,6 +507,16 @@ def update_daily_trades_limit(volatility: float):
     else:
         st.session_state.dynamic_max_daily_trades = base
 
+def check_and_reset_daily():
+    """检查日期变更，重置每日交易次数和每日盈亏"""
+    today = datetime.now().date()
+    if st.session_state.get('last_trade_date') != today:
+        st.session_state.daily_trades = 0
+        st.session_state.daily_pnl = 0.0
+        st.session_state.last_trade_date = today
+        log_execution("新的一天，重置每日交易次数和盈亏")
+
+# ==================== 自适应ATR倍数（基于波动率锥）====================
 def adaptive_atr_multiplier(price_series: pd.Series) -> float:
     if len(price_series) < CONFIG.adapt_window:
         return CONFIG.atr_multiplier_base
@@ -521,6 +543,7 @@ def get_volcone(returns: pd.Series) -> dict:
     volcone_cache[key] = volcone
     return volcone
 
+# ==================== Regime检测（HMM）====================
 def train_hmm(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> Optional[hmm.GaussianHMM]:
     df = df_dict['15m'].copy()
     ret = df['close'].pct_change().dropna().values.reshape(-1, 1)
@@ -583,6 +606,7 @@ def detect_market_regime_traditional(df_dict: Dict[str, pd.DataFrame]) -> Market
     else:
         return MarketRegime.RANGE
 
+# ==================== 机器学习因子（成本感知训练）====================
 def train_ml_model_cost_aware(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> Tuple[Any, Any]:
     df = df_dict['15m'].copy()
     feature_cols = ['ema20', 'ema50', 'rsi', 'macd_diff', 'bb_width', 'volume_ratio', 'adx', 'atr']
@@ -641,6 +665,7 @@ def get_ml_factor(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> float:
     pred = model.predict(X_scaled)[0]
     return np.tanh(pred * 10)
 
+# ==================== 概率校准 ====================
 def calibrate_probabilities(symbol: str, raw_probs: np.ndarray, true_labels: np.ndarray) -> Any:
     if CONFIG.calibration_method == 'platt':
         from sklearn.calibration import CalibratedClassifierCV
@@ -666,6 +691,7 @@ def apply_calibration(symbol: str, raw_prob: float) -> float:
     else:
         return raw_prob
 
+# ==================== 贝叶斯因子权重更新 ====================
 def bayesian_update_factor_weights(ic_dict: Dict[str, List[float]]):
     global factor_weights
     prior_mean = 1.0
@@ -679,6 +705,7 @@ def bayesian_update_factor_weights(ic_dict: Dict[str, List[float]]):
         posterior_mean = (prior_strength * prior_mean + n * sample_mean) / (prior_strength + n)
         factor_weights[factor] = max(0.1, posterior_mean)
 
+# ==================== 因子IC统计 ====================
 def update_factor_ic_stats(ic_records: Dict[str, List[float]]):
     stats = {}
     for factor, ic_list in ic_records.items():
@@ -690,6 +717,7 @@ def update_factor_ic_stats(ic_records: Dict[str, List[float]]):
             stats[factor] = {'mean': mean_ic, 'std': std_ic, 'ir': ir, 'p_value': p_value}
     st.session_state.factor_ic_stats = stats
 
+# ==================== 因子IC计算 ====================
 def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
     try:
         df_hash = pd.util.hash_pandas_object(df).sum()
@@ -713,6 +741,7 @@ def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
 
 _ic_cache = {}
 
+# ==================== 协方差矩阵计算（带缓存）====================
 def calculate_cov_matrix(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], window: int = 50) -> Optional[np.ndarray]:
     if len(symbols) < 2:
         return None
@@ -737,6 +766,7 @@ def calculate_cov_matrix(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.
     st.session_state.cov_matrix_cache = {'key': cache_key, 'matrix': cov}
     return cov
 
+# ==================== 风险预算分配（基于协方差）====================
 def risk_parity_weights(cov: np.ndarray) -> np.ndarray:
     n = cov.shape[0]
     vols = np.sqrt(np.diag(cov))
@@ -765,6 +795,7 @@ def allocate_with_risk_budget(symbols: List[str], cov: np.ndarray, balance: floa
             allocations[sym] = 0.0
     return allocations
 
+# ==================== 动态滑点计算（加入市场冲击项）====================
 def advanced_slippage_prediction(price: float, size: float, volume_20: float, volatility: float, imbalance: float) -> float:
     base_slippage = dynamic_slippage(price, size, volume_20, volatility, imbalance)
     market_impact = (size / max(volume_20, 1)) ** 0.5 * volatility * price * 0.3
@@ -776,6 +807,7 @@ def dynamic_slippage(price: float, size: float, volume: float, volatility: float
     imbalance_adj = 1 + abs(imbalance) * CONFIG.slippage_imbalance_factor
     return (base + impact) * imbalance_adj
 
+# ==================== 组合VaR/CVaR计算（支持极值法和波动率锥）====================
 def portfolio_var(weights: np.ndarray, cov: np.ndarray, confidence: float = 0.95, method: str = "HISTORICAL", historical_returns: Optional[np.ndarray] = None) -> float:
     if weights is None or cov is None or len(weights) == 0:
         return 0.0
@@ -1263,10 +1295,6 @@ class RiskManager:
         pass
 
     def check_daily_limit(self) -> bool:
-        today = datetime.now().date()
-        if st.session_state.get('last_trade_date') != today:
-            st.session_state.daily_trades = 0
-            st.session_state.last_trade_date = today
         return st.session_state.daily_trades >= st.session_state.dynamic_max_daily_trades
 
     def check_cooldown(self) -> bool:
@@ -1784,6 +1812,9 @@ class UIRenderer:
             st.warning("请至少选择一个交易品种")
             return
 
+        # 每日重置
+        check_and_reset_daily()
+
         multi_data = {}
         for sym in symbols:
             data = self.fetcher.get_symbol_data(sym)
@@ -1826,6 +1857,13 @@ class UIRenderer:
         risk = RiskManager()
         engine = SignalEngine()
 
+        # 检查是否处于冷却或已达每日上限
+        if risk.check_cooldown():
+            st.warning(f"系统冷却中，直至 {st.session_state.cooldown_until.strftime('%H:%M')}")
+            # 但仍然需要处理持仓更新和平仓
+        if risk.check_daily_limit():
+            st.warning(f"已达每日交易上限 {st.session_state.dynamic_max_daily_trades} 次，今日不再开新仓")
+
         symbol_signals = {}
         for sym in symbols:
             df_dict_sym = st.session_state.multi_df[sym]
@@ -1836,6 +1874,7 @@ class UIRenderer:
                 recent = df_dict_sym['15m']['close'].pct_change().dropna().values[-20:]
                 symbol_signals[sym] = (direction, prob, atr_sym, price, recent)
 
+        # 计算仓位分配
         allocations = {}
         if len(symbols) > 1 and st.session_state.cov_matrix is not None:
             allocations = allocate_with_risk_budget(symbols, st.session_state.cov_matrix, st.session_state.account_balance, symbol_signals)
@@ -1845,18 +1884,24 @@ class UIRenderer:
                 size = risk.calc_position_size(st.session_state.account_balance, prob, atr_sym, price, rets, st.session_state.aggressive_mode)
                 allocations[sym] = size
 
+        # 开新仓（仅当未冷却且未达上限）
+        can_open = not (risk.check_cooldown() or risk.check_daily_limit())
         for sym in symbols:
             if sym not in st.session_state.positions and allocations.get(sym, 0) > 0:
-                dir, prob, atr_sym, price, _ = symbol_signals[sym]
-                if atr_sym == 0 or np.isnan(atr_sym):
-                    stop_dist = price * 0.01
+                if can_open:
+                    dir, prob, atr_sym, price, _ = symbol_signals[sym]
+                    if atr_sym == 0 or np.isnan(atr_sym):
+                        stop_dist = price * 0.01
+                    else:
+                        stop_dist = atr_sym * adaptive_atr_multiplier(pd.Series([price]))
+                    stop = price - stop_dist if dir == 1 else price + stop_dist
+                    take = price + stop_dist * CONFIG.tp_min_ratio if dir == 1 else price - stop_dist * CONFIG.tp_min_ratio
+                    size = allocations[sym]
+                    split_and_execute(sym, dir, size, price, stop, take)
                 else:
-                    stop_dist = atr_sym * adaptive_atr_multiplier(pd.Series([price]))
-                stop = price - stop_dist if dir == 1 else price + stop_dist
-                take = price + stop_dist * CONFIG.tp_min_ratio if dir == 1 else price - stop_dist * CONFIG.tp_min_ratio
-                size = allocations[sym]
-                split_and_execute(sym, dir, size, price, stop, take)
+                    log_execution(f"开仓被阻止：{sym} (冷却或达上限)")
 
+        # 持仓更新与平仓（始终执行）
         for sym, pos in list(st.session_state.positions.items()):
             if sym not in symbols:
                 continue
@@ -1877,6 +1922,7 @@ class UIRenderer:
             if sym in multi_data:
                 total_floating += pos.pnl(multi_data[sym]['current_price'])
 
+        # VaR/CVaR计算
         historical_rets = None
         if len(symbols) > 1:
             ret_arrays = []
@@ -1946,6 +1992,7 @@ class UIRenderer:
                 st.info("等待信号...")
 
             st.markdown("### 📉 风险监控")
+            # 显示实时盈亏 = daily_pnl + floating
             st.metric("实时盈亏", f"{st.session_state.daily_pnl + total_floating:.2f} USDT")
             st.metric("当前回撤", f"{current_dd:.2f}%")
             st.metric("最大回撤", f"{max_dd:.2f}%")
@@ -2035,13 +2082,13 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.set_page_config(page_title="终极量化终端 48.0 · 机构级完整版 (带余额修复)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 48.0 · 终极修复版", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 机构级完整版 48.0")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · HMM · 协方差风险预算 · 概率校准 · 成本感知训练 · 实盘杠杆自动化")
+    st.title("🚀 终极量化终端 · 终极修复版 48.0")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 全功能修复 · 自动异常检测")
 
     init_session_state()
-    check_and_fix_balance()  # 新增：启动时检查余额是否异常并修复
+    check_and_fix_anomalies()  # 启动时自动修复异常数据
     renderer = UIRenderer()
     symbols, mode, use_real = renderer.render_sidebar()
 
