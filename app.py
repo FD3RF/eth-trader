@@ -1,36 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 智能进化版 47.0
+🚀 终极量化终端 · 智能进化版 47.0 (完美极限版)
 ==================================================
-核心特性（100% 完美极限 + 新增三阶段优化）：
-1. 多周期共振信号（1m/5m/15m/1h/4h/1d） + 动态加权
-2. 震荡市场过滤器（布林带宽度 + RSI区间）抑制假信号
-3. 协方差风险平价 + 组合 VaR/CVaR 实时监控（支持正态/历史模拟法）
-4. 动态每日交易次数（根据波动率自适应调整）
-5. 进攻模式开关（短时提升风险预算，仓位放大）
-6. 动态 ATR 止损/止盈（基于近20根K线波动率，1.2x - 2.5x 自适应）
-7. 净值曲线持久化（含浮动盈亏，自动保存 equity_curve.csv）
-8. 精准回撤计算（当前回撤 + 最大回撤，基于实时权益）
+核心特性（100% 完美极限 + 三阶段智能进化）：
+1. 多周期共振信号 + 动态加权
+2. 震荡市场过滤器抑制假信号
+3. 协方差风险平价 + 组合 VaR/CVaR 实时监控（历史模拟法/正态法）
+4. 动态每日交易次数（根据波动率自适应）
+5. 进攻模式开关（短时提升风险预算）
+6. 动态 ATR 止损/止盈（基于波动率自适应）
+7. 净值曲线持久化（自动保存 equity_curve.csv）
+8. 精准回撤计算（当前回撤 + 最大回撤）
 9. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
 10. 实盘一致性误差统计（滑点对比 + 胜率对比 + 自动报警）
-11. Telegram 增强通知（区分信号、风险、交易类型，支持发送权益曲线截图）
+11. Telegram 增强通知（支持发送权益曲线截图）
 12. 一键数据修复（清理无效持仓） + 重置所有状态
 13. 高性能并行数据获取（多交易所自动回退）
 14. 完整日志持久化（交易日志、执行日志、错误日志）
-15. 回测引擎 + Walk Forward 验证 + 参数敏感性热力图
-16. 因子 IC 显著性检验（均值、标准差、信息比率、p 值，p<0.05 高亮）
-17. 多品种支持（ETH/BTC/SOL/BNB 等，可自由添加）
+15. 回测引擎 + Walk Forward 验证（基础版）
+16. 因子 IC 显著性检验（均值、标准差、信息比率、p 值）
+17. 多品种支持（可自由添加）
 18. 滑点 + 手续费精细建模（基于订单深度、波动率、订单簿不平衡）
-19. 移动止损 + 比例部分止盈 + 保本止损 + 部分止盈后止损优化
+19. 移动止损 + 比例部分止盈 + 保本止损
 20. 熔断机制（基于 ATR 百分比 + 恐惧贪婪指数）
 21. 冷却机制（连续亏损后暂停交易）
 22. 实时盈亏 + 当前回撤 + 最大回撤 + VaR/CVaR 联动显示
 23. 图表 K 线 + 均线 + 持仓标记 + 交易记录可视化
 24. 完全可配置参数（位于 TradingConfig 类中）
+
 ==================================================
-新增优化（47.0 三阶段智能进化）：
-- 阶段一：市场状态开仓过滤（只在趋势/恐慌下开仓），CVaR 计算，动态 Kelly 折扣（基于近期胜率/夏普）
-- 阶段二：因子相关性动态降权，IC 滚动衰减（指数加权），因子淘汰（低 IC 且高 p 值自动降权）
+三阶段智能进化：
+- 阶段一：市场状态开仓过滤（只在趋势/恐慌下开仓），CVaR 计算，动态 Kelly 折扣
+- 阶段二：因子相关性动态降权，IC 滚动衰减（指数加权），因子淘汰
 - 阶段三：高级滑点预测（加入市场冲击项），订单拆分（TWAP 简化），冲击成本记录
 ==================================================
 """
@@ -74,6 +75,7 @@ CONSISTENCY_FILE = "consistency_stats.csv"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 def append_to_csv(file_path: str, row: dict):
+    """安全追加数据到CSV文件"""
     file_exists = os.path.isfile(file_path)
     try:
         with open(file_path, 'a', newline='', encoding='utf-8') as f:
@@ -85,11 +87,13 @@ def append_to_csv(file_path: str, row: dict):
         print(f"写入CSV失败: {e}")
 
 def load_csv(file_path: str) -> pd.DataFrame:
+    """加载CSV文件，若不存在则返回空DataFrame"""
     if os.path.exists(file_path):
         return pd.read_csv(file_path)
     return pd.DataFrame()
 
 def append_to_log(file_name: str, message: str):
+    """追加日志到按日期分割的文件"""
     date_str = datetime.now().strftime("%Y-%m-%d")
     log_path = os.path.join(LOG_DIR, f"{file_name}_{date_str}.log")
     try:
@@ -119,24 +123,25 @@ class VaRMethod(Enum):
 
 @dataclass
 class TradingConfig:
+    """所有可调参数集中管理"""
     symbols: List[str] = field(default_factory=lambda: ["ETH/USDT", "BTC/USDT", "SOL/USDT", "BNB/USDT"])
-    base_risk_per_trade: float = 0.02
-    risk_budget_ratio: float = 0.10
-    daily_loss_limit: float = 300.0
-    max_drawdown_pct: float = 20.0
-    min_atr_pct: float = 0.5
-    tp_min_ratio: float = 2.0
-    partial_tp_ratio: float = 0.5
-    partial_tp_r_multiple: float = 1.2
-    trailing_stop_pct: float = 0.3
-    breakeven_trigger_pct: float = 1.5
-    max_hold_hours: int = 36
-    max_consecutive_losses: int = 3
-    cooldown_losses: int = 3
-    cooldown_hours: int = 24
-    max_daily_trades: int = 5
-    daily_trades_volatility_threshold: float = 0.5
-    daily_trades_boost: int = 2
+    base_risk_per_trade: float = 0.02          # 基础风险比例
+    risk_budget_ratio: float = 0.10             # 风险预算占总资金比例
+    daily_loss_limit: float = 300.0              # 每日亏损上限
+    max_drawdown_pct: float = 20.0               # 最大回撤百分比
+    min_atr_pct: float = 0.5                      # 最小ATR百分比
+    tp_min_ratio: float = 2.0                     # 止盈/止损最小比例
+    partial_tp_ratio: float = 0.5                 # 部分止盈比例
+    partial_tp_r_multiple: float = 1.2             # 部分止盈触发倍数
+    trailing_stop_pct: float = 0.3                 # 移动止损百分比
+    breakeven_trigger_pct: float = 1.5             # 保本止损触发倍数
+    max_hold_hours: int = 36                        # 最大持仓小时
+    max_consecutive_losses: int = 3                 # 最大连续亏损次数
+    cooldown_losses: int = 3                        # 冷却触发亏损次数
+    cooldown_hours: int = 24                         # 冷却小时数
+    max_daily_trades: int = 5                        # 每日最大交易次数
+    daily_trades_volatility_threshold: float = 0.5   # 波动率阈值
+    daily_trades_boost: int = 2                       # 波动率高时增加交易次数
     leverage_modes: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
         "保守 (1-2x)": (1, 2),
         "稳健 (3-5x)": (3, 5),
@@ -234,6 +239,7 @@ logger = logging.getLogger("UltimateTrader")
 
 # ==================== 辅助函数 ====================
 def safe_request(max_retries: int = 3, default=None):
+    """装饰器：自动重试网络请求"""
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -250,6 +256,7 @@ def safe_request(max_retries: int = 3, default=None):
     return decorator
 
 def init_session_state():
+    """初始化Streamlit会话状态，从CSV恢复持久数据"""
     equity_df = load_csv(EQUITY_CURVE_FILE)
     equity_curve = deque(maxlen=500)
     if not equity_df.empty:
@@ -337,15 +344,18 @@ def init_session_state():
             st.session_state[k] = v
 
 def log_error(msg: str):
+    """记录错误日志"""
     st.session_state.error_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
     append_to_log("error", msg)
     logger.error(msg)
 
 def log_execution(msg: str):
+    """记录执行日志"""
     st.session_state.execution_log.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
     append_to_log("execution", msg)
 
 def send_telegram(msg: str, msg_type: str = "info", image: Optional[Any] = None):
+    """发送Telegram消息或图片"""
     token = st.session_state.get('telegram_token')
     chat_id = st.session_state.get('telegram_chat_id')
     if not token or not chat_id:
@@ -373,6 +383,7 @@ def send_telegram(msg: str, msg_type: str = "info", image: Optional[Any] = None)
         logger.warning(f"Telegram发送失败: {e}")
 
 def update_performance_metrics():
+    """更新性能指标（胜率、平均盈亏、夏普）"""
     trades = st.session_state.trade_log[-100:]
     if len(trades) < 10:
         return
@@ -393,6 +404,7 @@ def update_performance_metrics():
 
 # ==================== 实时权益计算 ====================
 def current_equity():
+    """计算当前总权益（余额 + 浮动盈亏）"""
     balance = st.session_state.account_balance
     floating = 0.0
     for sym, pos in st.session_state.positions.items():
@@ -402,6 +414,7 @@ def current_equity():
 
 # ==================== 精准回撤计算 ====================
 def calculate_drawdown():
+    """计算当前回撤和最大回撤（百分比）"""
     if len(st.session_state.equity_curve) < 2:
         return 0.0, 0.0
     df = pd.DataFrame(list(st.session_state.equity_curve))
@@ -413,6 +426,7 @@ def calculate_drawdown():
 
 # ==================== 记录权益点 ====================
 def record_equity_point():
+    """记录当前权益点到曲线和CSV"""
     equity = current_equity()
     now = datetime.now()
     st.session_state.equity_curve.append({'time': now, 'equity': equity})
@@ -420,6 +434,7 @@ def record_equity_point():
 
 # ==================== 市场状态统计更新 ====================
 def update_regime_stats(regime: MarketRegime, pnl: float):
+    """更新市场状态统计"""
     key = regime.value
     if key not in st.session_state.regime_stats:
         st.session_state.regime_stats[key] = {'trades': 0, 'wins': 0, 'total_pnl': 0.0}
@@ -432,15 +447,16 @@ def update_regime_stats(regime: MarketRegime, pnl: float):
         rows.append({'regime': k, 'trades': v['trades'], 'wins': v['wins'], 'total_pnl': v['total_pnl']})
     pd.DataFrame(rows).to_csv(REGIME_STATS_FILE, index=False)
 
-# ==================== 一致性误差统计 ====================
+# ==================== 一致性误差统计（安全版）====================
 def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
+    """更新实盘与回测一致性统计（修复KeyError）"""
     key = 'backtest' if is_backtest else 'live'
-    stats = st.session_state.consistency_stats.get(key, {'trades': 0, 'avg_slippage': 0.0, 'wins': 0})
-    stats['trades'] += 1
-    stats['avg_slippage'] = (stats['avg_slippage'] * (stats['trades']-1) + slippage) / stats['trades']
+    stats = st.session_state.consistency_stats.get(key, {})
+    stats['trades'] = stats.get('trades', 0) + 1
+    stats['avg_slippage'] = (stats.get('avg_slippage', 0.0) * (stats['trades'] - 1) + slippage) / stats['trades']
     if win:
-        stats['wins'] += 1
-    stats['win_rate'] = stats['wins'] / stats['trades'] if stats['trades'] > 0 else 0
+        stats['wins'] = stats.get('wins', 0) + 1
+    stats['win_rate'] = stats.get('wins', 0) / stats['trades'] if stats['trades'] > 0 else 0
     st.session_state.consistency_stats[key] = stats
     rows = []
     for typ, s in st.session_state.consistency_stats.items():
@@ -454,6 +470,7 @@ def update_consistency_stats(is_backtest: bool, slippage: float, win: bool):
 
 # ==================== 动态每日交易次数 ====================
 def update_daily_trades_limit(volatility: float):
+    """根据波动率调整每日最大交易次数"""
     base = CONFIG.max_daily_trades
     if volatility > CONFIG.daily_trades_volatility_threshold:
         st.session_state.dynamic_max_daily_trades = base + CONFIG.daily_trades_boost
@@ -462,10 +479,11 @@ def update_daily_trades_limit(volatility: float):
 
 # ==================== 自适应ATR倍数（基于价格序列）====================
 def adaptive_atr_multiplier(price_series: pd.Series) -> float:
+    """根据近期波动率自适应调整ATR倍数"""
     if len(price_series) < CONFIG.adapt_window:
         return CONFIG.atr_multiplier_base
     returns = price_series.pct_change().dropna()
-    vol = returns.std() * np.sqrt(365 * 24 * 4)
+    vol = returns.std() * np.sqrt(365 * 24 * 4)  # 年化波动率
     base_vol = 0.5
     ratio = base_vol / max(vol, 0.1)
     new_mult = CONFIG.atr_multiplier_base * np.clip(ratio, 0.5, 2.0)
@@ -473,6 +491,7 @@ def adaptive_atr_multiplier(price_series: pd.Series) -> float:
 
 # ==================== 在线学习因子权重 ====================
 def update_factor_weights(ic_dict: Dict[str, float]):
+    """根据IC在线更新因子权重"""
     global factor_weights
     lr = CONFIG.factor_learning_rate
     for factor, ic in ic_dict.items():
@@ -482,6 +501,7 @@ def update_factor_weights(ic_dict: Dict[str, float]):
 
 # ==================== 因子IC统计 ====================
 def update_factor_ic_stats(ic_records: Dict[str, List[float]]):
+    """计算并保存因子IC统计（均值、标准差、IR、p值）"""
     stats = {}
     for factor, ic_list in ic_records.items():
         if len(ic_list) > 5:
@@ -494,9 +514,10 @@ def update_factor_ic_stats(ic_records: Dict[str, List[float]]):
 
 # ==================== 协方差矩阵计算（带缓存）====================
 def calculate_cov_matrix(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], window: int = 50) -> Optional[np.ndarray]:
+    """计算多品种收益率协方差矩阵，使用缓存提高性能"""
     if len(symbols) < 2:
         return None
-    # 生成缓存键：包含符号列表、窗口大小和最新数据的时间戳哈希
+    # 生成缓存键：符号列表、窗口大小、数据哈希
     hash_input = str(sorted(symbols)) + str(window)
     for sym in symbols:
         df = data_dicts[sym]['15m']['close'].iloc[-window:]
@@ -520,19 +541,22 @@ def calculate_cov_matrix(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.
 
 # ==================== 动态滑点计算（加入市场冲击项）====================
 def advanced_slippage_prediction(price: float, size: float, volume_20: float, volatility: float, imbalance: float) -> float:
+    """高级滑点预测，包含基础滑点和市场冲击项"""
     base_slippage = dynamic_slippage(price, size, volume_20, volatility, imbalance)
     # 冲击预测
     market_impact = (size / max(volume_20, 1)) ** 0.5 * volatility * price * 0.3
     return base_slippage + market_impact
 
 def dynamic_slippage(price: float, size: float, volume: float, volatility: float, imbalance: float = 0.0) -> float:
+    """基础滑点计算（不含冲击）"""
     base = price * CONFIG.slippage_base
     impact = CONFIG.slippage_impact_factor * (size / max(volume, 1)) * volatility * price
     imbalance_adj = 1 + abs(imbalance) * CONFIG.slippage_imbalance_factor
     return (base + impact) * imbalance_adj
 
-# ==================== 组合VaR/CVaR计算 ====================
+# ==================== 组合VaR/CVaR计算（已修复矩阵乘法）====================
 def portfolio_var(weights: np.ndarray, cov: np.ndarray, confidence: float = 0.95, method: str = "HISTORICAL", historical_returns: Optional[np.ndarray] = None) -> float:
+    """计算组合VaR"""
     if weights is None or cov is None or len(weights) == 0:
         return 0.0
     if method == "HISTORICAL" and historical_returns is not None and historical_returns.shape[1] > 20:
@@ -546,6 +570,7 @@ def portfolio_var(weights: np.ndarray, cov: np.ndarray, confidence: float = 0.95
         return abs(var)
 
 def portfolio_cvar(weights: np.ndarray, historical_returns: np.ndarray, confidence: float = 0.95) -> float:
+    """计算组合CVaR"""
     if historical_returns is None or historical_returns.shape[1] < 20:
         return 0.0
     port_rets = weights @ historical_returns
@@ -554,6 +579,7 @@ def portfolio_cvar(weights: np.ndarray, historical_returns: np.ndarray, confiden
     return abs(cvar)
 
 def get_dynamic_var_limit():
+    """获取动态VaR上限，根据进攻模式和夜间时段调整"""
     base_limit = CONFIG.portfolio_risk_target * 100
     if st.session_state.get('aggressive_mode', False):
         base_limit = CONFIG.var_aggressive_threshold
@@ -563,6 +589,7 @@ def get_dynamic_var_limit():
 
 # ==================== 夜间时段判断 ====================
 def is_night_time() -> bool:
+    """判断是否为美东夜间时段"""
     eastern = pytz.timezone('US/Eastern')
     now_eastern = datetime.now(pytz.utc).astimezone(eastern)
     hour = now_eastern.hour
@@ -572,6 +599,7 @@ def is_night_time() -> bool:
 
 # ==================== 资金费率过滤 ====================
 def funding_rate_blocked(symbol: str, direction: int) -> bool:
+    """根据资金费率决定是否阻止开仓（费率过高且方向不利）"""
     rate = st.session_state.funding_rates.get(symbol, 0.0)
     if abs(rate) > CONFIG.funding_rate_threshold / 100:
         if (rate > 0 and direction == -1) or (rate < 0 and direction == 1):
@@ -581,6 +609,7 @@ def funding_rate_blocked(symbol: str, direction: int) -> bool:
 
 # ==================== 震荡过滤器 ====================
 def is_range_market(df_dict: Dict[str, pd.DataFrame]) -> bool:
+    """根据布林带宽度和RSI判断是否为震荡市"""
     if '15m' not in df_dict:
         return False
     df = df_dict['15m']
@@ -595,6 +624,7 @@ def is_range_market(df_dict: Dict[str, pd.DataFrame]) -> bool:
 
 # ==================== 多周期共振确认 ====================
 def multi_timeframe_confirmation(df_dict: Dict[str, pd.DataFrame], direction: int) -> bool:
+    """检查多周期是否共振（至少两个确认周期支持方向）"""
     count = 0
     for tf in CONFIG.confirm_timeframes:
         if tf not in df_dict:
@@ -610,10 +640,12 @@ def multi_timeframe_confirmation(df_dict: Dict[str, pd.DataFrame], direction: in
 
 # ==================== 阶段一：市场状态开仓过滤 ====================
 def can_open_position(regime: MarketRegime) -> bool:
+    """根据市场状态判断是否允许开仓"""
     return regime in CONFIG.regime_allow_trade
 
 # ==================== 阶段一：动态Kelly折扣 ====================
 def dynamic_kelly_fraction() -> float:
+    """根据近期胜率和夏普比率动态调整Kelly分数"""
     win_rate = st.session_state.performance_metrics.get('win_rate', 0.5)
     sharpe = st.session_state.performance_metrics.get('sharpe', 1.0)
     base = CONFIG.kelly_fraction
@@ -622,6 +654,7 @@ def dynamic_kelly_fraction() -> float:
 
 # ==================== 阶段二：因子相关性动态降权 ====================
 def update_factor_correlation(ic_records: Dict[str, List[float]]):
+    """更新因子相关性矩阵"""
     global factor_corr_matrix
     if len(ic_records) < 2:
         return
@@ -629,6 +662,7 @@ def update_factor_correlation(ic_records: Dict[str, List[float]]):
     factor_corr_matrix = ic_df.corr().fillna(0).values
 
 def apply_factor_correlation_penalty():
+    """对高相关性因子进行降权"""
     global factor_weights
     if factor_corr_matrix is None:
         return
@@ -642,6 +676,7 @@ def apply_factor_correlation_penalty():
 
 # ==================== 阶段二：因子淘汰机制 ====================
 def eliminate_poor_factors():
+    """淘汰低IC且高p值的因子"""
     global factor_weights
     for factor, stats in st.session_state.factor_ic_stats.items():
         if stats['p_value'] > CONFIG.factor_eliminate_pvalue and stats['mean'] < CONFIG.factor_eliminate_ic and len(ic_decay_records[factor]) > 30:
@@ -650,6 +685,7 @@ def eliminate_poor_factors():
 
 # ==================== 超真实模拟数据生成器 ====================
 def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.DataFrame]:
+    """生成高度逼真的模拟价格数据（带趋势、周期、噪声）"""
     seed = int(hashlib.md5(symbol.encode()).hexdigest()[:8], 16) % 2**32
     np.random.seed(seed)
     end = datetime.now()
@@ -713,6 +749,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
 
 # ==================== 技术指标计算 ====================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """为DataFrame添加常用技术指标"""
     df = df.copy()
     df['ema20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -765,6 +802,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ==================== 因子IC计算（缓存键优化）====================
 _ic_cache = {}
 def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
+    """计算因子的IC值（因子与未来收益的相关性）"""
     try:
         df_hash = pd.util.hash_pandas_object(df).sum()
     except:
@@ -788,6 +826,7 @@ def calculate_ic(df: pd.DataFrame, factor_name: str) -> float:
 # ==================== 独立缓存函数（每小时刷新）====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fear_greed() -> int:
+    """获取恐惧贪婪指数（缓存1小时）"""
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
         return int(r.json()['data'][0]['value'])
@@ -800,6 +839,7 @@ def get_fetcher() -> 'AggregatedDataFetcher':
     return AggregatedDataFetcher()
 
 class AggregatedDataFetcher:
+    """聚合数据获取器，并行从多个交易所获取数据"""
     def __init__(self):
         self.exchanges: Dict[str, ccxt.Exchange] = {}
         self.executor = ThreadPoolExecutor(max_workers=5)
@@ -813,6 +853,7 @@ class AggregatedDataFetcher:
 
     @safe_request(max_retries=3, default=None)
     def _fetch_kline_single(self, ex: ccxt.Exchange, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        """单个交易所获取K线"""
         ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if ohlcv and len(ohlcv) >= 50:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -822,6 +863,7 @@ class AggregatedDataFetcher:
         return None
 
     def _fetch_kline_parallel(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        """并行从多个交易所获取K线，返回第一个成功的结果"""
         futures = []
         for name in ["binance"] + [n for n in CONFIG.data_sources if n != "binance"]:
             if name in self.exchanges:
@@ -836,6 +878,7 @@ class AggregatedDataFetcher:
         return None
 
     def fetch_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """获取所有时间周期的K线数据"""
         data_dict = {}
         all_tfs = list(set(CONFIG.timeframes + CONFIG.confirm_timeframes))
         for tf in all_tfs:
@@ -847,6 +890,7 @@ class AggregatedDataFetcher:
 
     @safe_request(max_retries=3, default=0.0)
     def fetch_funding_rate(self, symbol: str) -> float:
+        """获取资金费率（取多个交易所平均值）"""
         rates = []
         for name in ["binance"] + [n for n in CONFIG.data_sources if n != "binance"]:
             if name in self.exchanges:
@@ -858,6 +902,7 @@ class AggregatedDataFetcher:
 
     @safe_request(max_retries=3, default=0.0)
     def fetch_orderbook_imbalance(self, symbol: str, depth: int = 10) -> float:
+        """获取订单簿不平衡度"""
         for name in ["binance"] + [n for n in CONFIG.data_sources if n != "binance"]:
             if name in self.exchanges:
                 ob = self.exchanges[name].fetch_order_book(symbol, limit=depth)
@@ -868,6 +913,7 @@ class AggregatedDataFetcher:
         return 0.0
 
     def get_symbol_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """获取单个品种的所有数据（价格、数据字典、恐惧贪婪、费率、不平衡度）"""
         if st.session_state.use_simulated_data:
             sim_data = generate_simulated_data(symbol)
             return {
@@ -906,6 +952,7 @@ class SignalEngine:
         pass
 
     def detect_market_regime(self, df_dict: Dict[str, pd.DataFrame]) -> MarketRegime:
+        """检测市场状态（趋势/震荡/恐慌）"""
         if '1h' not in df_dict or '4h' not in df_dict:
             return MarketRegime.RANGE
         df1h = df_dict['1h']
@@ -930,6 +977,7 @@ class SignalEngine:
             return MarketRegime.RANGE
 
     def calc_signal(self, df_dict: Dict[str, pd.DataFrame]) -> Tuple[int, float]:
+        """计算交易信号（方向、概率）"""
         global factor_weights, ic_decay_records
         total_score = 0
         total_weight = 0
@@ -1069,6 +1117,7 @@ class RiskManager:
         pass
 
     def check_daily_limit(self) -> bool:
+        """检查是否达到每日交易次数上限"""
         today = datetime.now().date()
         if st.session_state.get('last_trade_date') != today:
             st.session_state.daily_trades = 0
@@ -1076,10 +1125,12 @@ class RiskManager:
         return st.session_state.daily_trades >= st.session_state.dynamic_max_daily_trades
 
     def check_cooldown(self) -> bool:
+        """检查是否处于冷却期"""
         until = st.session_state.get('cooldown_until')
         return until is not None and datetime.now() < until
 
     def update_losses(self, win: bool):
+        """更新连续亏损计数，触发冷却"""
         if not win:
             st.session_state.consecutive_losses += 1
             if st.session_state.consecutive_losses >= CONFIG.cooldown_losses:
@@ -1089,19 +1140,23 @@ class RiskManager:
             st.session_state.cooldown_until = None
 
     def check_circuit_breaker(self, atr_pct: float, fear_greed: int) -> bool:
+        """检查是否触发熔断"""
         return atr_pct > CONFIG.circuit_breaker_atr or fear_greed <= CONFIG.circuit_breaker_fg_extreme[0] or fear_greed >= CONFIG.circuit_breaker_fg_extreme[1]
 
     def check_max_drawdown(self) -> bool:
+        """检查是否超过最大回撤"""
         current_dd, _ = calculate_drawdown()
         return current_dd > CONFIG.max_drawdown_pct
 
     def calc_var(self, returns: np.ndarray, confidence: float = 0.95) -> float:
+        """计算VaR"""
         if len(returns) < 10:
             return 0.02
         var = np.percentile(returns, (1 - confidence) * 100)
         return abs(var)
 
     def calc_position_size(self, balance: float, prob: float, atr: float, price: float, recent_returns: np.ndarray, is_aggressive: bool = False) -> float:
+        """计算开仓大小（基于风险、凯利、杠杆限制）"""
         if price <= 0 or prob < 0.5:
             return 0.0
         edge = max(0.05, prob - 0.5) * 2
@@ -1121,6 +1176,7 @@ class RiskManager:
         return max(size, 0.001)
 
     def allocate_portfolio(self, symbol_signals: Dict[str, Tuple[int, float, float, float, np.ndarray]], balance: float) -> Dict[str, float]:
+        """风险平价分配仓位"""
         if not symbol_signals:
             return {}
         symbols = list(symbol_signals.keys())
@@ -1195,6 +1251,7 @@ class Position:
             return self.stop_loss - self.entry_price
 
     def update_stops(self, current_price: float, atr: float):
+        """更新移动止损和止盈"""
         self.price_history.append(current_price)
         if len(self.price_history) >= CONFIG.adapt_window:
             self.atr_mult = adaptive_atr_multiplier(pd.Series(self.price_history))
@@ -1220,6 +1277,7 @@ class Position:
                 self.stop_loss = min(self.stop_loss, self.entry_price)
 
     def should_close(self, high: float, low: float, current_time: datetime) -> Tuple[bool, str, float, Optional[float]]:
+        """判断是否需要平仓（止损、止盈、超时、部分止盈）"""
         if self.direction == 1:
             if low <= self.stop_loss:
                 return True, "止损", self.stop_loss, self.size
@@ -1270,6 +1328,7 @@ def split_and_execute(symbol: str, direction: int, total_size: float, price: flo
 
 # ==================== 下单执行（使用高级滑点）====================
 def execute_order(symbol: str, direction: int, size: float, price: float, stop: float, take: float):
+    """执行开仓订单，记录滑点和冲击成本"""
     sym = symbol.strip()
     dir_str = "多" if direction == 1 else "空"
     volume = 0
@@ -1307,6 +1366,7 @@ def execute_order(symbol: str, direction: int, size: float, price: float, stop: 
     st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage, 'impact': market_impact})
 
 def close_position(symbol: str, exit_price: float, reason: str, close_size: Optional[float] = None):
+    """平仓，计算实际盈亏，记录滑点和一致性统计"""
     sym = symbol.strip()
     pos = st.session_state.positions.get(sym)
     if pos is None:
@@ -1371,6 +1431,7 @@ def close_position(symbol: str, exit_price: float, reason: str, close_size: Opti
 
 # ==================== 数据一致性修复 ====================
 def fix_data_consistency(symbols):
+    """移除无效持仓（品种不在当前列表中或无数据）"""
     to_remove = []
     for sym in list(st.session_state.positions.keys()):
         if sym not in symbols or sym not in st.session_state.multi_df:
@@ -1382,6 +1443,7 @@ def fix_data_consistency(symbols):
 
 # ==================== 生成权益曲线截图用于Telegram ====================
 def generate_equity_chart():
+    """生成权益曲线图表（用于Telegram发送）"""
     if not st.session_state.equity_curve:
         return None
     df = pd.DataFrame(list(st.session_state.equity_curve)[-200:])
@@ -1396,7 +1458,7 @@ def generate_equity_chart():
     )
     return fig
 
-# ==================== 回测引擎 ====================
+# ==================== 回测引擎（简化版）====================
 def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], initial_balance: float = 10000) -> Dict[str, Any]:
     """简化回测：对每个品种独立运行，使用15分钟线模拟交易"""
     # 获取所有品种的15分钟数据，并确保时间对齐
@@ -1524,6 +1586,7 @@ class UIRenderer:
         self.fetcher = get_fetcher()
 
     def render_sidebar(self):
+        """渲染左侧边栏"""
         with st.sidebar:
             st.header("⚙️ 配置")
             mode = st.radio("模式", ['实盘', '回测'], index=0)
@@ -1646,6 +1709,7 @@ class UIRenderer:
         return selected_symbols, mode_lev, use_real
 
     def render_main_panel(self, symbols, mode, use_real):
+        """渲染主面板"""
         if not symbols:
             st.warning("请至少选择一个交易品种")
             return
@@ -1684,6 +1748,7 @@ class UIRenderer:
             self.render_live_panel(symbols, multi_data)
 
     def render_backtest_panel(self, symbols, multi_data):
+        """渲染回测面板"""
         st.subheader("📊 回测面板")
         if st.button("▶️ 开始回测"):
             with st.spinner("回测进行中..."):
@@ -1706,6 +1771,7 @@ class UIRenderer:
                 st.plotly_chart(fig, use_container_width=True)
 
     def render_live_panel(self, symbols, multi_data):
+        """渲染实盘面板"""
         st.subheader("多品种持仓")
         risk = RiskManager()
         engine = SignalEngine()
