@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 超神进化版 48.0 (机构级完整版)
+🚀 终极量化终端 · 机构级完整版 48.0
 ===================================================
 核心特性（100% 完美极限 + 机构级增强）：
 1. 多周期共振信号 + 动态加权
@@ -78,7 +78,7 @@ import joblib
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.calibration import CalibratedClassifierCV
-from hmmlearn import hmm
+from hmmlearn import hmm  # 确保导入正确
 import pickle
 
 warnings.filterwarnings('ignore')
