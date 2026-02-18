@@ -1,1 +1,10 @@
-pip install streamlit pandas numpy ta plotly requests streamlit-autorefresh ccxt nest-asyncio scikit-learn joblib scipy pytz statsmodels
+streamlit
+pandas
+numpy
+ta
+plotly
+requests
+streamlit-autorefresh
+ccxt
+scikit-learn
+joblib
