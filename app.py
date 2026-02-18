@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完成版)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版)
 ===================================================
-核心特性：
+核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
 - 波动率动态仓位（ATR定仓）
 - 期望收益排序（正期望筛选）
-- 完整机构级风控与机器学习
-- 增强的防御式编程，防止因数据缺失导致崩溃
+- 机器学习因子（随机森林，成本感知训练）
+- 贝叶斯因子权重更新 + 因子淘汰
+- HMM 市场状态检测
+- 协方差风险平价 + 极值理论 VaR/CVaR
+- 动态滑点预测 + 订单拆分
+- 实盘杠杆自动化（Binance/Bybit/OKX）
+- Telegram 实时通知 + 权益曲线发送
+- 完整的日志与数据持久化
+- 增强的防御式编程（空值保护、异常捕获）
 ===================================================
 """
 
@@ -121,11 +128,11 @@ class VaRMethod(Enum):
 
 @dataclass
 class TradingConfig:
-    """所有可调参数集中管理（职业版扩展）"""
+    """所有可调参数集中管理（最终完美版）"""
     symbols: List[str] = field(default_factory=lambda: ["ETH/USDT", "BTC/USDT", "SOL/USDT", "BNB/USDT"])
     # ========== 风险预算模型 ==========
-    risk_per_trade: float = 0.008  # 单笔风险比例（账户余额的0.8%）
-    daily_risk_budget_ratio: float = 0.025  # 每日风险预算比例（2.5%）
+    risk_per_trade: float = 0.008          # 单笔风险比例（账户余额的0.8%）
+    daily_risk_budget_ratio: float = 0.025 # 每日风险预算比例（2.5%）
     # 冷却与熔断
     max_consecutive_losses: int = 3
     cooldown_losses: int = 3
@@ -137,13 +144,13 @@ class TradingConfig:
     atr_multiplier_base: float = 1.5
     atr_multiplier_min: float = 1.2
     atr_multiplier_max: float = 2.5
-    tp_min_ratio: float = 2.0  # 止盈/止损最小比例
+    tp_min_ratio: float = 2.0               # 止盈/止损最小比例
     partial_tp_ratio: float = 0.5
     partial_tp_r_multiple: float = 1.2
     breakeven_trigger_pct: float = 1.5
     max_hold_hours: int = 36
-    min_atr_pct: float = 0.5  # 最小ATR百分比（用于计算止损距离下限）
-    # 凯利相关（未使用但保留）
+    min_atr_pct: float = 0.5                # 最小ATR百分比（用于计算止损距离下限）
+    # 凯利相关（保留但未使用）
     kelly_fraction: float = 0.25
     # 交易所与数据
     exchanges: Dict[str, Any] = field(default_factory=lambda: {
@@ -178,10 +185,8 @@ class TradingConfig:
     factor_eliminate_pvalue: float = 0.1
     factor_eliminate_ic: float = 0.02
     factor_min_weight: float = 0.1
-    # ---------- 以下为新增/补全的属性 ----------
-    ic_window: int = 80                       # IC计算窗口
-    factor_learning_rate: float = 0.3         # 因子学习率（用于传统权重更新，保留）
-    # ----------------------------------------
+    ic_window: int = 80
+    factor_learning_rate: float = 0.3        # 保留用于传统权重更新
     # 协方差风险预算
     risk_budget_method: str = "risk_parity"
     black_litterman_tau: float = 0.05
@@ -208,7 +213,7 @@ class TradingConfig:
     adapt_window: int = 20
     atr_price_history_len: int = 20
     funding_rate_threshold: float = 0.05
-    max_leverage_global: float = 10.0  # 全局最大杠杆（安全网）
+    max_leverage_global: float = 10.0        # 全局最大杠杆（安全网）
     # 异常检测阈值
     max_reasonable_balance: float = 1e7
     max_reasonable_daily_pnl_ratio: float = 10.0
@@ -223,9 +228,7 @@ class TradingConfig:
     sim_trend_strength: float = 0.2
     # 布林带宽度阈值（用于震荡判断）
     bb_width_threshold: float = 0.1
-    # 布林带计算窗口
     bb_window: int = 20
-    # RSI范围
     rsi_range_low: int = 40
     rsi_range_high: int = 60
 
@@ -256,6 +259,7 @@ factor_corr_matrix = None
 
 ml_models = {}
 ml_scalers = {}
+ml_feature_cols = {}   # 存储每个品种的特征列名
 ml_last_train = {}
 ml_calibrators = {}
 
@@ -622,16 +626,19 @@ def detect_market_regime_traditional(df_dict: Dict[str, pd.DataFrame]) -> Market
     else:
         return MarketRegime.RANGE
 
-# ==================== 机器学习因子（成本感知训练）====================
-def train_ml_model_cost_aware(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> Tuple[Any, Any]:
+# ==================== 机器学习因子（成本感知训练，修复特征列问题）====================
+def train_ml_model_cost_aware(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> Tuple[Any, Any, List[str]]:
+    """训练随机森林预测未来净收益，返回模型、scaler和特征列名"""
     df = df_dict['15m'].copy()
     feature_cols = ['ema20', 'ema50', 'rsi', 'macd_diff', 'bb_width', 'volume_ratio', 'adx', 'atr']
     df = df.dropna(subset=feature_cols + ['close'])
     if len(df) < CONFIG.ml_window:
-        return None, None
+        return None, None, []
+    # 创建滞后特征
     for col in feature_cols:
         for lag in [1,2,3]:
             df[f'{col}_lag{lag}'] = df[col].shift(lag)
+    # 目标：未来5期收益率（考虑成本）
     future_ret = df['close'].pct_change(5).shift(-5)
     if CONFIG.cost_aware_training:
         vol = df['atr'].rolling(20).mean() / df['close']
@@ -642,44 +649,75 @@ def train_ml_model_cost_aware(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> 
     df['target'] = target
     df = df.dropna()
     if len(df) < 100:
-        return None, None
-    X = df[[c for c in df.columns if '_lag' in c or c in feature_cols]]
+        return None, None, []
+    # 特征列：所有滞后列 + 原始特征（确保顺序固定）
+    all_feature_cols = []
+    for col in feature_cols:
+        all_feature_cols.append(col)  # 原始特征
+        for lag in [1,2,3]:
+            all_feature_cols.append(f'{col}_lag{lag}')
+    X = df[all_feature_cols]
     y = df['target']
+    # 标准化
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    # 训练
     model = RandomForestRegressor(
         n_estimators=CONFIG.ml_n_estimators,
         max_depth=CONFIG.ml_max_depth,
         random_state=42
     )
     model.fit(X_scaled, y)
-    return model, scaler
+    return model, scaler, all_feature_cols
 
 def get_ml_factor(symbol: str, df_dict: Dict[str, pd.DataFrame]) -> float:
+    """获取机器学习因子得分（归一化到[-1,1]），确保特征列一致"""
     if not CONFIG.use_ml_factor:
         return 0.0
     now = time.time()
     if symbol not in ml_models or now - ml_last_train.get(symbol, 0) > CONFIG.ml_retrain_interval:
-        model, scaler = train_ml_model_cost_aware(symbol, df_dict)
+        model, scaler, feature_cols = train_ml_model_cost_aware(symbol, df_dict)
         if model is not None:
             ml_models[symbol] = model
             ml_scalers[symbol] = scaler
+            ml_feature_cols[symbol] = feature_cols
             ml_last_train[symbol] = now
     if symbol not in ml_models:
         return 0.0
     model = ml_models[symbol]
     scaler = ml_scalers[symbol]
-    df = df_dict['15m'].iloc[-1:].copy()
-    feature_cols = ['ema20', 'ema50', 'rsi', 'macd_diff', 'bb_width', 'volume_ratio', 'adx', 'atr']
-    for col in feature_cols:
-        for lag in [1,2,3]:
-            df[f'{col}_lag{lag}'] = df[col].shift(lag).iloc[-1] if len(df) > lag else np.nan
-    X = df[[c for c in df.columns if '_lag' in c or c in feature_cols]].dropna(axis=1)
-    if X.empty:
+    feature_cols = ml_feature_cols.get(symbol, [])
+    if not feature_cols:
         return 0.0
+    # 提取最新特征
+    df = df_dict['15m'].copy()
+    if len(df) < 4:  # 至少需要几行来构建滞后
+        return 0.0
+    last_idx = -1
+    data = {}
+    feature_cols_original = ['ema20', 'ema50', 'rsi', 'macd_diff', 'bb_width', 'volume_ratio', 'adx', 'atr']
+    for col in feature_cols_original:
+        # 原始特征
+        if col in df.columns:
+            data[col] = df[col].iloc[last_idx]
+        else:
+            data[col] = np.nan
+        # 滞后特征
+        for lag in [1,2,3]:
+            lag_col = f'{col}_lag{lag}'
+            if len(df) > lag:
+                data[lag_col] = df[col].iloc[-lag-1]
+            else:
+                data[lag_col] = np.nan
+    # 创建 DataFrame 并只保留训练时使用的特征列
+    X = pd.DataFrame([data])
+    X = X[feature_cols]
+    # 填充缺失值（用0填充，可根据需要改为前向填充）
+    X = X.fillna(0)
+    # 标准化
     X_scaled = scaler.transform(X)
     pred = model.predict(X_scaled)[0]
-    return np.tanh(pred * 10)
+    return np.tanh(pred * 10)  # 归一化到[-1,1]
 
 # ==================== 概率校准 ====================
 def calibrate_probabilities(symbol: str, raw_probs: np.ndarray, true_labels: np.ndarray) -> Any:
@@ -882,19 +920,15 @@ def is_range_market(df_dict: Dict[str, pd.DataFrame]) -> bool:
     if df.empty:
         return False
     last = df.iloc[-1]
-    # 防御：确保 last 是 Series 且包含所需字段
     try:
-        # 检查 bb_width
         if hasattr(last, 'get') and last.get('bb_width') is not None and not pd.isna(last.get('bb_width')):
             if last['bb_width'] < CONFIG.bb_width_threshold:
                 return True
-        # 检查 rsi
         if hasattr(last, 'get') and last.get('rsi') is not None and not pd.isna(last.get('rsi')):
             if CONFIG.rsi_range_low < last['rsi'] < CONFIG.rsi_range_high:
                 return True
     except Exception as e:
         log_error(f"is_range_market 判断出错: {e}")
-        # 出错时保守处理，假设不是震荡
         return False
     return False
 
@@ -1200,12 +1234,11 @@ class SignalEngine:
         regime = st.session_state.market_regime
         ic_dict = {}
 
-        # 防御式调用 is_range_market
         try:
             range_penalty = 0.5 if is_range_market(df_dict) else 1.0
         except Exception as e:
             log_error(f"is_range_market 调用异常: {e}")
-            range_penalty = 1.0  # 默认不惩罚
+            range_penalty = 1.0
 
         for tf, df in df_dict.items():
             if df.empty or len(df) < 2:
@@ -2074,10 +2107,10 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终完成)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终完美)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 职业版 48.1")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错 · 机器学习")
 
     init_session_state()
     check_and_fix_anomalies()
