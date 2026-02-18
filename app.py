@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (含异常捕获)
+🚀 终极量化终端 · 职业版 48.1 (最终修复版)
 ===================================================
 核心特性：
 - 风险预算模型（每日风险消耗控制）
@@ -141,6 +141,9 @@ class TradingConfig:
     partial_tp_r_multiple: float = 1.2
     breakeven_trigger_pct: float = 1.5
     max_hold_hours: int = 36
+    min_atr_pct: float = 0.5  # 最小ATR百分比（用于计算止损距离下限）
+    # 凯利相关（未使用但保留）
+    kelly_fraction: float = 0.25
     # 交易所与数据
     exchanges: Dict[str, Any] = field(default_factory=lambda: {
         "Binance合约": ccxt.binance,
@@ -200,6 +203,7 @@ class TradingConfig:
     adapt_window: int = 20
     atr_price_history_len: int = 20
     funding_rate_threshold: float = 0.05
+    max_leverage_global: float = 10.0  # 全局最大杠杆（安全网）
     # 异常检测阈值
     max_reasonable_balance: float = 1e7
     max_reasonable_daily_pnl_ratio: float = 10.0
