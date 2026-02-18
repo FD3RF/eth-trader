@@ -11,3 +11,8 @@ joblib
 scipy
 pytz
 hmmlearn
+stable-baselines3
+gym
+torch
+seaborn
+matplotlib
