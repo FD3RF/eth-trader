@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终容错版)
+🚀 终极量化终端 · 职业版 48.1 (最终完成版)
 ===================================================
 核心特性：
 - 风险预算模型（每日风险消耗控制）
@@ -178,6 +178,10 @@ class TradingConfig:
     factor_eliminate_pvalue: float = 0.1
     factor_eliminate_ic: float = 0.02
     factor_min_weight: float = 0.1
+    # ---------- 以下为新增/补全的属性 ----------
+    ic_window: int = 80                       # IC计算窗口
+    factor_learning_rate: float = 0.3         # 因子学习率（用于传统权重更新，保留）
+    # ----------------------------------------
     # 协方差风险预算
     risk_budget_method: str = "risk_parity"
     black_litterman_tau: float = 0.05
@@ -2070,7 +2074,7 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终容错)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终完成)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 职业版 48.1")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错")
