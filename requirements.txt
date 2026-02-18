@@ -1,13 +1,1 @@
-streamlit
-pandas
-numpy
-ta
-plotly
-requests
-streamlit-autorefresh
-ccxt
-nest-asyncio
-scikit-learn
-joblib
-scipy
-pytz
+pip install streamlit pandas numpy ta plotly requests streamlit-autorefresh ccxt nest-asyncio scikit-learn joblib scipy pytz statsmodels
