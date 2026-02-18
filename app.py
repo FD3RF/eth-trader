@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 智能进化版 47.0
+🚀 终极量化终端 · 智能进化版 47.1
 ==================================================
-核心特性（100% 完美极限 + 新增三阶段优化）：
+核心特性（100% 完美极限 + 三阶段智能进化）：
 1. 多周期共振信号（1m/5m/15m/1h/4h/1d） + 动态加权
 2. 震荡市场过滤器（布林带宽度 + RSI区间）抑制假信号
 3. 协方差风险平价 + 组合 VaR/CVaR 实时监控（支持正态/历史模拟法）
@@ -13,7 +13,7 @@
 8. 精准回撤计算（当前回撤 + 最大回撤，基于实时权益）
 9. 市场状态分段统计（趋势/震荡/恐慌下的胜率、盈亏）
 10. 实盘一致性误差统计（滑点对比 + 胜率对比 + 自动报警）
-11. Telegram 增强通知（区分信号、风险、交易类型，支持发送权益曲线截图）
+11. Telegram 增强通知（区分信号、风险、交易类型，支持发送权益曲线和持仓截图）
 12. 一键数据修复（清理无效持仓） + 重置所有状态
 13. 高性能并行数据获取（多交易所自动回退）
 14. 完整日志持久化（交易日志、执行日志、错误日志）
@@ -28,10 +28,13 @@
 23. 图表 K 线 + 均线 + 持仓标记 + 交易记录可视化
 24. 完全可配置参数（位于 TradingConfig 类中）
 ==================================================
-新增优化（47.0 三阶段智能进化）：
-- 阶段一：市场状态开仓过滤（只在趋势/恐慌下开仓），CVaR 计算，动态 Kelly 折扣（基于近期胜率/夏普）
-- 阶段二：因子相关性动态降权，IC 滚动衰减（指数加权），因子淘汰（低 IC 且高 p 值自动降权）
-- 阶段三：高级滑点预测（加入市场冲击项），订单拆分（TWAP 简化），冲击成本记录
+新增优化（47.1 高优先级补丁）：
+- 补全回测引擎（完整支持新机制，拆分在回测中模拟分批）
+- CVaR 驱动仓位：当 CVaR 超过动态上限的 1.2 倍时，整体减仓 30%
+- 动态订单拆分延迟：延迟时间根据波动率自动调整（高波动短延迟）
+- 因子完全禁用：淘汰后权重直接设为 0（而非 0.1）
+- 夜间减仓直接影响仓位分配（在 allocate_portfolio 中应用乘数）
+- Telegram 加持仓截图：手动发送当前持仓表格
 ==================================================
 """
 
@@ -42,6 +45,7 @@ import ta
 import ccxt
 import requests
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
@@ -197,11 +201,11 @@ class TradingConfig:
     # 阶段二：因子淘汰阈值
     factor_eliminate_pvalue: float = 0.1
     factor_eliminate_ic: float = 0.02
-    factor_min_weight: float = 0.1
+    factor_min_weight: float = 0.0  # 改为0，彻底禁用
     # 阶段三：订单拆分
     max_order_split: int = 3
     min_order_size: float = 0.001
-    split_delay_seconds: int = 5
+    split_delay_seconds: int = 5  # 基础延迟，将根据波动率动态调整
 
 CONFIG = TradingConfig()
 
@@ -478,7 +482,7 @@ def update_factor_weights(ic_dict: Dict[str, float]):
     for factor, ic in ic_dict.items():
         if factor in factor_weights and not np.isnan(ic):
             adjustment = 1 + lr * ic
-            factor_weights[factor] = max(0.1, factor_weights[factor] * adjustment)
+            factor_weights[factor] = max(CONFIG.factor_min_weight, factor_weights[factor] * adjustment)
 
 # ==================== 因子IC统计 ====================
 def update_factor_ic_stats(ic_records: Dict[str, List[float]]):
@@ -516,7 +520,6 @@ def calculate_cov_matrix(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.
 # ==================== 动态滑点计算（加入市场冲击项）====================
 def advanced_slippage_prediction(price: float, size: float, volume_20: float, volatility: float, imbalance: float) -> float:
     base_slippage = dynamic_slippage(price, size, volume_20, volatility, imbalance)
-    # 冲击预测
     market_impact = (size / max(volume_20, 1)) ** 0.5 * volatility * price * 0.3
     return base_slippage + market_impact
 
@@ -634,13 +637,13 @@ def apply_factor_correlation_penalty():
                 factor_weights[factors[i]] *= CONFIG.factor_corr_penalty
                 factor_weights[factors[j]] *= CONFIG.factor_corr_penalty
 
-# ==================== 阶段二：因子淘汰机制 ====================
+# ==================== 阶段二：因子淘汰机制（权重设为0）====================
 def eliminate_poor_factors():
     global factor_weights
     for factor, stats in st.session_state.factor_ic_stats.items():
         if stats['p_value'] > CONFIG.factor_eliminate_pvalue and stats['mean'] < CONFIG.factor_eliminate_ic and len(ic_decay_records[factor]) > 30:
-            factor_weights[factor] = CONFIG.factor_min_weight
-            log_execution(f"因子淘汰：{factor} 权重降至{CONFIG.factor_min_weight}")
+            factor_weights[factor] = 0.0  # 完全禁用
+            log_execution(f"因子淘汰：{factor} 权重降至0")
 
 # ==================== 超真实模拟数据生成器 ====================
 def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.DataFrame]:
@@ -1013,7 +1016,6 @@ class SignalEngine:
         avg_ic = {}
         for fname, ic_list in ic_dict.items():
             if ic_list:
-                # 从衰减记录中获取带权重的平均IC
                 decayed_list = list(ic_decay_records[fname])
                 if decayed_list:
                     weights = [CONFIG.ic_decay_rate ** i for i in range(len(decayed_list))]
@@ -1057,7 +1059,7 @@ class SignalEngine:
             prob = 0.0
         return direction, prob
 
-# ==================== 风险管理（增强：动态Kelly）====================
+# ==================== 风险管理（增强：动态Kelly、CVaR驱动减仓、夜间减仓）====================
 class RiskManager:
     def __init__(self):
         pass
@@ -1152,7 +1154,7 @@ class RiskManager:
             allocations[sym] = size
         return allocations
 
-# ==================== 持仓管理（同46.0，但增加冲击成本记录）====================
+# ==================== 持仓管理（同46.0，增加冲击成本记录）====================
 @dataclass
 class Position:
     symbol: str
@@ -1242,7 +1244,7 @@ class Position:
                 return True, "部分止盈", self.entry_price - self.stop_distance() * CONFIG.partial_tp_r_multiple, partial_size
         return False, "", 0.0, None
 
-# ==================== 订单拆分执行 ====================
+# ==================== 订单拆分执行（动态延迟）====================
 def get_current_price(symbol: str) -> float:
     return st.session_state.symbol_current_prices.get(symbol, 0.0)
 
@@ -1250,10 +1252,17 @@ def split_and_execute(symbol: str, direction: int, total_size: float, price: flo
     if total_size <= CONFIG.min_order_size * CONFIG.max_order_split:
         execute_order(symbol, direction, total_size, price, stop, take)
         return
+    # 动态延迟：根据波动率调整（波动率越高，延迟越短）
+    vola = 0.02
+    if symbol in st.session_state.multi_df:
+        rets = st.session_state.multi_df[symbol]['15m']['close'].pct_change().dropna().values[-20:]
+        vola = np.std(rets) if len(rets) > 5 else 0.02
+    split_delay = max(1, int(CONFIG.split_delay_seconds * (0.5 / max(vola, 0.01))))  # 示例：高波动时延迟缩短
     split_size = total_size / CONFIG.max_order_split
     for i in range(CONFIG.max_order_split):
         if i > 0:
-            time.sleep(CONFIG.split_delay_seconds)
+            if st.session_state.mode == 'live':
+                time.sleep(split_delay)
         current_price = get_current_price(symbol)
         execute_order(symbol, direction, split_size, current_price, stop, take)
 
@@ -1341,7 +1350,7 @@ def close_position(symbol: str, exit_price: float, reason: str, close_size: Opti
     if len(st.session_state.trade_log) > 100:
         st.session_state.trade_log.pop(0)
     append_to_csv(TRADE_LOG_FILE, trade_record)
-    st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage, 'impact': (size / max(volume,1))**0.5 * vola * exit_price * 0.3})
+    st.session_state.slippage_records.append({'time': datetime.now(), 'symbol': sym, 'slippage': slippage, 'impact': (close_size / max(volume,1))**0.5 * vola * exit_price * 0.3})
 
     update_regime_stats(st.session_state.market_regime, pnl)
     update_consistency_stats(is_backtest=False, slippage=slippage, win=pnl>0)
@@ -1384,15 +1393,294 @@ def generate_equity_chart():
     )
     return fig
 
-# ==================== 回测引擎（略，同46.0，但需确保与上述改动兼容）====================
+def generate_positions_chart():
+    """生成当前持仓表格的图片（用于Telegram）"""
+    if not st.session_state.positions:
+        return None
+    data = []
+    for sym, pos in st.session_state.positions.items():
+        current = st.session_state.symbol_current_prices.get(sym, 0)
+        pnl = pos.pnl(current)
+        pnl_pct = (current - pos.entry_price) / pos.entry_price * 100 * pos.direction
+        hold_hours = (datetime.now() - pos.entry_time).total_seconds() / 3600
+        data.append({
+            "品种": sym,
+            "方向": "多" if pos.direction == 1 else "空",
+            "入场价": pos.entry_price,
+            "数量": pos.size,
+            "浮动盈亏": pnl,
+            "盈亏率%": pnl_pct,
+            "持仓时长h": hold_hours,
+            "止损": pos.stop_loss,
+            "止盈": pos.take_profit
+        })
+    df = pd.DataFrame(data)
+    fig = go.Figure(data=[go.Table(
+        header=dict(values=list(df.columns), fill_color='paleturquoise', align='left'),
+        cells=dict(values=[df[col] for col in df.columns], fill_color='lavender', align='left')
+    )])
+    fig.update_layout(title="当前持仓", height=400)
+    return fig
+
+# ==================== 回测引擎（完整版，支持拆分模拟）====================
 def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], initial_balance: float = 10000) -> Dict[str, Any]:
-    # 此处与46.0基本相同，但需注意在回测中可能无法使用订单拆分等，可保持原样
-    # 为节省篇幅，此处省略（实际使用时可直接复制46.0中的run_backtest，无需修改）
-    # 但为了代码完整性，保留原函数
-    # 实际应包含完整的run_backtest代码，但考虑到长度，我们假设它与46.0一致
-    # 由于用户要求完整代码，我们在这里略去具体实现，但在最终版本中需补全
-    # 此处仅作示意
-    pass
+    # 对齐时间戳
+    first_sym = symbols[0]
+    base_ts = data_dicts[first_sym]['15m'][['timestamp']].copy()
+    aligned_data = {}
+    for sym in symbols:
+        df = data_dicts[sym]['15m']
+        aligned = pd.merge_asof(base_ts, df, on='timestamp', direction='nearest')
+        aligned_data[sym] = aligned
+
+    min_len = len(aligned_data[first_sym])
+    balance = initial_balance
+    peak_balance = initial_balance
+    positions = {}
+    equity_curve = []
+    trades = []
+    recent_returns = deque(maxlen=50)
+    engine = SignalEngine()
+    risk_manager = RiskManager()
+    total_slippage = 0.0
+    slippage_count = 0
+
+    for i in range(50, min_len):
+        row_dict = {sym: aligned_data[sym].iloc[i] for sym in symbols}
+        high_dict = {sym: row['high'] for sym, row in row_dict.items()}
+        low_dict = {sym: row['low'] for sym, row in row_dict.items()}
+        price_dict = {sym: row['close'] for sym, row in row_dict.items()}
+        atr_dict = {sym: row['atr'] if not pd.isna(row['atr']) else 0 for sym, row in row_dict.items()}
+        volume_dict = {sym: row['volume'] for sym, row in row_dict.items()}
+        timestamp = row_dict[first_sym]['timestamp']
+
+        signal_inputs = {}
+        for sym in symbols:
+            dummy = {}
+            for tf in data_dicts[sym]:
+                dummy[tf] = data_dicts[sym][tf].iloc[:i+1].reset_index(drop=True)
+            signal_inputs[sym] = dummy
+
+        symbol_signals = {}
+        for sym in symbols:
+            direction, prob = engine.calc_signal(signal_inputs[sym])
+            if direction != 0 and prob >= SignalStrength.WEAK.value:
+                recent = aligned_data[sym]['close'].iloc[max(0,i-20):i].pct_change().dropna().values
+                symbol_signals[sym] = (direction, prob, atr_dict[sym], price_dict[sym], recent)
+
+        allocations = risk_manager.allocate_portfolio(symbol_signals, balance)
+
+        # CVaR 超限减仓
+        if len(symbols) > 1 and symbol_signals:
+            # 构建历史收益率矩阵
+            ret_arrays = []
+            for sym in symbols:
+                rets = aligned_data[sym]['close'].pct_change().dropna().values[-100:]
+                ret_arrays.append(rets)
+            min_len_hist = min(len(arr) for arr in ret_arrays)
+            hist_rets = np.array([arr[-min_len_hist:] for arr in ret_arrays])
+            total_value = balance
+            weights = []
+            for sym in symbols:
+                if sym in positions:
+                    pos = positions[sym]
+                    value = pos['size'] * price_dict[sym]
+                    weight = value / total_value
+                else:
+                    weight = 0.0
+                weights.append(weight)
+            weights = np.array(weights)
+            if np.sum(weights) > 0:
+                weights = weights / np.sum(weights)
+                cvar = portfolio_cvar(weights, hist_rets, CONFIG.var_confidence)
+                if cvar * 100 > get_dynamic_var_limit() * 1.2:
+                    for sym in allocations:
+                        allocations[sym] *= 0.7
+                    log_execution("回测：CVaR超限，减仓30%")
+
+        # 夜间减仓
+        if is_night_time():
+            for sym in allocations:
+                allocations[sym] *= CONFIG.night_risk_multiplier
+
+        # 开仓
+        for sym in symbols:
+            if sym not in positions and allocations.get(sym, 0) > 0:
+                dir, prob, atr_sym, price, _ = symbol_signals[sym]
+                stop_dist = atr_sym * CONFIG.atr_multiplier_base if atr_sym > 0 else price * 0.01
+                stop = price - stop_dist if dir == 1 else price + stop_dist
+                take = price + stop_dist * CONFIG.tp_min_ratio if dir == 1 else price - stop_dist * CONFIG.tp_min_ratio
+                size = allocations[sym]
+                vola = np.std(aligned_data[sym]['close'].iloc[max(0,i-20):i].pct_change().dropna()) if i>20 else 0.02
+                # 回测中模拟拆分：如果size大于阈值，分成多份
+                if size > CONFIG.min_order_size * CONFIG.max_order_split:
+                    split_size = size / CONFIG.max_order_split
+                    for k in range(CONFIG.max_order_split):
+                        # 在回测中，每份价格相同（简化），但可以记录多次交易
+                        slippage = dynamic_slippage(price, split_size, volume_dict[sym], vola, 0.0)
+                        total_slippage += slippage
+                        slippage_count += 1
+                        exec_price = price + slippage if dir == 1 else price - slippage
+                        positions[f"{sym}_{k}"] = {  # 用临时键区分
+                            'direction': dir,
+                            'entry': exec_price,
+                            'size': split_size,
+                            'stop': stop,
+                            'take': take,
+                            'entry_time': timestamp,
+                            'partial_taken': False,
+                            'slippage': slippage,
+                            'symbol': sym  # 保存原始符号
+                        }
+                else:
+                    slippage = dynamic_slippage(price, size, volume_dict[sym], vola, 0.0)
+                    total_slippage += slippage
+                    slippage_count += 1
+                    exec_price = price + slippage if dir == 1 else price - slippage
+                    positions[sym] = {
+                        'direction': dir,
+                        'entry': exec_price,
+                        'size': size,
+                        'stop': stop,
+                        'take': take,
+                        'entry_time': timestamp,
+                        'partial_taken': False,
+                        'slippage': slippage,
+                        'symbol': sym
+                    }
+
+        # 平仓
+        close_list = []
+        for pos_key, pos in positions.items():
+            sym = pos['symbol']
+            high = high_dict[sym]
+            low = low_dict[sym]
+            price = price_dict[sym]
+            close_flag = False
+            exit_price = price
+            reason = ""
+            hold_hours = (timestamp - pos['entry_time']).total_seconds() / 3600
+
+            if pos['direction'] == 1:
+                if low <= pos['stop']:
+                    close_flag, exit_price, reason = True, pos['stop'], '止损'
+                elif high >= pos['take']:
+                    close_flag, exit_price, reason = True, pos['take'], '止盈'
+                elif not pos['partial_taken'] and high >= pos['entry'] + (pos['take'] - pos['entry']) * CONFIG.partial_tp_r_multiple:
+                    close_flag, exit_price, reason = True, pos['entry'] + (pos['take'] - pos['entry']) * CONFIG.partial_tp_r_multiple, '部分止盈'
+                    pos['partial_taken'] = True
+            else:
+                if high >= pos['stop']:
+                    close_flag, exit_price, reason = True, pos['stop'], '止损'
+                elif low <= pos['take']:
+                    close_flag, exit_price, reason = True, pos['take'], '止盈'
+                elif not pos['partial_taken'] and low <= pos['entry'] - (pos['entry'] - pos['take']) * CONFIG.partial_tp_r_multiple:
+                    close_flag, exit_price, reason = True, pos['entry'] - (pos['entry'] - pos['take']) * CONFIG.partial_tp_r_multiple, '部分止盈'
+                    pos['partial_taken'] = True
+
+            if hold_hours > CONFIG.max_hold_hours:
+                close_flag, exit_price, reason = True, (high + low) / 2, '超时'
+
+            if close_flag:
+                vola = np.std(aligned_data[sym]['close'].iloc[max(0,i-20):i].pct_change().dropna()) if i>20 else 0.02
+                slippage = dynamic_slippage(exit_price, pos['size'], volume_dict[sym], vola, 0.0)
+                total_slippage += slippage
+                slippage_count += 1
+                exec_exit = exit_price - slippage if pos['direction'] == 1 else exit_price + slippage
+                pnl = (exec_exit - pos['entry']) * pos['size'] * pos['direction'] - exec_exit * pos['size'] * CONFIG.fee_rate * 2
+                balance += pnl
+                trades.append({
+                    'entry_time': pos['entry_time'],
+                    'exit_time': timestamp,
+                    'symbol': sym,
+                    'direction': pos['direction'],
+                    'entry': pos['entry'],
+                    'exit': exec_exit,
+                    'size': pos['size'],
+                    'pnl': pnl,
+                    'reason': reason,
+                    'slippage_entry': pos['slippage'],
+                    'slippage_exit': slippage
+                })
+                recent_returns.append(pnl / max(1, balance))
+                peak_balance = max(peak_balance, balance)
+                close_list.append(pos_key)
+
+        for key in close_list:
+            del positions[key]
+
+        equity_curve.append({'time': timestamp, 'balance': balance})
+
+    equity_df = pd.DataFrame(equity_curve)
+    trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()
+
+    if not trades_df.empty:
+        wins = trades_df[trades_df['pnl'] > 0]
+        losses = trades_df[trades_df['pnl'] < 0]
+        win_rate = len(wins)/len(trades_df)
+        avg_win = wins['pnl'].mean() if not wins.empty else 0
+        avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 1
+        returns = trades_df['pnl'].values / initial_balance
+        sharpe = (returns.mean()/returns.std()*np.sqrt(252)) if len(returns) > 1 and returns.std() != 0 else 0
+        max_drawdown = (peak_balance - equity_df['balance'].min()) / peak_balance * 100
+        avg_slippage = total_slippage / slippage_count if slippage_count > 0 else 0
+    else:
+        win_rate = avg_win = avg_loss = sharpe = max_drawdown = avg_slippage = 0
+
+    update_consistency_stats(is_backtest=True, slippage=avg_slippage, win=False)
+
+    performance = {
+        'final_balance': balance,
+        'win_rate': win_rate,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'sharpe': sharpe,
+        'max_drawdown_pct': max_drawdown,
+        'avg_slippage': avg_slippage
+    }
+
+    return {'equity': equity_df, 'trades': trades_df, 'performance': performance}
+
+# ==================== Walk Forward 验证 ====================
+def walk_forward(data_dicts: Dict[str, Dict[str, pd.DataFrame]], symbols: List[str], train_window=180, test_window=30):
+    base_df = data_dicts[symbols[0]]['15m']
+    total_len = len(base_df)
+    results = []
+    for start in range(0, total_len - train_window - test_window, test_window):
+        train_end = start + train_window
+        test_end = train_end + test_window
+        train_data = {}
+        test_data = {}
+        for sym in symbols:
+            sym_data = data_dicts[sym]
+            train_data[sym] = {tf: sym_data[tf].iloc[start:train_end].reset_index(drop=True) for tf in sym_data}
+            test_data[sym] = {tf: sym_data[tf].iloc[train_end:test_end].reset_index(drop=True) for tf in sym_data}
+        engine = SignalEngine()
+        for _ in range(5):
+            for sym in symbols:
+                if len(train_data[sym]['15m']) > 50:
+                    engine.calc_signal(train_data[sym])
+        result = run_backtest(symbols, test_data, initial_balance=10000)
+        results.append(result)
+    return results
+
+# ==================== 参数敏感性热力图 ====================
+def param_sensitivity_heatmap(data_dicts: Dict[str, Dict[str, pd.DataFrame]], symbols: List[str], param_ranges: Dict[str, List]):
+    atr_vals = param_ranges.get('atr_multiplier_base', [1.2, 1.5, 1.8, 2.1])
+    tp_vals = param_ranges.get('tp_min_ratio', [1.5, 2.0, 2.5, 3.0])
+    sharpe_matrix = np.zeros((len(atr_vals), len(tp_vals)))
+    for i, atr in enumerate(atr_vals):
+        for j, tp in enumerate(tp_vals):
+            old_atr = CONFIG.atr_multiplier_base
+            old_tp = CONFIG.tp_min_ratio
+            CONFIG.atr_multiplier_base = atr
+            CONFIG.tp_min_ratio = tp
+            result = run_backtest(symbols, data_dicts, initial_balance=10000)
+            sharpe = result['performance']['sharpe']
+            sharpe_matrix[i, j] = sharpe
+            CONFIG.atr_multiplier_base = old_atr
+            CONFIG.tp_min_ratio = old_tp
+    return {'atr_vals': atr_vals, 'tp_vals': tp_vals, 'sharpe': sharpe_matrix}
 
 # ==================== UI渲染器 ====================
 class UIRenderer:
@@ -1504,6 +1792,14 @@ class UIRenderer:
                 else:
                     st.warning("无权益数据")
 
+            if st.button("📤 发送持仓截图"):
+                fig = generate_positions_chart()
+                if fig:
+                    send_telegram("当前持仓", image=fig)
+                    st.success("持仓截图已发送")
+                else:
+                    st.warning("无持仓")
+
             if st.session_state.error_log:
                 with st.expander("⚠️ 错误日志（实时）"):
                     for err in list(st.session_state.error_log)[-10:]:
@@ -1560,8 +1856,64 @@ class UIRenderer:
             self.render_live_panel(symbols, multi_data)
 
     def render_backtest_panel(self, symbols, multi_data):
-        # 此处省略，实际应包含回测按钮和结果显示
-        pass
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("▶️ 运行标准回测"):
+                with st.spinner("回测中..."):
+                    results = run_backtest(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, st.session_state.account_balance)
+                    st.session_state.backtest_results = results
+        with col2:
+            if st.button("🔬 运行 Walk Forward 验证"):
+                with st.spinner("Walk Forward 进行中..."):
+                    wf_results = walk_forward({sym: multi_data[sym]['data_dict'] for sym in symbols}, symbols)
+                    st.session_state.wf_results = wf_results
+        with col3:
+            if st.button("🔥 参数敏感性分析"):
+                with st.spinner("生成热力图..."):
+                    param_ranges = {
+                        'atr_multiplier_base': [1.2, 1.5, 1.8, 2.1],
+                        'tp_min_ratio': [1.5, 2.0, 2.5, 3.0]
+                    }
+                    heat = param_sensitivity_heatmap({sym: multi_data[sym]['data_dict'] for sym in symbols}, symbols, param_ranges)
+                    st.session_state.param_sensitivity = heat
+
+        if st.session_state.backtest_results:
+            res = st.session_state.backtest_results
+            eq = res['equity']
+            trades = res['trades']
+            perf = res['performance']
+            st.subheader("回测结果")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("最终余额", f"{perf['final_balance']:.2f}")
+            col2.metric("胜率", f"{perf['win_rate']:.2%}")
+            col3.metric("夏普比率", f"{perf['sharpe']:.2f}")
+            col1.metric("平均盈利", f"{perf['avg_win']:.2f}")
+            col2.metric("平均亏损", f"{perf['avg_loss']:.2f}")
+            col3.metric("最大回撤", f"{perf['max_drawdown_pct']:.2f}%")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=eq['time'], y=eq['balance'], mode='lines', name='净值'))
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            if not trades.empty:
+                st.dataframe(trades.tail(10))
+
+        if st.session_state.wf_results:
+            st.subheader("Walk Forward 各段夏普")
+            wf_sharpes = [r['performance']['sharpe'] for r in st.session_state.wf_results]
+            fig_wf = go.Figure(data=[go.Bar(x=list(range(len(wf_sharpes))), y=wf_sharpes)])
+            fig_wf.update_layout(height=300, title="各测试段夏普比率")
+            st.plotly_chart(fig_wf, use_container_width=True)
+            st.write(f"平均夏普: {np.mean(wf_sharpes):.3f}, 标准差: {np.std(wf_sharpes):.3f}")
+
+        if st.session_state.param_sensitivity:
+            heat = st.session_state.param_sensitivity
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=heat['sharpe'],
+                x=[f"{v:.1f}" for v in heat['tp_vals']],
+                y=[f"{v:.1f}" for v in heat['atr_vals']],
+                colorscale='Viridis'))
+            fig_heat.update_layout(title="参数敏感性 (夏普)", xaxis_title="TP Ratio", yaxis_title="ATR Multiplier")
+            st.plotly_chart(fig_heat, use_container_width=True)
 
     def render_live_panel(self, symbols, multi_data):
         st.subheader("多品种持仓")
@@ -1580,6 +1932,42 @@ class UIRenderer:
 
         allocations = risk.allocate_portfolio(symbol_signals, st.session_state.account_balance)
 
+        # CVaR 超限减仓
+        if len(symbols) > 1 and symbol_signals:
+            # 构建历史收益率矩阵
+            ret_arrays = []
+            for sym in symbols:
+                rets = st.session_state.multi_df[sym]['15m']['close'].pct_change().dropna().values[-100:]
+                ret_arrays.append(rets)
+            min_len = min(len(arr) for arr in ret_arrays)
+            hist_rets = np.array([arr[-min_len:] for arr in ret_arrays])
+            total_value = st.session_state.account_balance
+            weights = []
+            for sym in symbols:
+                if sym in st.session_state.positions:
+                    pos = st.session_state.positions[sym]
+                    value = pos.size * multi_data[sym]['current_price']
+                    weight = value / total_value
+                else:
+                    weight = 0.0
+                weights.append(weight)
+            weights = np.array(weights)
+            if np.sum(weights) > 0:
+                weights = weights / np.sum(weights)
+                cvar = portfolio_cvar(weights, hist_rets, CONFIG.var_confidence)
+                if cvar * 100 > get_dynamic_var_limit() * 1.2:
+                    for sym in allocations:
+                        allocations[sym] *= 0.7
+                    log_execution("CVaR超限，自动减仓30%")
+                    send_telegram(f"CVaR超限 ({cvar*100:.2f}% > {get_dynamic_var_limit()*1.2:.1f}%)，整体减仓30%", msg_type="risk")
+
+        # 夜间减仓
+        if is_night_time():
+            for sym in allocations:
+                allocations[sym] *= CONFIG.night_risk_multiplier
+            log_execution("夜间时段，风险预算降低")
+
+        # 开仓
         for sym in symbols:
             if sym not in st.session_state.positions and allocations.get(sym, 0) > 0:
                 dir, prob, atr_sym, price, _ = symbol_signals[sym]
@@ -1590,9 +1978,9 @@ class UIRenderer:
                 stop = price - stop_dist if dir == 1 else price + stop_dist
                 take = price + stop_dist * CONFIG.tp_min_ratio if dir == 1 else price - stop_dist * CONFIG.tp_min_ratio
                 size = allocations[sym]
-                # 使用订单拆分执行
                 split_and_execute(sym, dir, size, price, stop, take)
 
+        # 更新持仓止损
         for sym, pos in list(st.session_state.positions.items()):
             if sym not in symbols:
                 continue
@@ -1773,10 +2161,10 @@ class UIRenderer:
 
 # ==================== 主程序 ====================
 def main():
-    st.set_page_config(page_title="终极量化终端 47.0 · 智能进化版", layout="wide")
+    st.set_page_config(page_title="终极量化终端 47.1 · 智能进化版", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
-    st.title("🚀 终极量化终端 · 智能进化版 47.0")
-    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 三阶段智能进化 · CVaR · 动态Kelly · 因子相关性 · IC衰减 · 订单拆分 · 冲击成本")
+    st.title("🚀 终极量化终端 · 智能进化版 47.1")
+    st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 三阶段智能进化 · CVaR驱动 · 动态拆分 · 因子淘汰 · 夜间减仓 · 持仓截图")
 
     init_session_state()
     renderer = UIRenderer()
