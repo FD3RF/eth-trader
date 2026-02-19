@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (9.0分终极版)
+🚀 终极量化终端 · 职业版 48.1 (9.0分实战版)
 ===================================================
-核心升级（相较7.2分）：
-- 自动开仓规则引擎（概率+ATR+趋势+风险预算）
-- 回撤自适应降级（连亏降仓、回撤熔断）
-- 完整绩效统计（夏普、索提诺、卡玛、盈亏比）
+核心升级（实战向）：
+- 双区间触发（多≥55%，空≤45%）
+- EMA200趋势过滤
+- 动态风险分层（连亏降级）
 ===================================================
 """
 
@@ -1418,7 +1418,7 @@ class RiskManager:
         var = np.percentile(returns, (1 - confidence) * 100)
         return abs(var)
 
-    # ==== 新增：回撤自适应降级机制 ====
+    # ==== 回撤自适应降级机制 ====
     def get_adaptive_risk_multiplier(self) -> float:
         """根据连亏次数和当前回撤动态调整风险倍数"""
         consecutive_losses = st.session_state.consecutive_losses
@@ -1796,12 +1796,14 @@ class UIRenderer:
     def __init__(self):
         self.fetcher = get_fetcher()
 
-    # ==== 新增：自动开仓规则引擎 ====
+    # ==== 自动开仓规则引擎（实战版）====
     def can_open_by_rules(self, symbol, direction, prob, atr, price, df_dict, risk_budget_remaining, risk_per_trade_amount):
         """多条件开仓规则，返回 (bool, reason)"""
-        # 规则1：信号概率必须 ≥ 58%（避开临界区）
-        if prob < 0.58:
-            return False, f"信号概率{prob:.1%}<58%"
+        # 规则1：双区间触发（多≥55%，空≤45%）
+        if direction == 1 and prob < 0.55:
+            return False, f"做多概率{prob:.1%}<55%"
+        if direction == -1 and prob > 0.45:
+            return False, f"做空概率{prob:.1%}>45% (应≤45%)"
         
         # 规则2：ATR不超过过去20日均值的1.5倍（过滤剧烈波动）
         atr_series = df_dict['15m']['atr']
@@ -1810,10 +1812,12 @@ class UIRenderer:
             if atr > atr_ma * 1.5:
                 return False, f"ATR过高 ({atr:.2f} > {atr_ma*1.5:.2f})"
         
-        # 规则3：价格在EMA趋势方向上（确保顺趋势）
-        ema20 = df_dict['15m']['ema20'].iloc[-1]
-        if (direction == 1 and price < ema20) or (direction == -1 and price > ema20):
-            return False, "价格与EMA趋势相反"
+        # 规则3：EMA200趋势过滤
+        ema200 = df_dict['15m']['ema200'].iloc[-1]
+        if direction == 1 and price < ema200:
+            return False, "价格在EMA200下方，禁止做多"
+        if direction == -1 and price > ema200:
+            return False, "价格在EMA200上方，禁止做空"
         
         # 规则4：剩余风险预算 ≥ 单笔风险
         if risk_budget_remaining < risk_per_trade_amount:
@@ -2175,7 +2179,7 @@ class UIRenderer:
             if is_night_time():
                 st.info("🌙 当前为美东夜间时段，风险预算已降低")
 
-            # ==== 新增：高级绩效指标面板 ====
+            # ==== 高级绩效指标面板 ====
             with st.expander("📈 高级绩效指标"):
                 am = st.session_state.advanced_metrics
                 if am:
@@ -2273,7 +2277,7 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True, key=f"kline_{int(time.time()*1000)}")
 
 def main():
-    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (9.0分终极版)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (9.0分实战版)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 职业版 48.1")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错 · 机器学习")
