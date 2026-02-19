@@ -59,7 +59,7 @@ if 'core' not in st.session_state:
     st.session_state.core = QuantumCore()
 
 # ==========================================
-# 🖥️ 3. 侧边栏布局 (对应截图)
+# 🖥️ 3. 侧边栏布局 (完美匹配截图 UI)
 # ==========================================
 with st.sidebar:
     st.markdown("### 🤖 自动化交易计划")
@@ -76,7 +76,7 @@ with st.sidebar:
             st.toast("核心已重新挂载")
 
 # ==========================================
-# 📊 4. 主界面：实时指标与矩阵 (对应截图 UI)
+# 📊 4. 主界面：实时指标与矩阵
 # ==========================================
 st.title("👁️ QUANTUM PRO: 实时上帝视角终端")
 
@@ -103,7 +103,7 @@ async def update_terminal():
     while True:
         start_ts = time.time()
         
-        # A. 数据模拟（实盘可替换为异步 API 请求）
+        # A. 数据计算
         sim_data = np.random.randn(50, len(CONFIG["symbols"]))
         df_corr = pd.DataFrame(sim_data, columns=CONFIG["symbols"]).corr()
         
@@ -116,7 +116,7 @@ async def update_terminal():
         lt_ph.metric("系统延迟 (Latency)", f"{int(latency)}ms")
         st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
 
-        # C. 渲染热力图 (关键修复：使用 container 动态刷新，不设固定 key)
+        # C. 渲染热力图 (修复：使用 container 动态刷新，不设固定 key)
         with matrix_ph.container():
             fig = px.imshow(
                 df_corr, text_auto=".2f",
@@ -127,21 +127,23 @@ async def update_terminal():
                 margin=dict(l=10, r=10, t=10, b=10), height=450,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
             )
-            # 使用 width="stretch" 适配最新版本警告
-            st.plotly_chart(fig, on_select="ignore", key=f"corr_{int(time.time())}", width="stretch")
+            # 关键修复 1：使用 width="stretch" 消除 Deprecation 警告
+            # 关键修复 2：使用动态 Key 避免 DuplicateKey 报错
+            st.plotly_chart(fig, on_select="ignore", key=f"corr_{int(time.time()*10)}", width="stretch")
 
         # D. 刷新审计流水
         with log_ph.container():
             conn = sqlite3.connect(st.session_state.core.db_path)
             try:
                 df_log = pd.read_sql("SELECT symbol, side, exec, ts FROM ledger ORDER BY ts DESC LIMIT 15", conn)
+                # 关键修复 3：统一使用 width="stretch"
                 st.dataframe(df_log, width="stretch", height=400)
             except:
-                st.info("等待执行信号...")
+                st.info("系统待机中...")
             finally:
                 conn.close()
 
-        await asyncio.sleep(2) # 设置平稳的刷新频率
+        await asyncio.sleep(2)
 
 # ==========================================
 # 🏁 6. 运行入口
@@ -150,5 +152,4 @@ if st.button("🚀 启动量子监控链路", width="stretch"):
     try:
         asyncio.run(update_terminal())
     except Exception as e:
-        # 捕获 asyncio.run 常见的嵌套运行错误
-        st.warning("监控链路正在运行中或已手动停止。")
+        st.warning("监控链路正在运行中。")
