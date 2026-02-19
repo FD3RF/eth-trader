@@ -5,11 +5,10 @@ import plotly.express as px
 import time
 
 # ==========================================
-# 🎨 1. 基础配置与视觉样式
+# 1. 基础配置与视觉样式 (适配 2026 暗黑量化 UI)
 # ==========================================
 st.set_page_config(layout="wide", page_title="QUANTUM PRO", page_icon="👁️")
 
-# 注入 CSS 确保暗黑模式下的文字清晰度
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: white; }
@@ -19,52 +18,48 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 🖥️ 2. 静态布局占位符 (防止渲染顺序混乱)
+# 2. 静态布局占位符 (杜绝缩进嵌套)
 # ==========================================
 with st.sidebar:
     st.markdown("### 🤖 自动化交易引擎")
     run_live = st.toggle("启动实盘监控", value=True)
     st.divider()
-    trigger_val = st.slider("触发价差 (%)", 0.1, 1.0, 0.35)
+    st.slider("触发价差 (%)", 0.1, 1.0, 0.35)
 
 st.title("👁️ QUANTUM PRO: 实时终端")
 
-# 第一行：指标卡
+# 指标卡容器
 m1, m2, m3, m4 = st.columns(4)
-eq_ph = m1.empty()
-rs_ph = m2.empty()
-lt_ph = m3.empty()
-st_ph = m4.empty()
+eq_ph, rs_ph, lt_ph, st_ph = m1.empty(), m2.empty(), m3.empty(), m4.empty()
 
-# 第二行：主要内容
+# 图表与日志容器
 col_left, col_right = st.columns([2, 1])
 with col_left:
     st.markdown("#### 🌐 风险矩阵")
-    matrix_ph = st.empty()  # 矩阵占位符
+    matrix_ph = st.empty() 
 
 with col_right:
     st.markdown("#### 📜 审计流水")
-    log_ph = st.empty()     # 日志占位符
+    log_ph = st.empty()
 
 # ==========================================
-# 🔄 3. 同步刷新引擎 (方案 A 增强版)
+# 3. 核心同步刷新引擎 (方案 A 增强版)
 # ==========================================
-# 核心修复：将绘图逻辑彻底从深层嵌套中移出，防止 IndentationError
-def render_frame():
+def refresh_dashboard():
+    """该函数内部只有一级缩进，物理对齐极其简单"""
     symbols = ["BTC", "ETH", "SOL", "BNB", "ARB"]
     
-    # A. 模拟计算
+    # A. 模拟计算逻辑
     sim_data = np.random.randn(25, len(symbols))
     df_corr = pd.DataFrame(sim_data, columns=symbols).corr()
     
-    # B. 更新指标卡
+    # B. 刷新指标卡内容
     eq_ph.metric("账户权益", "$10,000.00")
     rs_ph.metric("安全系数", f"{np.random.uniform(70, 95):.1f}%")
-    lt_ph.metric("系统延迟", f"{np.random.randint(5, 15)}ms")
+    lt_ph.metric("延迟", f"{np.random.randint(5, 15)}ms")
     st_ph.metric("状态", "LIVE" if run_live else "IDLE")
 
-    # C. 渲染热力图 (关键修复：物理对齐，使用唯一 Key)
-    
+    # C. 渲染热力图 (关键修复：确保此段代码缩进严格对齐)
     fig = px.imshow(
         df_corr, text_auto=".2f",
         color_continuous_scale='RdBu_r', range_color=[-1, 1],
@@ -72,19 +67,19 @@ def render_frame():
     )
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=400)
     
-    # 动态 Key 防止截图中的 Duplicate Element ID 报错
+    # 使用动态 Key 彻底规避截图中的 Duplicate Key 报错
     matrix_ph.plotly_chart(fig, key=f"mat_{int(time.time())}", use_container_width=True)
 
-    # D. 更新流水
+    # D. 刷新日志流水
     log_data = pd.DataFrame({
         "time": [time.strftime("%H:%M:%S")] * 2,
         "symbol": ["BTC/USDT", "ETH/USDT"],
         "side": ["BUY", "SELL"]
     })
-    log_ph.dataframe(log_data, use_container_width=True)
+    log_ph.dataframe(log_data, use_container_width=True, height=400)
 
-# --- 启动循环 ---
+# --- 启动逻辑 ---
 if st.button("🚀 激活量子监控链路", use_container_width=True):
     while True:
-        render_frame()
-        time.sleep(2)  # 每2秒刷新一次
+        refresh_dashboard()
+        time.sleep(2) # 刷新间隔
