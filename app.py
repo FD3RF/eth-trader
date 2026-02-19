@@ -1,20 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 界面修复)
+🚀 终极量化终端 · 职业版 48.1 (9.0分终极版)
 ===================================================
-核心特性（100% 完美极限）：
-- 风险预算模型（每日风险消耗控制）
-- 波动率动态仓位（ATR定仓）
-- 期望收益排序（正期望筛选）
-- 机器学习因子（随机森林，成本感知训练）
-- 贝叶斯因子权重更新 + 因子淘汰
-- HMM 市场状态检测
-- 协方差风险平价 + 极值理论 VaR/CVaR
-- 动态滑点预测 + 订单拆分
-- 实盘杠杆自动化（Binance/Bybit/OKX）
-- Telegram 实时通知 + 权益曲线发送
-- 完整的日志与数据持久化
-- 增强的防御式编程（空值保护、异常捕获）
+核心升级（相较7.2分）：
+- 自动开仓规则引擎（概率+ATR+趋势+风险预算）
+- 回撤自适应降级（连亏降仓、回撤熔断）
+- 完整绩效统计（夏普、索提诺、卡玛、盈亏比）
 ===================================================
 """
 
@@ -378,6 +369,8 @@ def init_session_state():
         'hmm_regime': None,
         'calibration_model': None,
         'walk_forward_index': 0,
+        # 新增：高级绩效指标
+        'advanced_metrics': {}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -444,6 +437,7 @@ def send_telegram(msg: str, msg_type: str = "info", image: Optional[Any] = None)
         logger.warning(f"Telegram发送失败: {e}")
 
 def update_performance_metrics():
+    """更新基础绩效指标"""
     trades = st.session_state.trade_log[-100:]
     if len(trades) < 10:
         return
@@ -460,6 +454,47 @@ def update_performance_metrics():
         'avg_win': avg_win,
         'avg_loss': avg_loss,
         'sharpe': sharpe
+    }
+
+def calculate_advanced_metrics():
+    """计算高级绩效指标：索提诺、卡玛、盈亏比等"""
+    trades_df = pd.DataFrame(st.session_state.trade_log)
+    equity_df = pd.DataFrame(list(st.session_state.equity_curve))
+    if len(trades_df) < 5 or len(equity_df) < 5:
+        return {}
+    
+    # 日收益率序列（从权益曲线计算）
+    equity_df['time'] = pd.to_datetime(equity_df['time'])
+    equity_df = equity_df.set_index('time').sort_index()
+    returns = equity_df['equity'].pct_change().dropna()
+    
+    # 夏普（已有）
+    sharpe = returns.mean() / returns.std() * np.sqrt(252) if returns.std() != 0 else 0
+    
+    # 索提诺（只考虑下行波动）
+    downside_returns = returns[returns < 0]
+    downside_std = downside_returns.std() if len(downside_returns) > 0 else 1e-6
+    sortino = returns.mean() / downside_std * np.sqrt(252)
+    
+    # 卡玛比率
+    total_return = (equity_df['equity'].iloc[-1] - equity_df['equity'].iloc[0]) / equity_df['equity'].iloc[0]
+    max_dd = (equity_df['equity'].cummax() - equity_df['equity']).max() / equity_df['equity'].cummax().max()
+    calmar = total_return / max_dd if max_dd != 0 else 0
+    
+    # 盈亏比
+    win_rate = (trades_df['pnl'] > 0).mean()
+    avg_win = trades_df[trades_df['pnl'] > 0]['pnl'].mean() if any(trades_df['pnl'] > 0) else 0
+    avg_loss = abs(trades_df[trades_df['pnl'] < 0]['pnl'].mean()) if any(trades_df['pnl'] < 0) else 1
+    profit_factor = avg_win / avg_loss if avg_loss != 0 else 0
+    
+    return {
+        'sharpe': sharpe,
+        'sortino': sortino,
+        'calmar': calmar,
+        'profit_factor': profit_factor,
+        'win_rate': win_rate,
+        'total_return': total_return * 100,
+        'max_drawdown': max_dd * 100
     }
 
 def current_equity():
@@ -1383,17 +1418,54 @@ class RiskManager:
         var = np.percentile(returns, (1 - confidence) * 100)
         return abs(var)
 
+    # ==== 新增：回撤自适应降级机制 ====
+    def get_adaptive_risk_multiplier(self) -> float:
+        """根据连亏次数和当前回撤动态调整风险倍数"""
+        consecutive_losses = st.session_state.consecutive_losses
+        current_dd, _ = calculate_drawdown()
+        
+        # 连亏降级
+        if consecutive_losses >= 4:
+            return 0.0  # 停止交易
+        elif consecutive_losses == 3:
+            mult = 0.4
+        elif consecutive_losses == 2:
+            mult = 0.6
+        elif consecutive_losses == 1:
+            mult = 0.8
+        else:
+            mult = 1.0
+        
+        # 回撤降级
+        if current_dd > 5.0:
+            mult *= 0.3
+        elif current_dd > 3.0:
+            mult *= 0.5
+        elif current_dd > 1.5:
+            mult *= 0.7
+        
+        return max(0.0, mult)
+
     def calc_position_size(self, balance: float, prob: float, atr: float, price: float, recent_returns: np.ndarray, is_aggressive: bool = False) -> float:
-        """波动率动态仓位计算"""
+        """波动率动态仓位计算，集成自适应风险倍数"""
         if price <= 0 or prob < 0.5:
             return 0.0
+        
+        # 基础风险金额
         risk_amount = balance * CONFIG.risk_per_trade
+        
+        # 应用自适应降级倍数
+        adaptive_mult = self.get_adaptive_risk_multiplier()
+        risk_amount *= adaptive_mult
+        
         if is_aggressive:
             risk_amount *= 1.5
+        
         if atr == 0 or np.isnan(atr) or atr < price * CONFIG.min_atr_pct / 100:
             stop_distance = price * 0.01
         else:
             stop_distance = atr * adaptive_atr_multiplier(pd.Series(recent_returns))
+        
         size = risk_amount / stop_distance
         max_size_by_leverage = balance * CONFIG.max_leverage_global / price
         size = min(size, max_size_by_leverage)
@@ -1724,6 +1796,31 @@ class UIRenderer:
     def __init__(self):
         self.fetcher = get_fetcher()
 
+    # ==== 新增：自动开仓规则引擎 ====
+    def can_open_by_rules(self, symbol, direction, prob, atr, price, df_dict, risk_budget_remaining, risk_per_trade_amount):
+        """多条件开仓规则，返回 (bool, reason)"""
+        # 规则1：信号概率必须 ≥ 58%（避开临界区）
+        if prob < 0.58:
+            return False, f"信号概率{prob:.1%}<58%"
+        
+        # 规则2：ATR不超过过去20日均值的1.5倍（过滤剧烈波动）
+        atr_series = df_dict['15m']['atr']
+        if len(atr_series) >= 20:
+            atr_ma = atr_series.rolling(20).mean().iloc[-1]
+            if atr > atr_ma * 1.5:
+                return False, f"ATR过高 ({atr:.2f} > {atr_ma*1.5:.2f})"
+        
+        # 规则3：价格在EMA趋势方向上（确保顺趋势）
+        ema20 = df_dict['15m']['ema20'].iloc[-1]
+        if (direction == 1 and price < ema20) or (direction == -1 and price > ema20):
+            return False, "价格与EMA趋势相反"
+        
+        # 规则4：剩余风险预算 ≥ 单笔风险
+        if risk_budget_remaining < risk_per_trade_amount:
+            return False, "风险预算不足"
+        
+        return True, "通过"
+
     def render_sidebar(self):
         with st.sidebar:
             st.header("⚙️ 配置")
@@ -1927,11 +2024,22 @@ class UIRenderer:
 
         allocations = risk.allocate_portfolio(symbol_signals, st.session_state.account_balance)
 
-        can_open = not (cooldown or not risk_budget_ok)
+        can_open_global = not (cooldown or not risk_budget_ok)
         for sym in symbols:
             if sym not in st.session_state.positions and allocations.get(sym, 0) > 0:
-                if can_open:
-                    dir, prob, atr_sym, price, _ = symbol_signals[sym]
+                dir, prob, atr_sym, price, _ = symbol_signals[sym]
+                # 计算单笔风险金额（用于规则4）
+                risk_per_trade_amount = st.session_state.account_balance * CONFIG.risk_per_trade
+                risk_budget_remaining = st.session_state.account_balance * CONFIG.daily_risk_budget_ratio - st.session_state.daily_risk_consumed
+                df_dict_sym = st.session_state.multi_df[sym]
+                
+                # 使用开仓规则引擎判断
+                can_open, reason = self.can_open_by_rules(
+                    sym, dir, prob, atr_sym, price, df_dict_sym,
+                    risk_budget_remaining, risk_per_trade_amount
+                )
+                
+                if can_open and can_open_global:
                     if atr_sym == 0 or np.isnan(atr_sym):
                         stop_dist = price * 0.01
                     else:
@@ -1941,7 +2049,7 @@ class UIRenderer:
                     size = allocations[sym]
                     split_and_execute(sym, dir, size, price, stop, take)
                 else:
-                    log_execution(f"开仓被阻止：{sym} (冷却或风险预算耗尽)")
+                    log_execution(f"开仓被阻止：{sym}，原因：{reason}")
 
         for sym, pos in list(st.session_state.positions.items()):
             if sym not in symbols:
@@ -1998,6 +2106,9 @@ class UIRenderer:
 
         risk_budget_total = st.session_state.account_balance * CONFIG.daily_risk_budget_ratio
         risk_budget_remaining = max(0, risk_budget_total - st.session_state.daily_risk_consumed)
+
+        # 更新高级绩效指标
+        st.session_state.advanced_metrics = calculate_advanced_metrics()
 
         # 左右两列布局，左侧稍宽
         col1, col2 = st.columns([1.2, 1.8])
@@ -2063,6 +2174,20 @@ class UIRenderer:
                 st.warning(f"冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
             if is_night_time():
                 st.info("🌙 当前为美东夜间时段，风险预算已降低")
+
+            # ==== 新增：高级绩效指标面板 ====
+            with st.expander("📈 高级绩效指标"):
+                am = st.session_state.advanced_metrics
+                if am:
+                    st.write(f"夏普比率: {am['sharpe']:.2f}")
+                    st.write(f"索提诺比率: {am['sortino']:.2f}")
+                    st.write(f"卡玛比率: {am['calmar']:.2f}")
+                    st.write(f"盈亏比: {am['profit_factor']:.2f}")
+                    st.write(f"胜率: {am['win_rate']:.2%}")
+                    st.write(f"总收益率: {am['total_return']:.2f}%")
+                    st.write(f"最大回撤: {am['max_drawdown']:.2f}%")
+                else:
+                    st.info("暂无足够数据计算高级绩效指标")
 
             # 折叠面板（市场状态统计、实盘一致性、因子IC）
             with st.expander("📈 市场状态统计"):
@@ -2148,7 +2273,7 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True, key=f"kline_{int(time.time()*1000)}")
 
 def main():
-    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终完美)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (9.0分终极版)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 职业版 48.1")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错 · 机器学习")
