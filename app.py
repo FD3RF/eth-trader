@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (9.0分实战版 · 概率校准完善)
+🚀 终极量化终端 · 职业版 48.1 (9.0分实战版 · 最终增强)
 ===================================================
 核心升级：
 - 双区间触发（多≥53%，空≤47%）
@@ -8,7 +8,9 @@
 - 动态风险分层（连亏降级）
 - 概率校准（isotonic回归，基于真实历史）
 - 实盘级回测引擎
-- UI显示因子权重和校准状态
+- UI显示因子权重和校准状态（含交易笔数）
+- 风险预算进度条
+- 回测阈值对比（55/45 vs 53/47）
 ===================================================
 """
 
@@ -257,6 +259,7 @@ ml_scalers = {}
 ml_feature_cols = {}   # 存储每个品种的特征列名
 ml_last_train = {}
 ml_calibrators = {}
+ml_calibrators_count = {}  # 记录每个品种校准用的交易笔数
 
 volcone_cache = {}
 hmm_models = {}
@@ -374,7 +377,10 @@ def init_session_state():
         'calibration_model': None,
         'walk_forward_index': 0,
         # 新增：高级绩效指标
-        'advanced_metrics': {}
+        'advanced_metrics': {},
+        # 回测结果对比
+        'backtest_results_old': None,
+        'backtest_results_new': None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -772,6 +778,7 @@ def train_calibration_model(symbol: str):
     ir = IsotonicRegression(out_of_bounds='clip')
     ir.fit(raw_probs, true_labels)
     ml_calibrators[symbol] = ir
+    ml_calibrators_count[symbol] = len(df)  # 记录训练笔数
     log_execution(f"{symbol} 概率校准模型已更新（基于{len(df)}笔交易）")
 
 def apply_calibration(symbol: str, raw_prob: float) -> float:
@@ -1797,9 +1804,10 @@ def generate_equity_chart():
     )
     return fig
 
-# ==================== 回测引擎（精简可运行版）====================
-def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], initial_balance: float = 10000) -> Dict[str, Any]:
-    """简易但完整复现实盘逻辑的回测"""
+# ==================== 回测引擎（支持阈值参数）====================
+def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFrame]], 
+                 initial_balance: float = 10000, long_thresh: float = 0.53, short_thresh: float = 0.47) -> Dict[str, Any]:
+    """回测，支持自定义阈值"""
     balance = initial_balance
     equity_curve = []
     trade_log = []
@@ -1809,6 +1817,29 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
     current_date = None
     engine = SignalEngine()
     risk = RiskManager()
+
+    def can_open(direction, prob, atr, price, df_dict, risk_budget_remaining, risk_per_trade):
+        # 阈值规则
+        if direction == 1 and prob < long_thresh:
+            return False
+        if direction == -1 and prob > short_thresh:
+            return False
+        # ATR过滤
+        atr_series = df_dict['15m']['atr']
+        if len(atr_series) >= 20:
+            atr_ma = atr_series.rolling(20).mean().iloc[-1]
+            if atr > atr_ma * 1.5:
+                return False
+        # EMA200趋势过滤
+        ema200 = df_dict['15m']['ema200'].iloc[-1]
+        if direction == 1 and price < ema200:
+            return False
+        if direction == -1 and price > ema200:
+            return False
+        # 风险预算
+        if risk_budget_remaining < risk_per_trade:
+            return False
+        return True
 
     for sym in symbols:
         df = data_dicts[sym]['15m'].copy()
@@ -1823,18 +1854,17 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
             slice_dict = {tf: data_dicts[sym][tf].iloc[:i+1] for tf in data_dicts[sym]}
             direction, prob = engine.calc_signal(slice_dict, sym)
 
-            # 开仓（复用新版规则）
+            # 开仓
             if sym not in positions and direction != 0:
-                can_open, _ = UIRenderer().can_open_by_rules(sym, direction, prob, row['atr'], row['close'], slice_dict,
-                                                            balance * 0.025 - daily_risk_consumed, balance * 0.008)
-                if can_open:
+                if can_open(direction, prob, row['atr'], row['close'], slice_dict,
+                            balance * 0.025 - daily_risk_consumed, balance * 0.008):
                     size = risk.calc_position_size(balance, prob, row['atr'], row['close'], df['close'].pct_change().iloc[:i].values[-20:])
                     stop_dist = row['atr'] * 1.5
                     stop = row['close'] - stop_dist if direction == 1 else row['close'] + stop_dist
                     take = row['close'] + stop_dist * 2 if direction == 1 else row['close'] - stop_dist * 2
                     positions[sym] = Position(sym, direction, row['close'], current_time, size, stop, take, row['atr'])
 
-            # 持仓管理（简化）
+            # 持仓管理
             if sym in positions:
                 pos = positions[sym]
                 pos.update_stops(row['close'], row['atr'])
@@ -1848,7 +1878,7 @@ def run_backtest(symbols: List[str], data_dicts: Dict[str, Dict[str, pd.DataFram
 
             equity_curve.append(balance)
 
-    advanced = calculate_advanced_metrics()  # 复用现有函数
+    advanced = calculate_advanced_metrics()
     advanced['trade_log'] = trade_log
     return {"final_balance": balance, "equity_curve": equity_curve, "metrics": advanced}
 
@@ -2061,20 +2091,47 @@ class UIRenderer:
             self.render_live_panel(symbols, multi_data)
 
     def render_backtest_panel(self, symbols, multi_data):
-        st.subheader("📊 回测面板")
-        if st.button("🚀 启动回测（15m历史数据）"):
-            with st.spinner("回测中..."):
-                results = run_backtest(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols})
-                st.session_state.backtest_results = results
-                st.success("回测完成！")
+        st.subheader("📊 回测对比 (旧版 55/45 vs 新版 53/47)")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🚀 回测旧版 (55/45)"):
+                with st.spinner("回测中..."):
+                    res = run_backtest(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, long_thresh=0.55, short_thresh=0.45)
+                    st.session_state.backtest_results_old = res
+                    st.success("旧版回测完成！")
+        with col2:
+            if st.button("🚀 回测新版 (53/47)"):
+                with st.spinner("回测中..."):
+                    res = run_backtest(symbols, {sym: multi_data[sym]['data_dict'] for sym in symbols}, long_thresh=0.53, short_thresh=0.47)
+                    st.session_state.backtest_results_new = res
+                    st.success("新版回测完成！")
 
-        if st.session_state.get('backtest_results'):
-            res = st.session_state.backtest_results
-            st.metric("最终权益", f"{res['final_balance']:.2f}")
-            fig = go.Figure(go.Scatter(y=res['equity_curve'], mode='lines'))
+        old = st.session_state.get('backtest_results_old')
+        new = st.session_state.get('backtest_results_new')
+        if old or new:
+            col1, col2 = st.columns(2)
+            with col1:
+                if old:
+                    st.metric("旧版最终权益", f"{old['final_balance']:.2f}")
+                    st.write("交易次数:", len(old['metrics']['trade_log']))
+                    st.write("胜率:", f"{old['metrics'].get('win_rate', 0)*100:.2f}%")
+                    st.write("最大回撤:", f"{old['metrics'].get('max_drawdown', 0):.2f}%")
+                    st.write("盈亏比:", f"{old['metrics'].get('profit_factor', 0):.2f}")
+            with col2:
+                if new:
+                    st.metric("新版最终权益", f"{new['final_balance']:.2f}")
+                    st.write("交易次数:", len(new['metrics']['trade_log']))
+                    st.write("胜率:", f"{new['metrics'].get('win_rate', 0)*100:.2f}%")
+                    st.write("最大回撤:", f"{new['metrics'].get('max_drawdown', 0):.2f}%")
+                    st.write("盈亏比:", f"{new['metrics'].get('profit_factor', 0):.2f}")
+
+            # 权益曲线对比
+            fig = go.Figure()
+            if old:
+                fig.add_trace(go.Scatter(y=old['equity_curve'], mode='lines', name='旧版 55/45'))
+            if new:
+                fig.add_trace(go.Scatter(y=new['equity_curve'], mode='lines', name='新版 53/47'))
             st.plotly_chart(fig)
-            with st.expander("详细指标"):
-                st.write(res['metrics'])
 
     def render_live_panel(self, symbols, multi_data):
         st.subheader("多品种持仓")
@@ -2088,9 +2145,20 @@ class UIRenderer:
         if not risk_budget_ok:
             st.error(f"每日风险预算已达上限 ({CONFIG.daily_risk_budget_ratio*100:.1f}%)，今日停止开新仓")
 
-        # 显示因子权重（可选增强）
-        with st.expander("📊 因子权重", expanded=False):
-            st.json(factor_weights)
+        # 显示因子权重和IC（增强版）
+        with st.expander("📊 因子权重与IC", expanded=False):
+            if st.session_state.factor_ic_stats:
+                df_ic = pd.DataFrame(st.session_state.factor_ic_stats).T.round(4)
+                # 合并权重
+                df_ic['权重'] = pd.Series(factor_weights)
+                # 高亮p值显著的因子
+                def highlight_p(val):
+                    if isinstance(val, float) and val < 0.05:
+                        return 'background-color: lightgreen'
+                    return ''
+                st.dataframe(df_ic.style.applymap(highlight_p, subset=['p_value']))
+            else:
+                st.info("暂无IC统计数据，积累更多交易后可见")
 
         symbol_signals = {}
         for sym in symbols:
@@ -2211,9 +2279,15 @@ class UIRenderer:
             price_lines = " | ".join([f"{sym}: {multi_data[sym]['current_price']:.2f}" for sym in symbols])
             st.caption(price_lines)
 
-            # 显示校准状态（可选增强）
-            cal_status = {sym: "✅ 已校准" if sym in ml_calibrators else "⏳ 待校准" for sym in symbols}
-            st.caption("校准状态: " + " | ".join([f"{sym}: {status}" for sym, status in cal_status.items()]))
+            # 显示校准状态（带交易笔数）
+            cal_status = []
+            for sym in symbols:
+                if sym in ml_calibrators:
+                    cnt = ml_calibrators_count.get(sym, 0)
+                    cal_status.append(f"{sym}: ✅ 已校准({cnt}笔)")
+                else:
+                    cal_status.append(f"{sym}: ⏳ 待校准")
+            st.caption("校准状态: " + " | ".join(cal_status))
 
             # 持仓显示（改用DataFrame，紧凑）
             if st.session_state.positions:
@@ -2255,6 +2329,10 @@ class UIRenderer:
             row2[1].metric("剩余预算", f"{risk_budget_remaining:.2f} USDT")
             row2[2].metric("组合VaR", f"{portfolio_var_value*100:.2f}%")
             row2[3].metric("组合CVaR", f"{portfolio_cvar_value*100:.2f}%")
+
+            # 今日风险预算进度条
+            used_ratio = st.session_state.daily_risk_consumed / (st.session_state.account_balance * CONFIG.daily_risk_budget_ratio)
+            st.progress(min(used_ratio, 1.0), text=f"今日风险预算已用 {used_ratio*100:.1f}%")
 
             # 冷却和夜间提示
             if st.session_state.cooldown_until:
@@ -2360,7 +2438,7 @@ class UIRenderer:
             st.plotly_chart(fig, use_container_width=True, key=f"kline_{int(time.time()*1000)}")
 
 def main():
-    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (9.0分实战版)", layout="wide")
+    st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (9.0分实战版 · 最终增强)", layout="wide")
     st.markdown("<style>.stApp { background: #0B0E14; color: white; }</style>", unsafe_allow_html=True)
     st.title("🚀 终极量化终端 · 职业版 48.1")
     st.caption("宇宙主宰 | 永恒无敌 | 完美无瑕 | 永不败北 · 风险预算 · 波动率定仓 · 期望收益驱动 · 实盘容错 · 机器学习")
