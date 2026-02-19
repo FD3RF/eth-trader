@@ -40,11 +40,11 @@ class QuantumCore:
         conn.close()
 
 # ==========================================
-# 🎨 2. 样式修复 (彻底解决 unsafe_allow_password 报错)
+# 🎨 2. UI 样式修复 (彻底解决截图中的 TypeError)
 # ==========================================
 st.set_page_config(layout="wide", page_title="QUANTUM PRO TERMINAL", page_icon="👁️")
 
-# 修复：删除非法参数 unsafe_allow_password，改用 unsafe_allow_html
+# 修正：移除非法参数 unsafe_allow_password，确保 CSS 正常加载
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: white; }
@@ -59,7 +59,7 @@ if 'core' not in st.session_state:
     st.session_state.core = QuantumCore()
 
 # ==========================================
-# 🖥️ 3. 侧边栏布局 (同步截图 UI)
+# 🖥️ 3. 侧边栏布局
 # ==========================================
 with st.sidebar:
     st.markdown("### 🤖 自动化交易计划")
@@ -73,21 +73,20 @@ with st.sidebar:
         api_sec = st.text_input("Secret Key", type="password")
         if st.button("更新核心连接"):
             st.session_state.core = QuantumCore(api_key, api_sec)
-            st.toast("API 连接已就绪")
+            st.toast("核心连接已更新")
 
 # ==========================================
-# 📊 4. 主界面布局 (指标卡 + 风险矩阵 + 审计)
+# 📊 4. 主界面：实时指标与矩阵
 # ==========================================
 st.title("👁️ QUANTUM PRO: 实时上帝视角终端")
 
-# 指标占位符
+# 四大指标卡占位符
 m1, m2, m3, m4 = st.columns(4)
 eq_ph = m1.empty()
 rs_ph = m2.empty()
 lt_ph = m3.empty()
 st_ph = m4.empty()
 
-# 核心内容区
 col_left, col_right = st.columns([2, 1])
 with col_left:
     st.markdown("#### 🌐 全球流动性风险矩阵")
@@ -98,17 +97,17 @@ with col_right:
     log_ph = st.empty()
 
 # ==========================================
-# 🔄 5. 核心刷新循环 (彻底修复 DuplicateKey 冲突)
+# 🔄 5. 核心刷新循环 (彻底解决 DuplicateKey 报错)
 # ==========================================
 async def update_terminal():
     while True:
         start_ts = time.time()
         
-        # A. 模拟相关性计算 (实盘可接自 core.ex 数据)
+        # A. 数据模拟（实盘可替换为异步 API 获取）
         sim_data = np.random.randn(50, len(CONFIG["symbols"]))
         df_corr = pd.DataFrame(sim_data, columns=CONFIG["symbols"]).corr()
         
-        # B. 渲染指标卡
+        # B. 刷新指标卡
         latency = (time.time() - start_ts) * 1000
         safe_score = (1 - df_corr.mean().mean()) * 100
         
@@ -117,7 +116,7 @@ async def update_terminal():
         lt_ph.metric("系统延迟 (Latency)", f"{int(latency)}ms")
         st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
 
-        # C. 渲染热力图 (修复：移除 key='risk_matrix'，改用 container 动态刷新)
+        # C. 渲染热力图 (修复：移除静态 key，改用 container 自动管理)
         with matrix_ph.container():
             fig = px.imshow(
                 df_corr, text_auto=".2f",
@@ -128,32 +127,27 @@ async def update_terminal():
                 margin=dict(l=10, r=10, t=10, b=10), height=450,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
             )
-            # 关键修复点：不加 key，避免循环刷新时的 ID 重复报错
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            # 使用 width="stretch" 适配最新 Streamlit 版本建议
+            st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
 
-        # D. 更新审计表
+        # D. 刷新审计流水
         with log_ph.container():
             conn = sqlite3.connect(st.session_state.core.db_path)
             try:
                 df_log = pd.read_sql("SELECT symbol, side, exec, ts FROM ledger ORDER BY ts DESC LIMIT 15", conn)
-                st.dataframe(df_log, use_container_width=True, height=400)
+                st.dataframe(df_log, width="stretch", height=400)
             except:
-                st.info("系统待机中，等待首个交易信号...")
+                st.info("系统待机中...")
             finally:
                 conn.close()
 
-        # E. 安全阈值警报
-        if run_live and safe_score < safe_factor:
-            st.toast(f"风险预警：安全系数已低于阈值 {safe_factor}%", icon="⚠️")
-
-        await asyncio.sleep(2) # 刷新频率
+        await asyncio.sleep(2) # 设置平滑刷新频率
 
 # ==========================================
-# 🏁 6. 启动入口
+# 🏁 6. 运行入口
 # ==========================================
-if st.button("🚀 启动量子监控链路", use_container_width=True):
-    # 彻底修复：使用 asyncio 运行，并确保 st 的上下文安全
+if st.button("🚀 启动量子监控链路", width="stretch"):
     try:
         asyncio.run(update_terminal())
     except Exception as e:
-        st.error(f"引擎运行异常: {e}")
+        st.error(f"终端运行中断: {e}")
