@@ -43,7 +43,7 @@ class QuantumCore:
 # ==========================================
 st.set_page_config(layout="wide", page_title="QUANTUM PRO TERMINAL", page_icon="👁️")
 
-# 修正：移除非法参数 unsafe_allow_password，改用正确的 unsafe_allow_html
+# 修正：移除截图 2 中报错的非法参数 unsafe_allow_password，改用正确的 unsafe_allow_html
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: white; }
@@ -58,7 +58,7 @@ if 'core' not in st.session_state:
     st.session_state.core = QuantumCore()
 
 # ==========================================
-# 🖥️ 3. 侧边栏布局 (完美匹配截图 UI)
+# 🖥️ 3. 侧边栏布局 (完美匹配您的 UI 截图)
 # ==========================================
 with st.sidebar:
     st.markdown("### 🤖 自动化交易计划")
@@ -72,7 +72,7 @@ with st.sidebar:
         api_sec = st.text_input("Secret Key", type="password")
         if st.button("更新连接"):
             st.session_state.core = QuantumCore(api_key, api_sec)
-            st.toast("API 连接就绪")
+            st.toast("核心已重新挂载")
 
 # ==========================================
 # 📊 4. 主界面：实时指标与矩阵
@@ -96,7 +96,7 @@ with col_right:
     log_ph = st.empty()
 
 # ==========================================
-# 🔄 5. 核心刷新循环 (解决截图 4 的 DuplicateKey 及弃用警告)
+# 🔄 5. 核心刷新循环 (解决 DuplicateKey 及弃用警告问题)
 # ==========================================
 async def update_terminal():
     while True:
@@ -115,7 +115,7 @@ async def update_terminal():
         lt_ph.metric("系统延迟 (Latency)", f"{int(latency)}ms")
         st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
 
-        # C. 渲染热力图 (修复：移除固定 key 冲突，确保缩进正确)
+        # C. 渲染热力图 (修复：移除固定 key 冲突，并使用 width='stretch')
         with matrix_ph.container():
             fig = px.imshow(
                 df_corr, text_auto=".2f",
@@ -126,7 +126,8 @@ async def update_terminal():
                 margin=dict(l=10, r=10, t=10, b=10), height=450,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
             )
-            # 关键修复：使用 width="stretch" 消除弃用警告，动态 ID 避免 DuplicateKey
+            # 关键修复 1：使用 width="stretch" 适配最新版本警告 (截图 3 问题)
+            # 关键修复 2：使用动态 Key 避免 DuplicateKey 报错 (截图 4 问题)
             st.plotly_chart(fig, on_select="ignore", key=f"risk_{int(time.time()*10)}", width="stretch")
 
         # D. 刷新审计流水
@@ -134,6 +135,7 @@ async def update_terminal():
             conn = sqlite3.connect(st.session_state.core.db_path)
             try:
                 df_log = pd.read_sql("SELECT symbol, side, exec, ts FROM ledger ORDER BY ts DESC LIMIT 15", conn)
+                # 关键修复 3：统一使用 width="stretch"
                 st.dataframe(df_log, width="stretch", height=400)
             except:
                 st.info("等待执行信号...")
@@ -149,4 +151,5 @@ if st.button("🚀 启动量子监控链路", width="stretch"):
     try:
         asyncio.run(update_terminal())
     except Exception as e:
+        # 防止重复启动导致的 Runtime 错误
         st.warning("监控链路已在运行中。")
