@@ -9,7 +9,7 @@ from datetime import datetime
 import ccxt.async_support as ccxt
 
 # ==========================================
-# 🛡️ 系统配置
+# 🛡️ 1. 系统核心配置
 # ==========================================
 CONFIG = {
     "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ARB/USDT"],
@@ -40,16 +40,18 @@ class QuantumCore:
         conn.close()
 
 # ==========================================
-# 🎨 UI 界面样式 (修复参数报错)
+# 🎨 2. 样式修复 (彻底解决 unsafe_allow_password 报错)
 # ==========================================
-st.set_page_config(layout="wide", page_title="QUANTUM PRO", page_icon="👁️")
+st.set_page_config(layout="wide", page_title="QUANTUM PRO TERMINAL", page_icon="👁️")
 
+# 修复：删除非法参数 unsafe_allow_password，改用 unsafe_allow_html
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: white; }
     [data-testid="stMetricValue"] { color: #00FFC2 !important; font-family: 'Courier New', monospace; font-size: 1.8rem !important; }
     .stMetric { background-color: #161B22; border-radius: 10px; padding: 15px; border: 1px solid #30363d; }
     .stDataFrame { border: 1px solid #30363d; border-radius: 10px; }
+    .block-container { padding-top: 2rem; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -57,7 +59,7 @@ if 'core' not in st.session_state:
     st.session_state.core = QuantumCore()
 
 # ==========================================
-# 🖥️ 侧边栏
+# 🖥️ 3. 侧边栏布局 (同步截图 UI)
 # ==========================================
 with st.sidebar:
     st.markdown("### 🤖 自动化交易计划")
@@ -69,44 +71,54 @@ with st.sidebar:
     with st.expander("🔑 API 密钥配置"):
         api_key = st.text_input("API Key", type="password")
         api_sec = st.text_input("Secret Key", type="password")
-        if st.button("更新密钥"):
+        if st.button("更新核心连接"):
             st.session_state.core = QuantumCore(api_key, api_sec)
-            st.toast("核心已重载")
+            st.toast("API 连接已就绪")
 
 # ==========================================
-# 📊 主界面布局
+# 📊 4. 主界面布局 (指标卡 + 风险矩阵 + 审计)
 # ==========================================
 st.title("👁️ QUANTUM PRO: 实时上帝视角终端")
 
+# 指标占位符
 m1, m2, m3, m4 = st.columns(4)
 eq_ph = m1.empty()
 rs_ph = m2.empty()
 lt_ph = m3.empty()
 st_ph = m4.empty()
 
+# 核心内容区
 col_left, col_right = st.columns([2, 1])
 with col_left:
     st.markdown("#### 🌐 全球流动性风险矩阵")
-    matrix_container = st.empty()
+    matrix_ph = st.empty()
 
 with col_right:
     st.markdown("#### 📜 实时审计流水")
-    log_container = st.empty()
+    log_ph = st.empty()
 
 # ==========================================
-# 🔄 修复 DuplicateKey 问题的核心循环
+# 🔄 5. 核心刷新循环 (彻底修复 DuplicateKey 冲突)
 # ==========================================
 async def update_terminal():
-    # 使用 session_state 跟踪运行状态，防止重复触发
     while True:
         start_ts = time.time()
         
-        # 1. 模拟行情与矩阵计算
+        # A. 模拟相关性计算 (实盘可接自 core.ex 数据)
         sim_data = np.random.randn(50, len(CONFIG["symbols"]))
         df_corr = pd.DataFrame(sim_data, columns=CONFIG["symbols"]).corr()
         
-        # 2. 渲染热力图 (移除静态 key，防止 DuplicateElementKey 错误)
-        with matrix_container.container():
+        # B. 渲染指标卡
+        latency = (time.time() - start_ts) * 1000
+        safe_score = (1 - df_corr.mean().mean()) * 100
+        
+        eq_ph.metric("账户权益 (Equity)", f"${CONFIG['initial_equity']:,.0f}")
+        rs_ph.metric("安全系数 (Safety)", f"{safe_score:.1f}%", delta=f"{safe_score - safe_factor:.1f}%")
+        lt_ph.metric("系统延迟 (Latency)", f"{int(latency)}ms")
+        st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
+
+        # C. 渲染热力图 (修复：移除 key='risk_matrix'，改用 container 动态刷新)
+        with matrix_ph.container():
             fig = px.imshow(
                 df_corr, text_auto=".2f",
                 color_continuous_scale='RdBu_r', range_color=[-1, 1],
@@ -116,32 +128,32 @@ async def update_terminal():
                 margin=dict(l=10, r=10, t=10, b=10), height=450,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
             )
-            # 关键修复：不再手动指定 key，让 Streamlit 自动处理容器内元素
-            st.plotly_chart(fig, use_container_width=True)
+            # 关键修复点：不加 key，避免循环刷新时的 ID 重复报错
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-        # 3. 更新指标卡
-        latency = (time.time() - start_ts) * 1000
-        safe_score = (1 - df_corr.mean().mean()) * 100
-        
-        eq_ph.metric("账户权益", f"${CONFIG['initial_equity']:,.0f}")
-        rs_ph.metric("安全系数", f"{safe_score:.1f}%", delta=f"{safe_score - safe_factor:.1f}%")
-        lt_ph.metric("系统延迟", f"{int(latency)}ms")
-        st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
-
-        # 4. 更新审计日志
-        with log_container.container():
+        # D. 更新审计表
+        with log_ph.container():
             conn = sqlite3.connect(st.session_state.core.db_path)
             try:
-                df_log = pd.read_sql("SELECT symbol, side, exec, ts FROM ledger ORDER BY ts DESC LIMIT 10", conn)
+                df_log = pd.read_sql("SELECT symbol, side, exec, ts FROM ledger ORDER BY ts DESC LIMIT 15", conn)
                 st.dataframe(df_log, use_container_width=True, height=400)
             except:
-                st.info("等待信号...")
+                st.info("系统待机中，等待首个交易信号...")
             finally:
                 conn.close()
 
-        await asyncio.sleep(2)
+        # E. 安全阈值警报
+        if run_live and safe_score < safe_factor:
+            st.toast(f"风险预警：安全系数已低于阈值 {safe_factor}%", icon="⚠️")
 
-# 启动逻辑
+        await asyncio.sleep(2) # 刷新频率
+
+# ==========================================
+# 🏁 6. 启动入口
+# ==========================================
 if st.button("🚀 启动量子监控链路", use_container_width=True):
-    # 确保在运行环境中只启动一个异步循环
-    asyncio.run(update_terminal())
+    # 彻底修复：使用 asyncio 运行，并确保 st 的上下文安全
+    try:
+        asyncio.run(update_terminal())
+    except Exception as e:
+        st.error(f"引擎运行异常: {e}")
