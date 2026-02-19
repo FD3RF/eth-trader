@@ -1,142 +1,147 @@
+import streamlit as st
 import asyncio
-import multiprocessing as mp
-import time
 import numpy as np
+import pandas as pd
 import ccxt.async_support as ccxt
-from arch import arch_model
+import plotly.graph_objects as go
+from arch import arch_model  # 确保 requirements.txt 有 arch
+from scipy.optimize import minimize
+from collections import deque
 
-# ==================== 自动化执行模块 (The Executor) ====================
-class AutomatedExecutor:
-    def __init__(self, exchange, symbol, leverage=5):
-        self.exchange = exchange
-        self.symbol = symbol
-        self.leverage = leverage
-        self.is_position_open = False
-        self.last_order_id = None
-
-    async def execute_trade(self, weight, current_price):
-        """
-        核心逻辑：根据权重下单，并附带 TP/SL
-        weight: 建议仓位比例 (0.0 - 1.0)
-        """
-        if weight <= 0.01: # 权重太小不操作
-            return
-
-        # 1. 计算下单量 (这里假设账户余额，实际需从 exchange.fetch_balance 获取)
-        # 简单演示：固定假设可用 1000 USDT
-        available_balance = 1000 
-        order_quantity = (available_balance * weight * self.leverage) / current_price
-
-        print(f"🚀 [EXECUTION] 触发共识下单: {self.symbol} | 权重: {weight:.2%}")
-
+# ==================== 1. 大脑：核心数学内核 ====================
+class QuantumBrain:
+    @staticmethod
+    def predict_garch_vol(returns):
+        """GARCH(1,1) 非线性波动率预判：提前感知‘插针’风险"""
+        if len(returns) < 30: return np.std(returns)
         try:
-            # 2. 设置杠杆 (针对永续合约)
-            # await self.exchange.set_leverage(self.leverage, self.symbol)
+            # 数据缩放以提高收敛稳定性
+            model = arch_model(returns * 100, vol='Garch', p=1, q=1, dist='t', show_batch=False)
+            res = model.fit(disp='off')
+            forecast = res.forecast(horizon=1)
+            return np.sqrt(forecast.variance.values[-1, -1]) / 100
+        except:
+            return np.std(returns)
 
-            # 3. 市价开仓 (Market Buy)
-            order = await self.exchange.create_market_buy_order(self.symbol, order_quantity)
-            entry_price = order['price'] if order['price'] else current_price
+    @staticmethod
+    def optimize_portfolio(symbols, returns_matrix, vols, arb_deltas, memory):
+        """上帝视角 + 动态凯利：计算终极仓位权重"""
+        individual_k = []
+        for i, s in enumerate(symbols):
+            # 贝叶斯后验胜率校准
+            p = memory[s]['wins'] / (memory[s]['wins'] + memory[s]['losses'])
+            b = (memory[s]['w_total']/memory[s]['wins']) / (memory[s]['l_total']/memory[s]['losses'])
             
-            # 4. 自动计算 TP/SL (例如：2% 止盈, 1% 止损)
-            tp_price = entry_price * 1.02
-            sl_price = entry_price * 0.99
+            # 基础凯利公式 (bp-q)/b
+            k_f = max(0, (p * b - (1 - p)) / b) * 0.2
             
-            # 5. 异步挂止损单 (Reduce Only)
-            await self.exchange.create_order(
-                self.symbol, 'stop', 'sell', order_quantity, sl_price, 
-                params={'stopPrice': sl_price, 'reduceOnly': True}
-            )
-            
-            print(f"✅ [SUCCESS] 已开仓: {entry_price}, 止盈: {tp_price}, 止损: {sl_price}")
-            self.is_position_open = True
-            
-            return entry_price
-        except Exception as e:
-            print(f"❌ [ERROR] 下单失败: {e}")
-            return None
+            # 非线性风险衰减惩罚
+            # 当预测波动率 > 6% 或 交易所价差 > 0.15% 时，仓位指数级塌缩
+            penalty = np.exp(-(vols[s]/0.06)**2) * np.exp(-(arb_deltas[s]/0.0015)**2)
+            individual_k.append(k_f * penalty)
+        
+        # 风险平减优化 (Minimize Variance)
+        cov_matrix = np.cov(returns_matrix)
+        def port_var(w): return np.dot(w.T, np.dot(cov_matrix, w))
+        
+        cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - min(np.sum(individual_k), 0.5)})
+        res = minimize(port_var, x0=np.array(individual_k), bounds=[(0, k) for k in individual_k], constraints=cons)
+        return dict(zip(symbols, res.x if res.success else individual_k))
 
-# ==================== 进化型执行引擎 (The Live Engine) ====================
-class LiveTradingSystem:
+# ==================== 2. 引擎：全局容器 ====================
+class TradingSystem:
     def __init__(self, symbols):
         self.symbols = symbols
-        # 初始化交易所对象 (此处填入你的 API Key)
-        self.binance = ccxt.binance({
-            'apiKey': 'YOUR_API_KEY',
-            'secret': 'YOUR_SECRET',
-            'enableRateLimit': True,
-            'options': {'defaultType': 'future'} # 使用期货市场
-        })
+        # 初始化异步交易所连接
         self.exchanges = {
-            'binance': self.binance,
-            'okx': ccxt.okx(),
-            'bybit': ccxt.bybit()
+            'binance': ccxt.binance({'enableRateLimit': True}),
+            'okx': ccxt.okx({'enableRateLimit': True}),
+            'bybit': ccxt.bybit({'enableRateLimit': True})
         }
-        
-        # 为每个币种初始化执行器
-        self.executors = {s: AutomatedExecutor(self.binance, s) for s in symbols}
-        
-        self.data_history = {s: deque(maxlen=60) for s in symbols}
-        self.parent_conn, self.child_conn = mp.Pipe()
-        
-        # 启动“超级大脑”子进程 (代码参考前一轮)
-        self.brain_proc = mp.Process(target=quantum_brain_kernel, args=(self.child_conn, symbols), daemon=True)
-        self.brain_proc.start()
+        self.history = {s: deque(maxlen=60) for s in symbols}
+        self.memory = {s: {"wins": 10, "losses": 10, "w_total": 0.2, "l_total": 0.1} for s in symbols}
+        self.weights = {s: 0.0 for s in symbols}
 
-    async def run_loop(self):
-        print("🛰️ 系统进入实盘监控模式...")
+    async def fetch_global_data(self):
+        """并发抓取上帝视角数据：Binance vs OKX vs Bybit"""
+        tasks = []
+        for ex in self.exchanges.values():
+            for s in self.symbols:
+                tasks.append(ex.fetch_ticker(s))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        arb_data = {s: {} for s in self.symbols}
+        for i, (ex_name, ex) in enumerate(self.exchanges.items()):
+            for j, s in enumerate(self.symbols):
+                idx = i * len(self.symbols) + j
+                ticker = results[idx]
+                if not isinstance(ticker, Exception) and ticker:
+                    price = ticker['last']
+                    arb_data[s][ex_name] = price
+                    if ex_name == 'binance': self.history[s].append(price)
+        return arb_data
+
+    async def close(self):
+        for ex in self.exchanges.values():
+            await ex.close()
+
+# ==================== 3. 界面：Streamlit 终极终端 ====================
+st.set_page_config(page_title="GOD-EYE QUANTUM", layout="wide")
+
+# 使用 session_state 持久化系统实例，防止变量定义错误 (NameError)
+if 'sys' not in st.session_state:
+    st.session_state.sys = TradingSystem(["BTC/USDT", "ETH/USDT"])
+
+sys = st.session_state.sys
+st.title("👁️ QUANTUM V100: GOD-EYE VIEW")
+
+if st.sidebar.button("清理并重启系统"):
+    asyncio.run(sys.close())
+    del st.session_state.sys
+    st.rerun()
+
+placeholder = st.empty()
+
+async def live_loop():
+    """实时主循环：异步驱动"""
+    while True:
         try:
-            while True:
-                # 1. 并发抓取上帝视角数据
-                tasks = []
-                for ex_id, ex in self.exchanges.items():
-                    for s in self.symbols:
-                        tasks.append(self.fetch_ticker(ex, ex_id, s))
+            # 1. 获取上帝视角数据
+            arb_data = await sys.fetch_global_data()
+            
+            # 2. 核心大脑计算
+            vols, deltas, returns_matrix = {}, {}, []
+            for s in sys.symbols:
+                prices = list(sys.history[s])
+                if len(prices) < 30: continue
                 
-                results = await asyncio.gather(*tasks)
+                rets = np.diff(np.log(np.array(prices) + 1e-9))
+                returns_matrix.append(rets)
+                vols[s] = QuantumBrain.predict_garch_vol(rets)
                 
-                # 2. 整理数据并发送给大脑
-                arb_data = {s: {} for s in self.symbols}
-                for ex_id, s, price in results:
-                    if price:
-                        arb_data[s][ex_id] = price
-                        if ex_id == 'binance': self.data_history[s].append(price)
+                # 计算跨交易所偏离度 (Spread Delta)
+                p_list = list(arb_data[s].values())
+                deltas[s] = np.std(p_list) / np.mean(p_list) if len(p_list) > 1 else 0
 
-                self.parent_conn.send({
-                    'type': 'DATA',
-                    'data': {s: list(self.data_history[s]) for s in self.symbols},
-                    'arb_data': arb_data
-                })
+            if len(returns_matrix) == len(sys.symbols):
+                sys.weights = QuantumBrain.optimize_portfolio(sys.symbols, returns_matrix, vols, deltas, sys.memory)
 
-                # 3. 接收大脑指令
-                if self.parent_conn.poll():
-                    res = self.parent_conn.recv()
-                    weights = res.get('weights', {})
-                    is_panic = res.get('is_panic', False)
+            # 3. 渲染 UI
+            with placeholder.container():
+                cols = st.columns(len(sys.symbols))
+                for i, s in enumerate(sys.symbols):
+                    with cols[i]:
+                        st.metric(s, f"${sys.history[s][-1]:,.2f}", f"Delta: {deltas.get(s,0)*100:.4f}%")
+                        st.write(f"建议仓位: {sys.weights[s]*100:.2f}%")
+                        st.progress(min(sys.weights[s]/0.5, 1.0))
+            
+            await asyncio.sleep(1) # 避开 API 限制
+        except Exception as e:
+            st.error(f"运行中发生异常: {e}")
+            break
 
-                    if not is_panic:
-                        for s in self.symbols:
-                            w = weights.get(s, 0)
-                            # 如果大脑给出强共识 (权重 > 10%) 且当前无持仓
-                            if w > 0.1 and not self.executors[s].is_position_open:
-                                current_p = self.data_history[s][-1]
-                                # 触发自动化下单
-                                entry = await self.executors[s].execute_trade(w, current_p)
-                                # 触发反馈循环：下单成功后发回给大脑学习
-                                if entry:
-                                    self.parent_conn.send({'type': 'FEEDBACK', 'symbol': s, 'profit': 0.01}) # 预设一个小正向反馈
-
-                await asyncio.sleep(1)
-        finally:
-            await self.binance.close()
-
-    async def fetch_ticker(self, exchange, ex_id, symbol):
-        try:
-            ticker = await exchange.fetch_ticker(symbol)
-            return ex_id, symbol, ticker['last']
-        except: return ex_id, symbol, None
-
-# ==================== 运行实盘 ====================
-if __name__ == "__main__":
-    # 填入你想要交易的对
-    system = LiveTradingSystem(["BTC/USDT", "ETH/USDT"])
-    asyncio.run(system.run_loop())
+# 启动异步循环
+if 'loop_started' not in st.session_state:
+    st.session_state.loop_started = True
+    asyncio.run(live_loop())
