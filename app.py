@@ -1,167 +1,142 @@
 import asyncio
 import multiprocessing as mp
-import os
 import time
 import numpy as np
-import pandas as pd
-import streamlit as st
-import plotly.graph_objects as go
 import ccxt.async_support as ccxt
-import structlog
-from collections import deque
-from scipy.optimize import minimize
+from arch import arch_model
 
-# --- 极致日志系统 ---
-log = structlog.get_logger()
+# ==================== 自动化执行模块 (The Executor) ====================
+class AutomatedExecutor:
+    def __init__(self, exchange, symbol, leverage=5):
+        self.exchange = exchange
+        self.symbol = symbol
+        self.leverage = leverage
+        self.is_position_open = False
+        self.last_order_id = None
 
-# ==================== AI & 风险平减 & 断路器内核 (计算进程) ====================
-def quantum_brain_kernel(pipe_conn, symbols, vol_threshold=0.05):
-    """
-    大脑内核：负责 AI 推理、风险平减及【黑天鹅探测】
-    vol_threshold: 全局波动率阈值，超过此值触发断路
-    """
-    # 历史表现缓存
-    stats = {s: {"w": 10, "l": 8, "w_sum": 0.2, "l_sum": 0.1} for s in symbols}
-    
-    while True:
-        if pipe_conn.poll():
-            payload = pipe_conn.recv()
-            data_map = payload['data']
-            
-            # 1. 计算全局市场波动率 (Systemic Risk)
-            market_returns = []
-            for s in symbols:
-                prices = np.array(data_map[s])
-                rets = np.diff(np.log(prices))
-                market_returns.append(rets)
-            
-            # 计算组合波动率 (Standard Deviation of Portfolio Returns)
-            systemic_vol = np.std(np.mean(market_returns, axis=0))
-            
-            # --- 黑天鹅判定逻辑 ---
-            is_black_swan = systemic_vol > vol_threshold
-            
-            if is_black_swan:
-                # 触发断路器：所有权重归零，发送强制平仓信号
-                pipe_conn.send({
-                    "weights": {s: 0.0 for s in symbols},
-                    "is_panic": True,
-                    "reason": f"Systemic Volatility ({systemic_vol:.4f}) exceeded threshold ({vol_threshold})"
-                })
-                continue
+    async def execute_trade(self, weight, current_price):
+        """
+        核心逻辑：根据权重下单，并附带 TP/SL
+        weight: 建议仓位比例 (0.0 - 1.0)
+        """
+        if weight <= 0.01: # 权重太小不操作
+            return
 
-            # 2. 正常逻辑：贝叶斯凯利 + 风险平减 (Risk Parity)
-            individual_weights = {}
-            for i, s in enumerate(symbols):
-                prices = np.array(data_map[s])
-                p = (stats[s]["w"] + 1) / (stats[s]["w"] + stats[s]["l"] + 2)
-                b = (stats[s]["w_sum"] / stats[s]["w"]) / (stats[s]["l_sum"] / stats[s]["l"])
-                k_f = max(0, (p * b - (1 - p)) / b) * 0.15 # 激进凯利压缩
-                
-                vol = np.std(market_returns[i])
-                signal = np.tanh((prices[-1] - np.mean(prices)) / (vol * prices[-1] * 10))
-                individual_weights[s] = k_f * abs(signal)
+        # 1. 计算下单量 (这里假设账户余额，实际需从 exchange.fetch_balance 获取)
+        # 简单演示：固定假设可用 1000 USDT
+        available_balance = 1000 
+        order_quantity = (available_balance * weight * self.leverage) / current_price
 
-            # 3. 组合优化 (Minimize Variance)
-            n = len(symbols)
-            corr_matrix = np.corrcoef(market_returns)
-            def obj_func(w): return np.dot(w.T, np.dot(corr_matrix, w))
-            
-            cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - min(np.sum(list(individual_weights.values())), 0.4)})
-            bounds = [(0, v) for v in individual_weights.values()]
-            opt_res = minimize(obj_func, x0=np.array(list(individual_weights.values())), 
-                              bounds=bounds, constraints=cons)
-            
-            final_weights = dict(zip(symbols, opt_res.x if opt_res.success else list(individual_weights.values())))
-            
-            pipe_conn.send({"weights": final_weights, "is_panic": False, "systemic_vol": systemic_vol})
-            
-        time.sleep(0.05)
+        print(f"🚀 [EXECUTION] 触发共识下单: {self.symbol} | 权重: {weight:.2%}")
 
-# ==================== 执行引擎 (IO 与 紧急熔断) ====================
-class QuantumEngineV100:
-    def __init__(self, symbols, api_key="", api_secret=""):
+        try:
+            # 2. 设置杠杆 (针对永续合约)
+            # await self.exchange.set_leverage(self.leverage, self.symbol)
+
+            # 3. 市价开仓 (Market Buy)
+            order = await self.exchange.create_market_buy_order(self.symbol, order_quantity)
+            entry_price = order['price'] if order['price'] else current_price
+            
+            # 4. 自动计算 TP/SL (例如：2% 止盈, 1% 止损)
+            tp_price = entry_price * 1.02
+            sl_price = entry_price * 0.99
+            
+            # 5. 异步挂止损单 (Reduce Only)
+            await self.exchange.create_order(
+                self.symbol, 'stop', 'sell', order_quantity, sl_price, 
+                params={'stopPrice': sl_price, 'reduceOnly': True}
+            )
+            
+            print(f"✅ [SUCCESS] 已开仓: {entry_price}, 止盈: {tp_price}, 止损: {sl_price}")
+            self.is_position_open = True
+            
+            return entry_price
+        except Exception as e:
+            print(f"❌ [ERROR] 下单失败: {e}")
+            return None
+
+# ==================== 进化型执行引擎 (The Live Engine) ====================
+class LiveTradingSystem:
+    def __init__(self, symbols):
         self.symbols = symbols
-        self.data_history = {s: deque(maxlen=100) for s in symbols}
-        self.current_weights = {s: 0.0 for s in symbols}
-        self.is_panic_mode = False
-        self.panic_reason = ""
+        # 初始化交易所对象 (此处填入你的 API Key)
+        self.binance = ccxt.binance({
+            'apiKey': 'YOUR_API_KEY',
+            'secret': 'YOUR_SECRET',
+            'enableRateLimit': True,
+            'options': {'defaultType': 'future'} # 使用期货市场
+        })
+        self.exchanges = {
+            'binance': self.binance,
+            'okx': ccxt.okx(),
+            'bybit': ccxt.bybit()
+        }
         
+        # 为每个币种初始化执行器
+        self.executors = {s: AutomatedExecutor(self.binance, s) for s in symbols}
+        
+        self.data_history = {s: deque(maxlen=60) for s in symbols}
         self.parent_conn, self.child_conn = mp.Pipe()
-        self.proc = mp.Process(target=quantum_brain_kernel, args=(self.child_conn, symbols), daemon=True)
-        self.proc.start()
-
-    async def emergency_liquidate(self):
-        """
-        极致平仓逻辑：取消所有挂单并市价平仓
-        """
-        log.critical("🚨 触发黑天鹅熔断！强制撤单平仓中...")
-        # 此处接入真实 CCXT 逻辑:
-        # await asyncio.gather(*[self.exchange.cancel_all_orders(s) for s in self.symbols])
-        # await asyncio.gather(*[self.exchange.create_market_sell_order(s, amount) for s in positions])
-        self.is_panic_mode = True
-
-    async def update(self):
-        # 采集数据
-        for s in self.symbols:
-            # 模拟黑天鹅：1% 概率出现极端波动
-            mu = 0 if not self.is_panic_mode else -50
-            sigma = 10 if not self.is_panic_mode else 500
-            self.data_history[s].append(np.random.normal(60000 if "BTC" in s else 2500, sigma) + mu)
         
-        self.parent_conn.send({'data': {s: list(self.data_history[s]) for s in self.symbols}})
-        
-        if self.parent_conn.poll():
-            res = self.parent_conn.recv()
-            if res.get('is_panic'):
-                self.panic_reason = res.get('reason')
-                if not self.is_panic_mode:
-                    await self.emergency_liquidate()
-            else:
-                self.current_weights = res['weights']
-                self.is_panic_mode = False
+        # 启动“超级大脑”子进程 (代码参考前一轮)
+        self.brain_proc = mp.Process(target=quantum_brain_kernel, args=(self.child_conn, symbols), daemon=True)
+        self.brain_proc.start()
 
-# ==================== Streamlit 极简 UI ====================
-def main():
-    st.set_page_config(page_title="QUANTUM V100 EXTREME", layout="wide")
-    
-    # 状态持久化
-    if 'engine' not in st.session_state:
-        st.session_state.engine = QuantumEngineV100(["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"])
+    async def run_loop(self):
+        print("🛰️ 系统进入实盘监控模式...")
+        try:
+            while True:
+                # 1. 并发抓取上帝视角数据
+                tasks = []
+                for ex_id, ex in self.exchanges.items():
+                    for s in self.symbols:
+                        tasks.append(self.fetch_ticker(ex, ex_id, s))
+                
+                results = await asyncio.gather(*tasks)
+                
+                # 2. 整理数据并发送给大脑
+                arb_data = {s: {} for s in self.symbols}
+                for ex_id, s, price in results:
+                    if price:
+                        arb_data[s][ex_id] = price
+                        if ex_id == 'binance': self.data_history[s].append(price)
 
-    engine = st.session_state.engine
+                self.parent_conn.send({
+                    'type': 'DATA',
+                    'data': {s: list(self.data_history[s]) for s in self.symbols},
+                    'arb_data': arb_data
+                })
 
-    # --- UI 顶部栏 ---
-    if engine.is_panic_mode:
-        st.error(f"☢️ BLACK SWAN CIRCUIT BREAKER ACTIVE: {engine.panic_reason}")
-        if st.button("RESET SYSTEM"): engine.is_panic_mode = False
-    else:
-        st.success("🛡️ SYSTEM SECURITY: NOMINAL")
+                # 3. 接收大脑指令
+                if self.parent_conn.poll():
+                    res = self.parent_conn.recv()
+                    weights = res.get('weights', {})
+                    is_panic = res.get('is_panic', False)
 
-    cols = st.columns(len(engine.symbols))
-    chart_p = st.empty()
+                    if not is_panic:
+                        for s in self.symbols:
+                            w = weights.get(s, 0)
+                            # 如果大脑给出强共识 (权重 > 10%) 且当前无持仓
+                            if w > 0.1 and not self.executors[s].is_position_open:
+                                current_p = self.data_history[s][-1]
+                                # 触发自动化下单
+                                entry = await self.executors[s].execute_trade(w, current_p)
+                                # 触发反馈循环：下单成功后发回给大脑学习
+                                if entry:
+                                    self.parent_conn.send({'type': 'FEEDBACK', 'symbol': s, 'profit': 0.01}) # 预设一个小正向反馈
 
-    async def run_loop():
-        while True:
-            await engine.update()
-            for i, s in enumerate(engine.symbols):
-                with cols[i]:
-                    st.metric(s, f"${engine.data_history[s][-1]:,.2f}", 
-                              delta=f"POS: {engine.current_weights.get(s, 0)*100:.2f}%")
-            
-            # 绘图逻辑
-            fig = go.Figure()
-            for s in engine.symbols:
-                fig.add_trace(go.Scatter(y=list(engine.data_history[s]), name=s))
-            fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,t=0,b=0))
-            chart_p.plotly_chart(fig, use_container_width=True)
-            
-            await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
+        finally:
+            await self.binance.close()
 
-    try:
-        asyncio.run(run_loop())
-    except Exception as e:
-        log.error("Loop Error", err=e)
+    async def fetch_ticker(self, exchange, ex_id, symbol):
+        try:
+            ticker = await exchange.fetch_ticker(symbol)
+            return ex_id, symbol, ticker['last']
+        except: return ex_id, symbol, None
 
+# ==================== 运行实盘 ====================
 if __name__ == "__main__":
-    main()
+    # 填入你想要交易的对
+    system = LiveTradingSystem(["BTC/USDT", "ETH/USDT"])
+    asyncio.run(system.run_loop())
