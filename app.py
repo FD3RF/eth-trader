@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 修复重复ID)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 修复UI细节)
 ===================================================
 核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
@@ -1765,14 +1765,18 @@ class UIRenderer:
             st.subheader("实盘")
             exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()), key='exchange_choice')
 
-            # 使用列布局使 API Key 和 Secret Key 更紧凑
-            col_api1, col_api2 = st.columns([1, 3])
-            col_api1.write("API Key")
-            api_key = col_api2.text_input("", value=st.session_state.binance_api_key, type="password", label_visibility="collapsed", key="api_key_input")
+            # 使用列布局使 API Key 和 Secret Key 更紧凑，避免换行
+            col_api_label, col_api_input = st.columns([1, 2])
+            with col_api_label:
+                st.write("**API Key**")
+            with col_api_input:
+                api_key = st.text_input("", value=st.session_state.binance_api_key, type="password", label_visibility="collapsed", key="api_key_input")
 
-            col_secret1, col_secret2 = st.columns([1, 3])
-            col_secret1.write("Secret Key")
-            secret_key = col_secret2.text_input("", value=st.session_state.binance_secret_key, type="password", label_visibility="collapsed", key="secret_key_input")
+            col_secret_label, col_secret_input = st.columns([1, 2])
+            with col_secret_label:
+                st.write("**Secret Key**")
+            with col_secret_input:
+                secret_key = st.text_input("", value=st.session_state.binance_secret_key, type="password", label_visibility="collapsed", key="secret_key_input")
 
             passphrase = st.text_input("Passphrase (仅OKX需要)", type="password", key="passphrase_input") if "OKX" in exchange_choice else None
             testnet = st.checkbox("测试网", value=st.session_state.testnet, key="testnet_checkbox")
