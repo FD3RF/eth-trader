@@ -997,7 +997,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
     np.random.seed(seed)
     end = datetime.now()
     timestamps = pd.date_range(end=end, periods=limit, freq='15min')
-    
+
     if 'BTC' in symbol:
         base = 40000
         volatility = CONFIG.sim_volatility * 0.6
@@ -1010,7 +1010,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
         base = 100
         volatility = CONFIG.sim_volatility * 1.2
         trend_factor = 0.2
-    
+
     t = np.linspace(0, 6*np.pi, limit)
     trend_direction = np.random.choice([-1, 1], p=[0.3, 0.7])
     trend = trend_direction * CONFIG.sim_trend_strength * np.linspace(0, 1, limit) * base * trend_factor
@@ -1021,7 +1021,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
     random_walk = np.cumsum(random_step) * 0.15
     price_series = base + trend + cycle1 + cycle2 + cycle3 + random_walk
     price_series = np.maximum(price_series, base * 0.3)
-    
+
     opens = price_series * (1 + np.random.randn(limit) * 0.0015)
     closes = price_series * (1 + np.random.randn(limit) * 0.0025)
     highs = np.maximum(opens, closes) + np.abs(np.random.randn(limit)) * volatility * price_series * 0.5
@@ -1029,7 +1029,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
     volume_base = np.random.randint(800, 8000, limit)
     volume_factor = 1 + 3 * np.abs(np.diff(price_series, prepend=price_series[0])) / price_series
     volumes = (volume_base * volume_factor).astype(int)
-    
+
     df_15m = pd.DataFrame({
         'timestamp': timestamps,
         'open': opens,
@@ -1039,7 +1039,7 @@ def generate_simulated_data(symbol: str, limit: int = 2000) -> Dict[str, pd.Data
         'volume': volumes
     })
     df_15m = add_indicators(df_15m)
-    
+
     data_dict = {'15m': df_15m}
     for tf in ['1m', '5m', '1h', '4h', '1d']:
         resampled = df_15m.resample(tf, on='timestamp').agg({
