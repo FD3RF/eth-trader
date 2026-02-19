@@ -6,6 +6,7 @@ ta
 cachetools
 dependency-injector
 plotly
+prometheus-client
 pydantic
 pydantic-settings
 scipy
@@ -17,3 +18,4 @@ aiocsv
 tenacity
 pyyaml
 altair
+streamlit-autorefresh
