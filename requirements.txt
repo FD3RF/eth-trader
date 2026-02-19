@@ -1,21 +1,23 @@
-streamlit
-pandas
-numpy
-ccxt
-ta
+aiofiles
+aiohttp
 cachetools
+ccxt
 dependency-injector
+gymnasium          # 可选
+hmmlearn           # 可选
+joblib
+numpy
+pandas
 plotly
-prometheus-client
+prometheus_client
 pydantic
 pydantic-settings
-scipy
-scikit-learn
-structlog
-aiohttp
-aiofiles
-aiocsv
-tenacity
 pyyaml
-altair
+scikit-learn
+scipy
+stable-baselines3  # 可选
+streamlit
 streamlit-autorefresh
+structlog
+ta
+tenacity
