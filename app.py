@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 仪表盘优化)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 界面微调)
 ===================================================
 核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
@@ -1764,8 +1764,16 @@ class UIRenderer:
             st.markdown("---")
             st.subheader("实盘")
             exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()), key='exchange_choice')
-            api_key = st.text_input("API Key", value=st.session_state.binance_api_key, type="password")
-            secret_key = st.text_input("Secret Key", value=st.session_state.binance_secret_key, type="password")
+
+            # 使用列布局使 API Key 和 Secret Key 更紧凑
+            col_api1, col_api2 = st.columns([1, 3])
+            col_api1.write("API Key")
+            api_key = col_api2.text_input("", value=st.session_state.binance_api_key, type="password", label_visibility="collapsed")
+
+            col_secret1, col_secret2 = st.columns([1, 3])
+            col_secret1.write("Secret Key")
+            secret_key = col_secret2.text_input("", value=st.session_state.binance_secret_key, type="password", label_visibility="collapsed")
+
             passphrase = st.text_input("Passphrase (仅OKX需要)", type="password") if "OKX" in exchange_choice else None
             testnet = st.checkbox("测试网", value=st.session_state.testnet)
             use_real = st.checkbox("实盘交易", value=st.session_state.use_real)
@@ -2001,8 +2009,9 @@ class UIRenderer:
             c2.metric("信号概率", f"{prob_first:.1%}")
             c3.metric("当前价格", f"{multi_data[first_sym]['current_price']:.2f}")
 
-            for sym in symbols:
-                st.write(f"{sym}: {multi_data[sym]['current_price']:.2f}")
+            # 显示所有品种价格（仅一行，避免重复）
+            price_lines = " | ".join([f"{sym}: {multi_data[sym]['current_price']:.2f}" for sym in symbols])
+            st.caption(price_lines)
 
             # 持仓显示（改用DataFrame，紧凑）
             if st.session_state.positions:
