@@ -78,7 +78,7 @@ with col_right:
     log_ph = st.empty()
 
 # ==========================================
-# 🔄 4. 完美刷新引擎（彻底解决所有红框报错）
+# 🔄 4. 核心刷新引擎（解决 ID 冲突与缩进报错）
 # ==========================================
 async def update_terminal():
     symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ARB/USDT"]
@@ -100,7 +100,7 @@ async def update_terminal():
             lt_ph.metric("系统延迟", f"{int(latency)}ms")
             st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
 
-            # C. 渲染热力图（容器刷新模式，解决缩进报错）
+            # C. 渲染热力图（容器刷新模式，彻底避开 IndentationError）
             fig = px.imshow(
                 df_corr, text_auto=".2f",
                 color_continuous_scale='RdBu_r', range_color=[-1, 1],
@@ -108,7 +108,8 @@ async def update_terminal():
             )
             fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=450)
             
-            # 关键：动态 Key + 扁平化调用，彻底避开 IndentationError
+            # 关键：动态 Key 解决 DuplicateElementKey 冲突
+            # 扁平化调用 matrix_ph 确保缩进绝对安全
             matrix_ph.plotly_chart(
                 fig, 
                 key=f"hmap_{int(time.time()*1000)}", 
