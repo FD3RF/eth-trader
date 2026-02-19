@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 修复UI细节)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版)
 ===================================================
 核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
@@ -1765,7 +1765,7 @@ class UIRenderer:
             st.subheader("实盘")
             exchange_choice = st.selectbox("交易所", list(CONFIG.exchanges.keys()), key='exchange_choice')
 
-            # 使用列布局使 API Key 和 Secret Key 更紧凑，避免换行
+            # API Key 和 Secret Key 紧凑布局
             col_api_label, col_api_input = st.columns([1, 2])
             with col_api_label:
                 st.write("**API Key**")
