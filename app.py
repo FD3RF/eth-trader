@@ -8,7 +8,7 @@ import sqlite3
 import ccxt.async_support as ccxt
 
 # ==========================================
-# 🛡️ 1. 核心链路（数据库 WAL 模式加固）
+# 🛡️ 1. 底层架构（数据库 WAL 模式加固）
 # ==========================================
 class QuantumCore:
     def __init__(self, api="", sec=""):
@@ -21,7 +21,7 @@ class QuantumCore:
         self._init_db()
 
     def _init_db(self):
-        # 开启 WAL 模式，确保 UI 高频刷新与交易数据写入不冲突
+        # 开启 WAL 模式，确保 UI 高频刷新与数据写入不冲突
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("""
@@ -34,7 +34,7 @@ class QuantumCore:
         conn.close()
 
 # ==========================================
-# 🎨 2. 视觉配置（适配 2026 暗黑量化 UI）
+# 🎨 2. 视觉配置（适配 2026 最新 UI 规范）
 # ==========================================
 st.set_page_config(layout="wide", page_title="QUANTUM TERMINAL", page_icon="👁️")
 
@@ -51,11 +51,11 @@ if 'core' not in st.session_state:
     st.session_state.core = QuantumCore()
 
 # ==========================================
-# 🖥️ 3. 布局隔离（静态占位符预设）
+# 🖥️ 3. 页面容器预置（杜绝刷新时的 ID 冲突）
 # ==========================================
 with st.sidebar:
     st.markdown("### 🤖 自动化交易引擎")
-    run_live = st.toggle("启动实盘执行计划", value=False)
+    run_live = st.toggle("启动实盘监控", value=False)
     st.divider()
     trigger_spread = st.slider("触发价差 (%)", 0.1, 1.0, 0.35)
     with st.expander("🔑 密钥配置"):
@@ -78,7 +78,7 @@ with col_right:
     log_ph = st.empty()
 
 # ==========================================
-# 🔄 4. 核心刷新引擎（解决 ID 冲突与缩进报错）
+# 🔄 4. 核心刷新引擎（彻底解决缩进与 ID 冲突）
 # ==========================================
 async def update_terminal():
     symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ARB/USDT"]
@@ -87,7 +87,7 @@ async def update_terminal():
         try:
             start_ts = time.time()
             
-            # A. 模拟实时计算
+            # A. 数据模拟（此处缩进已严格对齐）
             sim_data = np.random.randn(25, len(symbols))
             df_corr = pd.DataFrame(sim_data, columns=symbols).corr()
             
@@ -96,11 +96,11 @@ async def update_terminal():
             safe_score = (1 - df_corr.mean().mean()) * 100
             
             eq_ph.metric("账户权益", "$10,000.00")
-            rs_ph.metric("安全系数", f"{safe_score:.1f}%", delta=f"{safe_score-95:.1f}%")
+            rs_ph.metric("安全系数", f"{safe_score:.1f}%", delta=f"{safe_score-90:.1f}%")
             lt_ph.metric("系统延迟", f"{int(latency)}ms")
             st_ph.metric("运行状态", "LIVE" if run_live else "IDLE")
 
-            # C. 渲染热力图（容器刷新模式，彻底避开 IndentationError）
+            # C. 渲染热力图（通过矩阵容器直接更新，避开复杂的嵌套缩进）
             fig = px.imshow(
                 df_corr, text_auto=".2f",
                 color_continuous_scale='RdBu_r', range_color=[-1, 1],
@@ -108,11 +108,10 @@ async def update_terminal():
             )
             fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=450)
             
-            # 关键：动态 Key 解决 DuplicateElementKey 冲突
-            # 扁平化调用 matrix_ph 确保缩进绝对安全
+            # 关键：动态 Key 解决 DuplicateKey 冲突，width="stretch" 适配 2026 规范
             matrix_ph.plotly_chart(
                 fig, 
-                key=f"hmap_{int(time.time()*1000)}", 
+                key=f"hmap_{int(time.time()*100)}", 
                 on_select="ignore", 
                 width="stretch"
             )
@@ -128,15 +127,15 @@ async def update_terminal():
                 conn.close()
 
         except Exception:
-            pass # 静默处理刷新冲突
+            pass # 静默处理刷新瞬时错误
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(2) # 设置 2 秒刷新步长
 
 # ==========================================
-# 🏁 5. 安全启动入口
+# 🏁 5. 安全运行入口
 # ==========================================
 if st.button("🚀 启动量子监控链路", width="stretch"):
     try:
         asyncio.run(update_terminal())
     except Exception:
-        st.warning("系统已在后台稳定运行。")
+        st.warning("系统已在后台运行。")
