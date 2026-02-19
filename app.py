@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 仪表盘优化)
 ===================================================
 核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
@@ -1981,6 +1981,7 @@ class UIRenderer:
         risk_budget_total = st.session_state.account_balance * CONFIG.daily_risk_budget_ratio
         risk_budget_remaining = max(0, risk_budget_total - st.session_state.daily_risk_consumed)
 
+        # 左右两列布局
         col1, col2 = st.columns([1, 1.5])
         with col1:
             st.markdown("### 📊 市场状态")
@@ -1994,6 +1995,7 @@ class UIRenderer:
             for sym in symbols:
                 st.write(f"{sym}: {multi_data[sym]['current_price']:.2f}")
 
+            # 持仓显示（改用DataFrame，紧凑）
             if st.session_state.positions:
                 st.markdown("### 📈 当前持仓")
                 pos_list = []
@@ -2001,48 +2003,55 @@ class UIRenderer:
                     current = multi_data[sym]['current_price']
                     pnl = pos.pnl(current)
                     pnl_pct = (current - pos.entry_price) / pos.entry_price * 100 * pos.direction
-                    pos_list.append((sym, pos, pnl, pnl_pct))
-                pos_list.sort(key=lambda x: x[3], reverse=True)
-                for sym, pos, pnl, pnl_pct in pos_list:
-                    color = "green" if pnl > 0 else "red"
                     hold_hours = (datetime.now() - pos.entry_time).total_seconds() / 3600
-                    st.markdown(
-                        f"<span style='color:{color}'>{sym}: {'多' if pos.direction==1 else '空'} 入场 {pos.entry_price:.2f} 数量 {pos.size:.4f} "
-                        f"浮动盈亏 {pnl:.2f} ({pnl_pct:+.2f}%) 持仓时长 {hold_hours:.1f}h "
-                        f"止损 {pos.stop_loss:.2f} 止盈 {pos.take_profit:.2f}</span>",
-                        unsafe_allow_html=True
-                    )
+                    pos_list.append({
+                        "品种": sym,
+                        "方向": "多" if pos.direction==1 else "空",
+                        "入场价": f"{pos.entry_price:.2f}",
+                        "数量": f"{pos.size:.4f}",
+                        "浮动盈亏": f"{pnl:.2f} ({pnl_pct:+.2f}%)",
+                        "持仓时长": f"{hold_hours:.1f}h",
+                        "止损": f"{pos.stop_loss:.2f}",
+                        "止盈": f"{pos.take_profit:.2f}"
+                    })
+                st.dataframe(pd.DataFrame(pos_list), height=200, use_container_width=True)
             else:
                 st.markdown("### 无持仓")
                 st.info("等待信号...")
 
             st.markdown("### 📉 风险监控")
-            st.metric("实时盈亏", f"{st.session_state.daily_pnl + total_floating:.2f} USDT")
-            st.metric("当前回撤", f"{current_dd:.2f}%")
-            st.metric("最大回撤", f"{max_dd:.2f}%")
-            st.metric("连亏次数", st.session_state.consecutive_losses)
-            st.metric("今日风险消耗", f"{st.session_state.daily_risk_consumed:.2f} / {risk_budget_total:.2f} USDT ({CONFIG.daily_risk_budget_ratio*100:.1f}%)")
-            st.metric("剩余风险预算", f"{risk_budget_remaining:.2f} USDT")
-            var_limit = get_dynamic_var_limit()
-            method_name = st.session_state.var_method
-            st.metric("组合VaR (95%)", f"{portfolio_var_value*100:.2f}% (上限 {var_limit:.1f}%) 方法: {method_name}")
-            st.metric("组合CVaR (95%)", f"{portfolio_cvar_value*100:.2f}%")
+            # 第一行4个指标
+            row1 = st.columns(4)
+            row1[0].metric("实时盈亏", f"{st.session_state.daily_pnl + total_floating:.2f} USDT")
+            row1[1].metric("当前回撤", f"{current_dd:.2f}%")
+            row1[2].metric("最大回撤", f"{max_dd:.2f}%")
+            row1[3].metric("连亏次数", st.session_state.consecutive_losses)
 
+            # 第二行4个指标
+            row2 = st.columns(4)
+            row2[0].metric("今日风险消耗", f"{st.session_state.daily_risk_consumed:.2f}")
+            row2[1].metric("剩余预算", f"{risk_budget_remaining:.2f} USDT")
+            row2[2].metric("组合VaR", f"{portfolio_var_value*100:.2f}%")
+            row2[3].metric("组合CVaR", f"{portfolio_cvar_value*100:.2f}%")
+
+            # 冷却和夜间提示
             if st.session_state.cooldown_until:
                 st.warning(f"冷却至 {st.session_state.cooldown_until.strftime('%H:%M')}")
-
             if is_night_time():
                 st.info("🌙 当前为美东夜间时段，风险预算已降低")
 
-            if st.session_state.regime_stats:
-                with st.expander("📈 市场状态统计"):
+            # 折叠面板（市场状态统计、实盘一致性、因子IC）
+            with st.expander("📈 市场状态统计"):
+                if st.session_state.regime_stats:
                     df_reg = pd.DataFrame(st.session_state.regime_stats).T
                     df_reg['胜率'] = df_reg['wins'] / df_reg['trades'] * 100
                     df_reg['平均盈亏'] = df_reg['total_pnl'] / df_reg['trades']
                     st.dataframe(df_reg[['trades', '胜率', '平均盈亏']].round(2))
+                else:
+                    st.info("暂无统计数据")
 
-            if st.session_state.consistency_stats:
-                with st.expander("🔄 实盘一致性"):
+            with st.expander("🔄 实盘一致性"):
+                if st.session_state.consistency_stats:
                     cons = st.session_state.consistency_stats
                     bt = cons.get('backtest', {})
                     lv = cons.get('live', {})
@@ -2053,16 +2062,21 @@ class UIRenderer:
                             st.warning("⚠️ 实盘滑点显著高于回测，请检查流动性或调整滑点模型")
                     else:
                         st.write("暂无足够实盘数据对比")
+                else:
+                    st.info("暂无一致性数据")
 
-            if st.session_state.factor_ic_stats:
-                with st.expander("📊 因子IC统计"):
+            with st.expander("📊 因子IC统计"):
+                if st.session_state.factor_ic_stats:
                     df_ic = pd.DataFrame(st.session_state.factor_ic_stats).T.round(4)
                     def highlight_p(val):
                         if val < 0.05:
                             return 'background-color: lightgreen'
                         return ''
                     st.dataframe(df_ic.style.applymap(highlight_p, subset=['p_value']))
+                else:
+                    st.info("暂无IC统计数据")
 
+            # 权益曲线
             if st.session_state.net_value_history and st.session_state.equity_curve:
                 hist_df = pd.DataFrame(st.session_state.net_value_history[-200:])
                 equity_df = pd.DataFrame(list(st.session_state.equity_curve)[-200:])
@@ -2073,6 +2087,7 @@ class UIRenderer:
                 st.plotly_chart(fig_nv, use_container_width=True)
 
         with col2:
+            # K线图
             df_plot = st.session_state.multi_df[first_sym]['15m'].tail(120).copy()
             if not df_plot.empty:
                 if not pd.api.types.is_datetime64_any_dtype(df_plot['timestamp']):
@@ -2085,7 +2100,7 @@ class UIRenderer:
                 st.warning("无图表数据")
                 return
 
-            fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5,0.15,0.15,0.2], vertical_spacing=0.02)
+            fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.4, 0.2, 0.2, 0.2], vertical_spacing=0.02)
             fig.add_trace(go.Candlestick(x=df_plot['timestamp'], open=df_plot['open'], high=df_plot['high'],
                                           low=df_plot['low'], close=df_plot['close']), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['ema20'], line=dict(color="orange")), row=1, col=1)
@@ -2103,7 +2118,7 @@ class UIRenderer:
             fig.add_bar(x=df_plot['timestamp'], y=df_plot['macd_diff'], marker_color="gray", row=3, col=1)
             colors_vol = np.where(df_plot['close'] >= df_plot['open'], 'green', 'red')
             fig.add_trace(go.Bar(x=df_plot['timestamp'], y=df_plot['volume'], marker_color=colors_vol), row=4, col=1)
-            fig.update_layout(height=800, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
+            fig.update_layout(height=500, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
 def main():
