@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 修复重复ID)
 ===================================================
 核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
@@ -2036,7 +2036,9 @@ class UIRenderer:
                         "止损": f"{pos.stop_loss:.2f}",
                         "止盈": f"{pos.take_profit:.2f}"
                     })
-                st.dataframe(pd.DataFrame(pos_list), height=200, use_container_width=True)
+                # 为表格添加动态key
+                df_pos = pd.DataFrame(pos_list)
+                st.dataframe(df_pos, height=200, use_container_width=True, key=f"pos_df_{int(time.time()*1000)}")
             else:
                 st.markdown("### 无持仓")
                 st.info("等待信号...")
@@ -2106,7 +2108,8 @@ class UIRenderer:
                 fig_nv.add_trace(go.Scatter(x=hist_df['time'], y=hist_df['value'], mode='lines', name='已平仓净值', line=dict(color='cyan')))
                 fig_nv.add_trace(go.Scatter(x=equity_df['time'], y=equity_df['equity'], mode='lines', name='当前权益', line=dict(color='yellow')))
                 fig_nv.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), template='plotly_dark')
-                st.plotly_chart(fig_nv, use_container_width=True)
+                # 为图表添加动态key
+                st.plotly_chart(fig_nv, use_container_width=True, key=f"nv_chart_{int(time.time()*1000)}")
 
         with col2:
             # K线图
@@ -2141,7 +2144,8 @@ class UIRenderer:
             colors_vol = np.where(df_plot['close'] >= df_plot['open'], 'green', 'red')
             fig.add_trace(go.Bar(x=df_plot['timestamp'], y=df_plot['volume'], marker_color=colors_vol), row=4, col=1)
             fig.update_layout(height=500, template="plotly_dark", hovermode="x unified", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            # 为图表添加动态key
+            st.plotly_chart(fig, use_container_width=True, key=f"kline_{int(time.time()*1000)}")
 
 def main():
     st.set_page_config(page_title="终极量化终端 · 职业版 48.1 (最终完美)", layout="wide")
