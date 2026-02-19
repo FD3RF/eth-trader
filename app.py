@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 界面微调)
+🚀 终极量化终端 · 职业版 48.1 (最终完美版 - 修复重复ID)
 ===================================================
 核心特性（100% 完美极限）：
 - 风险预算模型（每日风险消耗控制）
@@ -1733,7 +1733,7 @@ class UIRenderer:
             selected_symbols = st.multiselect("交易品种", CONFIG.symbols, default=['ETH/USDT', 'BTC/USDT'])
             st.session_state.current_symbols = selected_symbols
 
-            use_sim = st.checkbox("使用模拟数据（离线模式）", value=st.session_state.use_simulated_data)
+            use_sim = st.checkbox("使用模拟数据（离线模式）", value=st.session_state.use_simulated_data, key="use_sim_checkbox")
             if use_sim != st.session_state.use_simulated_data:
                 st.session_state.use_simulated_data = use_sim
                 st.cache_data.clear()
@@ -1752,7 +1752,7 @@ class UIRenderer:
 
             st.number_input("余额 USDT", value=st.session_state.account_balance, disabled=True)
 
-            if st.button("🔄 同步实盘余额"):
+            if st.button("🔄 同步实盘余额", key="sync_balance_button"):
                 if st.session_state.exchange and not st.session_state.use_simulated_data:
                     try:
                         bal = st.session_state.exchange.fetch_balance()
@@ -1768,17 +1768,17 @@ class UIRenderer:
             # 使用列布局使 API Key 和 Secret Key 更紧凑
             col_api1, col_api2 = st.columns([1, 3])
             col_api1.write("API Key")
-            api_key = col_api2.text_input("", value=st.session_state.binance_api_key, type="password", label_visibility="collapsed")
+            api_key = col_api2.text_input("", value=st.session_state.binance_api_key, type="password", label_visibility="collapsed", key="api_key_input")
 
             col_secret1, col_secret2 = st.columns([1, 3])
             col_secret1.write("Secret Key")
-            secret_key = col_secret2.text_input("", value=st.session_state.binance_secret_key, type="password", label_visibility="collapsed")
+            secret_key = col_secret2.text_input("", value=st.session_state.binance_secret_key, type="password", label_visibility="collapsed", key="secret_key_input")
 
-            passphrase = st.text_input("Passphrase (仅OKX需要)", type="password") if "OKX" in exchange_choice else None
-            testnet = st.checkbox("测试网", value=st.session_state.testnet)
-            use_real = st.checkbox("实盘交易", value=st.session_state.use_real)
+            passphrase = st.text_input("Passphrase (仅OKX需要)", type="password", key="passphrase_input") if "OKX" in exchange_choice else None
+            testnet = st.checkbox("测试网", value=st.session_state.testnet, key="testnet_checkbox")
+            use_real = st.checkbox("实盘交易", value=st.session_state.use_real, key="use_real_checkbox")
 
-            if st.button("🔌 测试连接"):
+            if st.button("🔌 测试连接", key="test_connection_button"):
                 try:
                     ex_class = CONFIG.exchanges[exchange_choice]
                     params = {
@@ -1802,28 +1802,28 @@ class UIRenderer:
                 except Exception as e:
                     st.error(f"连接失败: {e}")
 
-            st.session_state.auto_enabled = st.checkbox("自动交易", value=True)
-            st.session_state.aggressive_mode = st.checkbox("进攻模式 (允许更高风险)", value=False)
+            st.session_state.auto_enabled = st.checkbox("自动交易", value=True, key="auto_enabled_checkbox")
+            st.session_state.aggressive_mode = st.checkbox("进攻模式 (允许更高风险)", value=False, key="aggressive_mode_checkbox")
 
             with st.expander("📱 通知与工具"):
-                token = st.text_input("Bot Token", type="password")
-                chat_id = st.text_input("Chat ID")
+                token = st.text_input("Bot Token", type="password", key="telegram_token_input")
+                chat_id = st.text_input("Chat ID", key="telegram_chat_input")
                 if token and chat_id:
                     st.session_state.telegram_token = token
                     st.session_state.telegram_chat_id = chat_id
 
-                if st.button("📂 查看历史交易记录"):
+                if st.button("📂 查看历史交易记录", key="view_history_button"):
                     if os.path.exists(TRADE_LOG_FILE):
                         df_trades = pd.read_csv(TRADE_LOG_FILE)
                         st.dataframe(df_trades.tail(20))
                     else:
                         st.info("暂无历史交易记录")
 
-                if st.button("🔧 数据修复"):
+                if st.button("🔧 数据修复", key="fix_data_button"):
                     fix_data_consistency(st.session_state.current_symbols)
                     st.success("数据一致性已修复")
 
-                if st.button("📤 发送权益曲线"):
+                if st.button("📤 发送权益曲线", key="send_equity_button"):
                     fig = generate_equity_chart()
                     if fig:
                         send_telegram("当前权益曲线", image=fig)
@@ -1831,12 +1831,12 @@ class UIRenderer:
                     else:
                         st.warning("无权益数据")
 
-                if st.button("🗑️ 重置所有状态"):
+                if st.button("🗑️ 重置所有状态", key="reset_state_button"):
                     for key in list(st.session_state.keys()):
                         del st.session_state[key]
                     st.rerun()
 
-            if st.button("🚨 一键紧急平仓"):
+            if st.button("🚨 一键紧急平仓", key="emergency_close_button"):
                 for sym in list(st.session_state.positions.keys()):
                     if sym in st.session_state.symbol_current_prices:
                         close_position(sym, st.session_state.symbol_current_prices[sym], "紧急平仓")
