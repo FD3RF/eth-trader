@@ -1797,37 +1797,42 @@ class UIRenderer:
             st.session_state.auto_enabled = st.checkbox("自动交易", value=True)
             st.session_state.aggressive_mode = st.checkbox("进攻模式 (允许更高风险)", value=False)
 
-            with st.expander("📱 Telegram通知"):
+            with st.expander("📱 通知与工具"):
                 token = st.text_input("Bot Token", type="password")
                 chat_id = st.text_input("Chat ID")
                 if token and chat_id:
                     st.session_state.telegram_token = token
                     st.session_state.telegram_chat_id = chat_id
 
+                if st.button("📂 查看历史交易记录"):
+                    if os.path.exists(TRADE_LOG_FILE):
+                        df_trades = pd.read_csv(TRADE_LOG_FILE)
+                        st.dataframe(df_trades.tail(20))
+                    else:
+                        st.info("暂无历史交易记录")
+
+                if st.button("🔧 数据修复"):
+                    fix_data_consistency(st.session_state.current_symbols)
+                    st.success("数据一致性已修复")
+
+                if st.button("📤 发送权益曲线"):
+                    fig = generate_equity_chart()
+                    if fig:
+                        send_telegram("当前权益曲线", image=fig)
+                        st.success("权益曲线已发送")
+                    else:
+                        st.warning("无权益数据")
+
+                if st.button("🗑️ 重置所有状态"):
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    st.rerun()
+
             if st.button("🚨 一键紧急平仓"):
                 for sym in list(st.session_state.positions.keys()):
                     if sym in st.session_state.symbol_current_prices:
                         close_position(sym, st.session_state.symbol_current_prices[sym], "紧急平仓")
                 st.rerun()
-
-            if st.button("📂 查看历史交易记录"):
-                if os.path.exists(TRADE_LOG_FILE):
-                    df_trades = pd.read_csv(TRADE_LOG_FILE)
-                    st.dataframe(df_trades.tail(20))
-                else:
-                    st.info("暂无历史交易记录")
-
-            if st.button("🔧 数据修复"):
-                fix_data_consistency(st.session_state.current_symbols)
-                st.success("数据一致性已修复")
-
-            if st.button("📤 发送权益曲线"):
-                fig = generate_equity_chart()
-                if fig:
-                    send_telegram("当前权益曲线", image=fig)
-                    st.success("权益曲线已发送")
-                else:
-                    st.warning("无权益数据")
 
             if st.session_state.error_log:
                 with st.expander("⚠️ 错误日志（实时）"):
@@ -1838,11 +1843,6 @@ class UIRenderer:
                 with st.expander("📋 执行日志（实时）"):
                     for log in list(st.session_state.execution_log)[-10:]:
                         st.text(log)
-
-            if st.button("🗑️ 重置所有状态"):
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.rerun()
 
         return selected_symbols, None, use_real
 
@@ -1868,6 +1868,12 @@ class UIRenderer:
         st.session_state.multi_df = {sym: data['data_dict'] for sym, data in multi_data.items()}
         first_sym = symbols[0]
         st.session_state.fear_greed = multi_data[first_sym]['fear_greed']
+        # 修正错别字（如果有）
+        fear_greed_display = multi_data[first_sym]['fear_greed']
+        if isinstance(fear_greed_display, str) and "恐伪贪婪" in fear_greed_display:
+            fear_greed_display = fear_greed_display.replace("恐伪贪婪", "恐惧贪婪")
+        st.session_state.fear_greed = fear_greed_display
+
         df_first = multi_data[first_sym]['data_dict']
         st.session_state.market_regime = SignalEngine().detect_market_regime(df_first, first_sym)
 
@@ -1981,14 +1987,17 @@ class UIRenderer:
         risk_budget_total = st.session_state.account_balance * CONFIG.daily_risk_budget_ratio
         risk_budget_remaining = max(0, risk_budget_total - st.session_state.daily_risk_consumed)
 
-        # 左右两列布局
-        col1, col2 = st.columns([1, 1.5])
+        # 左右两列布局，左侧稍宽
+        col1, col2 = st.columns([1.2, 1.8])
         with col1:
             st.markdown("### 📊 市场状态")
             first_sym = symbols[0]
             prob_first = engine.calc_signal(st.session_state.multi_df[first_sym], first_sym)[1]
+            fear_greed_display = multi_data[first_sym]['fear_greed']
+            if isinstance(fear_greed_display, str) and "恐伪贪婪" in fear_greed_display:
+                fear_greed_display = fear_greed_display.replace("恐伪贪婪", "恐惧贪婪")
             c1, c2, c3 = st.columns(3)
-            c1.metric("恐惧贪婪", multi_data[first_sym]['fear_greed'])
+            c1.metric("恐惧贪婪", fear_greed_display)
             c2.metric("信号概率", f"{prob_first:.1%}")
             c3.metric("当前价格", f"{multi_data[first_sym]['current_price']:.2f}")
 
@@ -2029,7 +2038,7 @@ class UIRenderer:
 
             # 第二行4个指标
             row2 = st.columns(4)
-            row2[0].metric("今日风险消耗", f"{st.session_state.daily_risk_consumed:.2f}")
+            row2[0].metric("今日风险消耗", f"{st.session_state.daily_risk_consumed:.2f} USDT")
             row2[1].metric("剩余预算", f"{risk_budget_remaining:.2f} USDT")
             row2[2].metric("组合VaR", f"{portfolio_var_value*100:.2f}%")
             row2[3].metric("组合CVaR", f"{portfolio_cvar_value*100:.2f}%")
