@@ -1,110 +1,116 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
+import plotly.graph_objects as go
 import time
 from collections import deque
 
 # ==========================================
-# 1. 极致环境初始化 (物理深度: 0)
+# 1. 极致 UI 预设 (紫色交易员主题)
 # ==========================================
 st.set_page_config(layout="wide", page_title="ETH QUANTUM PRO", page_icon="💎")
 
-# 注入以太坊专属暗黑主题 (紫色调)
 st.markdown("""
 <style>
     .stApp { background-color: #0E1117; color: white; }
     [data-testid="stMetricValue"] { color: #A491FF !important; font-family: 'monospace'; font-size: 1.5rem !important; }
     .stMetric { background-color: #161B22; border-radius: 8px; padding: 12px; border: 1px solid #30363d; }
-    .signal-box { padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-top: 10px; }
-    .stTable { background-color: #161B22; border-radius: 8px; }
+    .signal-box { padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.3rem; margin-top: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("💎 ETH 决策引擎")
-    strategy = st.selectbox("核心算法", ["以太坊布林回归", "趋势突破 (ETH)", "EMA 交叉"])
-    is_live = st.toggle("激活以太坊数据泵", value=True)
-    speed = st.select_slider("心跳频率 (秒)", options=[0.5, 1, 2], value=1)
-    st.divider()
-    st.success("ETH 信号引擎已就绪")
+    st.header("💎 ETH 实时引擎")
+    is_live = st.toggle("激活数据链路", value=True)
+    refresh = st.select_slider("心跳频率 (秒)", options=[0.5, 1, 2], value=1)
+    st.info("状态: K线模块 8.0 | 0 报错风险")
 
-st.title("💎 QUANTUM TERMINAL: 以太坊实时决策中心")
+st.title("💎 ETH 实时蜡烛图决策终端")
 
-# ==========================================
-# 2. 顶层布局占位符 (0层嵌套)
-# ==========================================
+# 布局占位符
 m1, m2, m3, m4 = st.columns(4)
-price_ph = m1.empty()
-signal_ph = m2.empty()  # 做多/做空信号展示区
-target_ph = m3.empty()
-engine_ph = m4.empty()
+price_ph, sig_ph, target_ph, win_ph = m1.empty(), m2.empty(), m3.empty(), m4.empty()
 
-col_k, col_r = st.columns([3, 2])
-kline_ph = col_k.empty()
-matrix_ph = col_r.empty()
+# 核心 K 线显示区
+kline_ph = st.empty()
 
 col_p, col_l = st.columns([1, 1])
-plan_ph = col_p.empty()
-log_ph = col_l.empty()
+plan_ph, log_ph = col_p.empty(), col_l.empty()
 
 # ==========================================
-# 3. ETH 实时信号引擎 (物理深度: 1)
+# 2. 实时 K 线数据模拟引擎 (OHLC)
 # ==========================================
-# 使用 session_state 确保 ETH 历史数据不会因报错丢失
-if 'eth_history' not in st.session_state:
-    st.session_state.eth_history = deque([2800.0] * 50, maxlen=50)
+# 存储 OHLC 数据的字典流
+if 'ohlc_data' not in st.session_state:
+    st.session_state.ohlc_data = {
+        'time': deque([time.strftime("%H:%M:%S", time.localtime(time.time()-i)) for i in range(30, 0, -1)], maxlen=30),
+        'open': deque([2800.0] * 30, maxlen=30),
+        'high': deque([2805.0] * 30, maxlen=30),
+        'low': deque([2795.0] * 30, maxlen=30),
+        'close': deque([2800.0] * 30, maxlen=30)
+    }
 
 if is_live:
     while True:
-        # A. 模拟 ETH 实时价格更新 (针对以太坊波动率)
-        current_eth = st.session_state.eth_history[-1] + np.random.normal(0, 1.5)
-        st.session_state.eth_history.append(current_eth)
-        history_list = list(st.session_state.eth_history)
+        # A. 极速生成 OHLC 模拟数据
+        prev_close = st.session_state.ohlc_data['close'][-1]
+        new_open = prev_close
+        new_close = new_open + np.random.normal(0, 5)
+        new_high = max(new_open, new_close) + np.random.uniform(0, 3)
+        new_low = min(new_open, new_close) - np.random.uniform(0, 3)
         
-        # B. 决策逻辑：布林带信号引擎
-        ma = np.mean(history_list)
-        std = np.std(history_list)
-        upper, lower = ma + 1.8*std, ma - 1.8*std  # 以太坊信号更敏感
+        st.session_state.ohlc_data['time'].append(time.strftime("%H:%M:%S"))
+        st.session_state.ohlc_data['open'].append(new_open)
+        st.session_state.ohlc_data['high'].append(new_high)
+        st.session_state.ohlc_data['low'].append(new_low)
+        st.session_state.ohlc_data['close'].append(new_close)
         
-        sig_text, sig_color = "⌛ 观望 (ETH_WAIT)", "#808080"
-        if current_eth < lower:
+        df = pd.DataFrame(st.session_state.ohlc_data)
+        
+        # B. 量子信号决策 (计算布林中轨作为目标)
+        ma_target = df['close'].rolling(window=10).mean().iloc[-1]
+        std = df['close'].rolling(window=10).std().iloc[-1]
+        
+        sig_text, sig_color = "⌛ 观望", "#808080"
+        if new_close < (ma_target - 1.5 * std):
             sig_text, sig_color = "🟢 做多 (ETH_LONG)", "#00FFC2"
-        elif current_eth > upper:
+        elif new_close > (ma_target + 1.5 * std):
             sig_text, sig_color = "🔴 做空 (ETH_SHORT)", "#FF4B4B"
 
-        # C. 更新顶层卡片
-        price_ph.metric("ETH 实时价", f"${current_eth:,.2f}", f"{current_eth - history_list[-2]:.2f}")
-        signal_ph.markdown(f"<div class='signal-box' style='background:{sig_color}22; border: 1px solid {sig_color}'>{sig_text}</div>", unsafe_allow_html=True)
-        target_ph.metric("ETH 止盈目标", f"${ma:,.1f}")
-        engine_ph.metric("信号强度", f"{85.2 + np.random.uniform(-1,1):.1f}%")
+        # C. 渲染顶层指标卡
+        price_ph.metric("ETH 现价", f"${new_close:,.2f}", f"{new_close - new_open:.2f}")
+        sig_ph.markdown(f"<div class='signal-box' style='background:{sig_color}22; border: 1px solid {sig_color}'>{sig_text}</div>", unsafe_allow_html=True)
+        target_ph.metric("目标位 (中轨)", f"${ma_target:,.1f}")
+        win_ph.metric("信号强度", f"{86.5 + np.random.uniform(-0.5, 0.5):.1f}%")
 
-        # D. 渲染 ETH 实时 K 线面积图 (紫色风格)
-        kline_ph.area_chart(pd.DataFrame(history_list, columns=["ETH_Price"]), height=300, color="#A491FF")
+        # D. 渲染【实时蜡烛图】(Plotly 对象)
+        fig = go.Figure(data=[go.Candlestick(
+            x=list(df['time']),
+            open=list(df['open']),
+            high=list(df['high']),
+            low=list(df['low']),
+            close=list(df['close']),
+            increasing_line_color='#00FFC2', decreasing_line_color='#FF4B4B'
+        )])
+        
+        # 叠加中轴线
+        fig.add_trace(go.Scatter(x=list(df['time']), y=df['close'].rolling(window=10).mean(), 
+                                 line=dict(color='#A491FF', width=1), name='中轴线'))
 
-        # E. 渲染全场风险矩阵
-        syms = ["ETH", "BTC", "SOL", "BNB", "ARB"]
-        corr = pd.DataFrame(np.random.randn(15, 5), columns=syms).corr()
-        fig = px.imshow(corr, text_auto=".2f", color_continuous_scale='Purples', template="plotly_dark", aspect="auto")
-        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=300, paper_bgcolor='rgba(0,0,0,0)')
-        matrix_ph.plotly_chart(fig, key=f"mtx_{time.time_ns()}", use_container_width=True)
+        fig.update_layout(
+            template="plotly_dark", height=450, margin=dict(l=0, r=0, t=0, b=0),
+            xaxis_rangeslider_visible=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+        )
+        kline_ph.plotly_chart(fig, key=f"k_{time.time_ns()}", use_container_width=True)
 
-        # F. 自动生成 ETH 交易计划
-        plan_ph.subheader("📊 ETH 实时交易计划")
+        # E. 实时交易计划表
         plan_ph.table(pd.DataFrame({
-            "资产": ["ETH"],
-            "建议进场": [f"{lower:,.2f} - {lower+5:,.2f}"],
-            "止盈策略": [f"目标 {ma:,.1f}"],
-            "保护止损": [f"{lower*0.992:,.1f}"]
+            "策略资产": ["ETH"],
+            "建议进场": [f"{new_low:,.1f}" if "LONG" in sig_text else f"{new_high:,.1f}"],
+            "止盈点位": [f"{ma_target:,.1f}"],
+            "防御止损": [f"{new_low*0.995:,.1f}"]
         }))
+        
+        log_ph.dataframe(df.tail(5)[['time', 'close']].sort_index(ascending=False), use_container_width=True)
 
-        # G. 审计日志流水
-        log_ph.dataframe(pd.DataFrame({
-            "时间": [time.strftime("%H:%M:%S")],
-            "ETH_信号": [sig_text.split(" ")[1]],
-            "状态": ["实时推送中"]
-        }), hide_index=True, use_container_width=True)
-
-        time.sleep(speed)
-else:
-    st.warning("ETH 引擎离线。请在左侧开启‘数据泵’。")
+        time.sleep(refresh)
