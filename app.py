@@ -1,127 +1,176 @@
 import streamlit as st
 import asyncio
-import numpy as np
-import ccxt.async_support as ccxt
 import pandas as pd
-import plotly.graph_objects as go
-from arch import arch_model
-from collections import deque
+import numpy as np
+import plotly.express as px
+import time
+import sqlite3
+from datetime import datetime
+import ccxt.async_support as ccxt
+from decimal import Decimal, ROUND_DOWN
 
-# --- 1. 实盘 API 配置 ---
-API_CONFIG = {
-    'apiKey': 'YOUR_API_KEY',
-    'secret': 'YOUR_SECRET_KEY',
-    'password': 'YOUR_PASSWORD',
-    'enableRateLimit': True,
+# ==========================================
+# 🛡️ V14 系统配置
+# ==========================================
+CONFIG = {
+    "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ARB/USDT"],
+    "timeframe": "1h",
+    "leverage": 3,
+    "risk_per_trade": 0.01,
+    "live": False  # 初始保持 False，UI 切换启动
 }
 
-# --- 2. 交易大脑：包含交易计划逻辑 ---
-class QuantumProEngine:
-    def __init__(self, symbols):
-        self.symbols = symbols
-        self.exchanges = {
-            'binance': ccxt.binance(API_CONFIG),
-            'okx': ccxt.okx(API_CONFIG)
-        }
-        # 存储 K 线历史用于绘图
-        self.ohlcv = {s: deque(maxlen=50) for s in symbols}
-        self.history = {s: deque(maxlen=60) for s in symbols}
-        self.last_prices = {s: [0, 0] for s in symbols}
+# ==========================================
+# 📦 工业级后端核心
+# ==========================================
 
-    async def fetch_market_data(self):
-        """穿透获取实时价格与 K 线数据"""
-        tasks = [ex.fetch_ticker(s) for ex in self.exchanges.values() for s in self.symbols]
-        # 同时抓取 Binance 的 1 分钟 K 线用于图表绘制
-        ohlcv_tasks = [self.exchanges['binance'].fetch_ohlcv(s, timeframe='1m', limit=30) for s in self.symbols]
-        
-        results = await asyncio.gather(*(tasks + ohlcv_tasks), return_exceptions=True)
-        
-        # 处理 Ticker 数据
-        for i, (ex_id, _) in enumerate(self.exchanges.items()):
-            for j, s in enumerate(self.symbols):
-                idx = i * len(self.symbols) + j
-                res = results[idx]
-                if not isinstance(res, Exception) and res and 'last' in res:
-                    p = res['last']
-                    if ex_id == 'binance': self.history[s].append(p)
-                    self.last_prices[s][i] = p
-        
-        # 处理 OHLCV 数据
-        ohlcv_offset = len(self.exchanges) * len(self.symbols)
-        for j, s in enumerate(self.symbols):
-            res = results[ohlcv_offset + j]
-            if not isinstance(res, Exception) and res:
-                self.ohlcv[s] = res
-        return self.last_prices
+class V14Core:
+    def __init__(self, api="", sec=""):
+        self.ex = ccxt.binance({
+            "apiKey": api, "secret": sec,
+            "options": {"defaultType": "future", "adjustForTimeDifference": True},
+            "enableRateLimit": True
+        })
+        self.equity = 10000.0
+        self.db_path = "quantum_audit.db"
+        self._init_db()
 
-# --- 3. UI 布局与 K 线图绘制 ---
-st.set_page_config(page_title="QUANTUM PRO TERMINAL", layout="wide")
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                symbol TEXT, side TEXT, size REAL, 
+                entry REAL, exec REAL, slip REAL, 
+                var REAL, latency REAL
+            )
+        """)
+        conn.close()
 
-MONITOR_LIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    async def fetch_all_data(self):
+        tasks = [self.ex.fetch_ohlcv(s, CONFIG['timeframe'], limit=50) for s in CONFIG['symbols']]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return dict(zip(CONFIG['symbols'], results))
 
-@st.cache_resource
-def init_system():
-    return QuantumProEngine(MONITOR_LIST)
+    def compute_matrix(self, market_results):
+        returns_data = {}
+        for s, data in market_results.items():
+            if isinstance(data, list):
+                df = pd.DataFrame(data, columns=['t','o','h','l','c','v'])
+                returns_data[s] = df['c'].pct_change().dropna()
+        return pd.DataFrame(returns_data)
 
-engine = init_system()
+# ==========================================
+# 🎨 UI & 实时上帝视角
+# ==========================================
 
-# --- 侧边栏：交易计划参数 ---
-st.sidebar.header("📊 自动化交易计划")
-is_live = st.sidebar.toggle("启动实盘执行计划")
-target_spread = st.sidebar.slider("触发价差 (%)", 0.1, 1.0, 0.3)
-safety_threshold = st.sidebar.slider("最小安全系数 (%)", 90.0, 100.0, 95.0)
+st.set_page_config(layout="wide", page_title="QUANTUM PRO", page_icon="👁️")
 
+# 自定义 CSS 适配暗色主题
+st.markdown("""
+    <style>
+    .stApp { background-color: #0E1117; color: white; }
+    .stMetric { background-color: #161B22; border-radius: 10px; padding: 15px; border: 1px solid #30363d; }
+    </style>
+    """, unsafe_allow_password=True)
+
+# 初始化 Session State
+if 'core' not in st.session_state:
+    st.session_state.core = V14Core()
+    st.session_state.initialized = False
+
+core = st.session_state.core
+
+# 侧边栏：同步你截图的 UI 控件
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2091/2091665.png", width=50)
+    st.title("自动化交易计划")
+    run_live = st.toggle("启动实盘执行计划", value=False)
+    trigger_spread = st.slider("触发价差 (%)", 0.1, 1.0, 0.3)
+    safe_factor = st.slider("最小安全系数 (%)", 50.0, 100.0, 95.0)
+    
+    st.divider()
+    api_key = st.text_input("API Key", type="password")
+    api_sec = st.text_input("Secret Key", type="password")
+    if st.button("更新密钥"):
+        st.session_state.core = V14Core(api_key, api_sec)
+        st.success("密钥已更新")
+
+# 主界面布局
 st.title("👁️ QUANTUM PRO: 实时上帝视角终端")
 
-placeholder = st.empty()
+m1, m2, m3, m4 = st.columns(4)
+equity_metric = m1.empty()
+risk_metric = m2.empty()
+latency_metric = m3.empty()
+status_metric = m4.empty()
+
+# 中央黑色显示区域
+chart_col, log_col = st.columns([2, 1])
+
+with chart_col:
+    st.subheader("🌐 全球流动性风险矩阵")
+    matrix_container = st.empty()
+
+with log_col:
+    st.subheader("📜 实时审计流水")
+    log_container = st.empty()
+
+# ==========================================
+# 🔄 实时高频循环
+# ==========================================
 
 async def main_loop():
+    await core.ex.load_markets()
+    
     while True:
-        prices = await engine.fetch_market_data()
+        start_time = time.time()
         
-        # 预热检查
-        if any(len(engine.history[s]) < 5 for s in MONITOR_LIST):
-            with placeholder.container():
-                st.info("🛰️ 正在穿透网络同步真实 K 线与全网深度...")
-            await asyncio.sleep(1)
-            continue
+        # 1. 获取数据 (异步扇出)
+        market_results = await core.fetch_all_data()
+        returns_matrix = core.compute_matrix(market_results)
+        
+        # 2. 渲染相关性热力图
+        if not returns_matrix.empty:
+            corr = returns_matrix.corr()
+            fig = px.imshow(
+                corr, text_auto=".2f", aspect="auto",
+                color_continuous_scale='RdBu_r', range_color=[-1, 1],
+                template="plotly_dark"
+            )
+            fig.update_layout(margin=dict(l=0,r=0,t=0,b=0), height=400, paper_bgcolor='rgba(0,0,0,0)')
+            matrix_container.plotly_chart(fig, use_container_width=True)
+            
+            # 计算风险
+            avg_corr = corr.mean().mean()
+            current_safe_score = (1 - avg_corr) * 100
+        else:
+            current_safe_score = 100.0
+            avg_corr = 0.0
 
-        with placeholder.container():
-            for s in MONITOR_LIST:
-                h = list(engine.history[s])
-                p_bin, p_okx = prices[s][0], prices[s][1]
-                spread = abs(p_bin - p_okx) / ((p_bin + p_okx)/2) if p_bin > 0 else 0
-                
-                # 风险大脑 (GARCH)
-                rets = np.diff(np.log(h))
-                vol = np.std(rets) if len(rets) > 0 else 0.01
-                safety = min(max(1.0 - vol*60, 0.0), 1.0) * 100
+        # 3. 更新指标卡
+        latency = (time.time() - start_time) * 1000
+        equity_metric.metric("账户权益", f"${core.equity:,.2f}")
+        risk_metric.metric("安全系数", f"{current_safe_score:.1f}%", 
+                           delta=f"{current_safe_score - safe_factor:.1f}%",
+                           delta_color="normal" if current_safe_score >= safe_factor else "inverse")
+        latency_metric.metric("核心延迟", f"{latency:.0f}ms")
+        status_metric.metric("系统状态", "LIVE" if run_live else "IDLE")
 
-                # 渲染区域
-                st.divider()
-                col_info, col_chart = st.columns([1, 2])
-                
-                with col_info:
-                    st.subheader(f"💎 {s}")
-                    st.metric("实时价格", f"${h[-1]:,.2f}", f"价差: {spread*100:.3f}%")
-                    st.progress(safety/100, text=f"环境安全度: {safety:.1f}%")
-                    
-                    # 交易计划状态可视化
-                    status_color = "🟢" if safety >= safety_threshold else "🔴"
-                    plan_text = "等待信号" if spread < (target_spread/100) else "触发对冲"
-                    st.code(f"计划状态: {status_color} {plan_text}\n安全阈值: {safety_threshold}%\n目标价差: {target_spread}%")
+        # 4. 执行逻辑判断 (如果安全系数达标)
+        if run_live and current_safe_score < safe_factor:
+            st.toast(f"风险过载: 安全系数 {current_safe_score:.1f}% 低于设定值", icon="⚠️")
 
-                with col_chart:
-                    # 真实 K 线图绘制
-                    df = pd.DataFrame(engine.ohlcv[s], columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-                    df['time'] = pd.to_datetime(df['time'], unit='ms')
-                    fig = go.Figure(data=[go.Candlestick(x=df['time'],
-                                    open=df['open'], high=df['high'],
-                                    low=df['low'], close=df['close'])])
-                    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=250, template="plotly_dark", xaxis_rangeslider_visible=False)
-                    st.plotly_chart(fig, use_container_width=True)
+        # 5. 读取审计日志
+        conn = sqlite3.connect(core.db_path)
+        df_log = pd.read_sql("SELECT symbol, side, exec, slip, ts FROM ledger ORDER BY ts DESC LIMIT 8", conn)
+        conn.close()
+        log_container.dataframe(df_log, use_container_width=True, height=350)
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(2) # 刷新频率
 
-if __name__ == "__main__":
+# 启动引擎
+if st.button("🚀 链接上帝视角", use_container_width=True):
     asyncio.run(main_loop())
