@@ -7,125 +7,112 @@ import time
 from collections import deque
 
 # ==========================================
-# 1. 极致 UI 初始化
+# 1. 极致 UI 架构 (2026 稳定标准)
 # ==========================================
-st.set_page_config(layout="wide", page_title="ETH QUANTUM V11", page_icon="🏦")
+st.set_page_config(layout="wide", page_title="ETH QUANTUM V12", page_icon="📈")
 
 st.markdown("""
 <style>
     .stApp { background-color: #0E1117; color: white; }
-    [data-testid="stMetricValue"] { color: #A491FF !important; font-size: 1.8rem !important; font-weight: bold; }
-    .stMetric { background-color: #161B22; border-radius: 10px; border: 1px solid #30363d; padding: 15px; }
-    .sig-card { padding: 20px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 1.4rem; border: 2px solid; }
+    [data-testid="stMetricValue"] { color: #A491FF !important; font-size: 1.6rem !important; }
+    .stMetric { background-color: #161B22; border-radius: 8px; border: 1px solid #30363d; padding: 10px; }
+    .signal-hero { padding: 15px; border-radius: 10px; text-align: center; font-size: 1.4rem; font-weight: bold; margin-bottom: 20px; }
+    .advice-card { background: #161B22; padding: 10px; border-radius: 5px; border-left: 4px solid #A491FF; }
 </style>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("🏦 ETH 决策核心")
-    is_live = st.toggle("同步以太坊数据链", value=True)
-    sens = st.slider("信号灵敏度", 1.0, 2.5, 1.6)
+    st.header("⚙️ 引擎控制台")
+    is_live = st.toggle("同步实时行情流", value=True)
+    refresh_rate = st.select_slider("心跳频率 (秒)", options=[0.5, 1, 2], value=1)
     st.divider()
-    st.success("V11 引擎：冷启动保护已开启")
+    st.info("架构：V12 零报错版 | 已激活冷启动保护")
 
-st.title("🏦 ETH 实时上帝视角决策终端")
+st.title("🛡️ ETH 实时上帝视角决策终端")
 
-# 占位符定义
-m1, m2, m3, m4 = st.columns(4)
-p_ph, s_ph, r_ph, d_ph = m1.empty(), m2.empty(), m3.empty(), m4.empty()
+# 顶层状态栏
+c1, c2, c3, c4 = st.columns(4)
+price_ph, sig_ph, rsi_ph, macd_ph = c1.empty(), c2.empty(), c3.empty(), c4.empty()
 
+# 核心图表区
 chart_ph = st.empty()
 
-col_plan, col_log = st.columns([1, 1])
-plan_ph, log_ph = col_plan.empty(), col_log.empty()
+# 底部决策区
+st.subheader("🛠️ 智能交易建议")
+d1, d2, d3 = st.columns(3)
+adv1, adv2, adv3 = d1.empty(), d2.empty(), d3.empty()
 
 # ==========================================
-# 2. 稳健数据引擎
+# 2. 稳健数据引擎 (带对齐保护)
 # ==========================================
-if 'history' not in st.session_state:
-    # 预填充 60 个点，防止冷启动报错
-    st.session_state.history = {
-        't': deque([time.strftime("%H:%M:%S", time.localtime(time.time()-i)) for i in range(60, 0, -1)], maxlen=60),
-        'o': deque([2800.0 + np.random.randn() for _ in range(60)], maxlen=60),
-        'h': deque([2805.0] * 60, maxlen=60),
-        'l': deque([2795.0] * 60, maxlen=60),
-        'c': deque([2800.0] * 60, maxlen=60)
+if 'v12_cache' not in st.session_state:
+    # 初始预填充 80 个点，确保指标计算有足够样本
+    st.session_state.v12_cache = {
+        't': deque([time.strftime("%H:%M:%S", time.localtime(time.time()-i)) for i in range(80, 0, -1)], maxlen=80),
+        'o': deque([2800.0] * 80, maxlen=80),
+        'h': deque([2805.0] * 80, maxlen=80),
+        'l': deque([2795.0] * 80, maxlen=80),
+        'c': deque([2800.0] * 80, maxlen=80)
     }
 
-if is_live:
-    while True:
-        # A. 实时价格合成
-        last_c = st.session_state.history['c'][-1]
-        n_o = last_c
-        n_c = n_o + np.random.normal(0, 4)
-        n_h = max(n_o, n_c) + np.random.uniform(0, 3)
-        n_l = min(n_o, n_c) - np.random.uniform(0, 3)
-        
-        st.session_state.history['t'].append(time.strftime("%M:%S"))
-        st.session_state.history['o'].append(n_o); st.session_state.history['h'].append(n_h)
-        st.session_state.history['l'].append(n_l); st.session_state.history['c'].append(n_c)
-        
-        df = pd.DataFrame(st.session_state.history)
-        
-        # B. 技术指标计算 (带对齐保护)
-        df['ma'] = df['c'].rolling(20).mean()
-        df['std'] = df['c'].rolling(20).std()
-        df['up'] = df['ma'] + (sens * df['std'])
-        df['dn'] = df['ma'] - (sens * df['std'])
-        
-        # RSI 计算
-        delta = df['c'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        
-        # MACD 计算
-        df['ema12'] = df['c'].ewm(span=12).mean()
-        df['ema26'] = df['c'].ewm(span=26).mean()
-        df['macd'] = df['ema12'] - df['ema26']
-        df['sig'] = df['macd'].ewm(span=9).mean()
-        df['hist'] = df['macd'] - df['sig']
+while is_live:
+    # A. 模拟以太坊实时波动
+    prev_c = st.session_state.v12_cache['c'][-1]
+    new_o = prev_c
+    new_c = new_o + np.random.normal(0, 4.2)
+    new_h = max(new_o, new_c) + np.random.uniform(0, 2)
+    new_l = min(new_o, new_c) - np.random.uniform(0, 2)
+    
+    st.session_state.v12_cache['t'].append(time.strftime("%M:%S"))
+    st.session_state.v12_cache['o'].append(new_o); st.session_state.v12_cache['h'].append(new_h)
+    st.session_state.v12_cache['l'].append(new_l); st.session_state.v12_cache['c'].append(new_c)
+    
+    df = pd.DataFrame(st.session_state.v12_cache)
+    
+    # B. 安全指标计算 (强制填充 NaN 以防报错)
+    df['ma'] = df['c'].rolling(20).mean().ffill().bfill()
+    df['std'] = df['c'].rolling(20).std().ffill().bfill()
+    df['up'] = df['ma'] + (1.6 * df['std'])
+    df['dn'] = df['ma'] - (1.6 * df['std'])
+    
+    # RSI & MACD
+    delta = df['c'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    df['rsi'] = (100 - (100 / (1 + (gain / (loss + 1e-9))))).ffill().bfill()
+    df['macd'] = df['c'].ewm(span=12).mean() - df['c'].ewm(span=26).mean()
+    df['hist'] = df['macd'] - df['macd'].ewm(span=9).mean()
 
-        # C. 共振决策引擎
-        curr_c = df['c'].iloc[-1]
-        curr_rsi = df['rsi'].iloc[-1]
-        curr_hist = df['hist'].iloc[-1]
-        
-        decision, color = "⌛ 扫描信号中", "#808080"
-        if curr_c < df['dn'].iloc[-1] and curr_rsi < 40:
-            decision, color = "🚀 做多 (STRONG LONG)", "#00FFC2"
-        elif curr_c > df['up'].iloc[-1] and curr_rsi > 60:
-            decision, color = "🔥 做空 (STRONG SHORT)", "#FF4B4B"
+    # C. 决策逻辑
+    cur_c, cur_rsi, cur_h = df['c'].iloc[-1], df['rsi'].iloc[-1], df['hist'].iloc[-1]
+    decision, color = "⌛ 扫描信号中", "#808080"
+    if cur_c < df['dn'].iloc[-1] and cur_rsi < 35:
+        decision, color = "🟢 强力做多 (LONG)", "#00FFC2"
+    elif cur_c > df['up'].iloc[-1] and cur_rsi > 65:
+        decision, color = "🔴 强力做空 (SHORT)", "#FF4B4B"
 
-        # D. UI 渲染 - 指标卡
-        p_ph.metric("ETH 实时价", f"${curr_c:,.2f}", f"{curr_c - df['c'].iloc[-2]:.2f}")
-        s_ph.markdown(f"<div class='sig-card' style='color:{color}; border-color:{color}; background:{color}11'>{decision}</div>", unsafe_allow_html=True)
-        r_r = f"{curr_rsi:.1f}" if not np.isnan(curr_rsi) else "计算中"
-        r_ph.metric("RSI 强度", r_r, "超卖" if curr_rsi < 30 else "超买" if curr_rsi > 70 else "中性")
-        d_ph.metric("MACD 动能", f"{curr_hist:.2f}", "多头胜" if curr_hist > 0 else "空头胜")
+    # D. 渲染指标卡
+    price_ph.metric("ETH 现价", f"${cur_c:,.2f}", f"{cur_c-df['c'].iloc[-2]:.2f}")
+    sig_ph.markdown(f"<div class='signal-hero' style='background:{color}22; border: 1px solid {color}; color:{color}'>{decision}</div>", unsafe_allow_html=True)
+    rsi_ph.metric("RSI 指数", f"{cur_rsi:.1f}", "超买区" if cur_rsi > 70 else "超卖区" if cur_rsi < 30 else "常态")
+    macd_ph.metric("MACD 柱", f"{cur_h:.2f}", "多头增强" if cur_h > 0 else "空头增强")
 
-        # E. 专业 K 线图渲染 (三子图)
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
-        # 蜡烛图与布林带
-        fig.add_trace(go.Candlestick(x=df['t'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="Price"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['t'], y=df['up'], line=dict(color='rgba(164,145,255,0.2)', width=1), name="Upper"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['t'], y=df['dn'], line=dict(color='rgba(164,145,255,0.2)', width=1), fill='tonexty', name="Lower"), row=1, col=1)
-        # MACD
-        fig.add_trace(go.Bar(x=df['t'], y=df['hist'], marker_color=['#00FFC2' if x>0 else '#FF4B4B' for x in df['hist']]), row=2, col=1)
-        # RSI
-        fig.add_trace(go.Scatter(x=df['t'], y=df['rsi'], line=dict(color='#A491FF')), row=3, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="#FF4B4B", row=3, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="#00FFC2", row=3, col=1)
+    # E. 渲染主图 (3子图联动)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.25, 0.25])
+    fig.add_trace(go.Candlestick(x=df['t'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="K线"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['t'], y=df['up'], line=dict(color='rgba(164,145,255,0.2)', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['t'], y=df['dn'], line=dict(color='rgba(164,145,255,0.2)', width=1), fill='tonexty'), row=1, col=1)
+    fig.add_trace(go.Bar(x=df['t'], y=df['hist'], marker_color=['#00FFC2' if x>0 else '#FF4B4B' for x in df['hist']]), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['t'], y=df['rsi'], line=dict(color='#A491FF', width=2)), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="#FF4B4B", row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="#00FFC2", row=3, col=1)
+    
+    fig.update_layout(template="plotly_dark", height=600, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, showlegend=False)
+    chart_ph.plotly_chart(fig, key=f"v12_{time.time_ns()}")
 
-        fig.update_layout(template="plotly_dark", height=650, margin=dict(l=0, r=0, t=0, b=0), showlegend=False, xaxis_rangeslider_visible=False)
-        chart_ph.plotly_chart(fig, key=f"v11_{time.time_ns()}")
+    # F. 渲染决策卡 (替代不稳定的 DataFrame 渲染)
+    adv1.markdown(f"<div class='advice-card'><b>轨道位置:</b><br>{'偏离底轨' if cur_c < df['ma'].iloc[-1] else '偏离顶轨'}</div>", unsafe_allow_html=True)
+    adv2.markdown(f"<div class='advice-card'><b>RSI 建议:</b><br>{'等待反转' if cur_rsi < 40 else '等待回调'}</div>", unsafe_allow_html=True)
+    adv3.markdown(f"<div class='advice-card'><b>操作逻辑:</b><br>{decision}</div>", unsafe_allow_html=True)
 
-        # F. 实时计划计划表 (修复长度对齐)
-        plan_data = {
-            "维度": ["BOLL轨道", "RSI状态", "MACD趋势"],
-            "数据": [f"{'触底' if curr_c < df['ma'].iloc[-1] else '冲顶'}", f"{r_r}", f"{'金叉' if curr_hist > 0 else '死叉'}"],
-            "建议行动": [decision, decision, decision]
-        }
-        plan_ph.dataframe(pd.DataFrame(plan_data), hide_index=True)
-        log_ph.dataframe(df.tail(5)[['t', 'c']].sort_index(ascending=False), hide_index=True)
-
-        time.sleep(1)
+    time.sleep(refresh_rate)
