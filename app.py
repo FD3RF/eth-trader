@@ -127,7 +127,8 @@ async def update_terminal():
                 margin=dict(l=10, r=10, t=10, b=10), height=450,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
             )
-            # 关键修复：使用 width="stretch" 适配最新 API，并使用动态 ID
+            # 关键修复 1：使用 width="stretch" 适配最新 API 警告
+            # 关键修复 2：使用动态生成 key 避免 DuplicateKey 报错
             st.plotly_chart(fig, on_select="ignore", key=f"risk_{int(time.time()*10)}", width="stretch")
 
         # D. 刷新审计流水
@@ -135,8 +136,8 @@ async def update_terminal():
             conn = sqlite3.connect(st.session_state.core.db_path)
             try:
                 df_log = pd.read_sql("SELECT symbol, side, exec, ts FROM ledger ORDER BY ts DESC LIMIT 15", conn)
-                # 关键修复：统一使用 width="stretch"
-                st.dataframe(df_audit if 'df_audit' in locals() else df_log, width="stretch", height=400)
+                # 关键修复 3：统一使用 width="stretch"
+                st.dataframe(df_log, width="stretch", height=400)
             except:
                 st.info("等待首笔执行信号...")
             finally:
