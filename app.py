@@ -2,81 +2,95 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import asyncio
 import time
-from streamlit_autorefresh import st_autorefresh
 
 # ==========================================
-# 1. 核心自动化配置 (物理层级 0)
+# 1. 核心架构：UI 预初始化
 # ==========================================
 st.set_page_config(layout="wide", page_title="QUANTUM PRO", page_icon="👁️")
 
-# 每 2000 毫秒（2秒）自动触发一次脚本重新执行，不会阻塞 UI
-refresh_count = st_autorefresh(interval=2000, key="quantum_auto_refresh")
-
-# 强制暗黑量化主题 CSS
+# 注入极限暗黑主题 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: white; }
-    [data-testid="stMetricValue"] { color: #00FFC2 !important; font-family: 'monospace'; }
-    .stMetric { background-color: #161B22; border-radius: 8px; padding: 12px; border: 1px solid #30363d; }
+    [data-testid="stMetricValue"] { color: #00FFC2 !important; font-family: 'monospace'; font-size: 2rem !important; }
+    .stMetric { background-color: #161B22; border-radius: 8px; padding: 15px; border: 1px solid #30363d; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+    div[data-testid="stExpander"] { border: none !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. 侧边栏与静态布局 (物理层级 0)
-# ==========================================
+# 侧边栏：非阻塞交互区
 with st.sidebar:
-    st.markdown("### 🤖 自动化交易引擎")
-    run_live = st.toggle("实盘执行计划", value=True)
+    st.markdown("### 🤖 核心控制器")
+    is_live = st.toggle("实盘接入", value=True)
     st.divider()
-    spread_val = st.slider("触发价差 (%)", 0.1, 1.0, 0.35)
-    st.info(f"引擎状态: 正在运行 (第 {refresh_count} 次同步)")
+    freq = st.select_slider("心跳频率 (秒)", options=[0.5, 1, 2, 5], value=1)
+    st.warning("异步引擎已就绪：UI 实时响应中")
 
 st.title("👁️ QUANTUM PRO: 实时上帝视角终端")
 
-# ==========================================
-# 3. 数据计算与指标更新 (物理层级 0)
-# ==========================================
-# 每次刷新都会重新执行这里，逻辑极其扁平
-symbols = ["BTC", "ETH", "SOL", "BNB", "ARB"]
-sim_data = np.random.randn(25, len(symbols))
-df_corr = pd.DataFrame(sim_data, columns=symbols).corr()
-
-# 布局：四大指标卡
+# 物理布局占位符
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("账户权益", f"${10000 + np.random.randint(-50, 50):,}")
-m2.metric("安全系数", f"{85.0 + np.random.uniform(-2, 2):.1f}%", f"{np.random.uniform(-1, 1):.1f}%")
-m3.metric("系统延迟", f"{np.random.randint(5, 12)}ms")
-m4.metric("运行状态", "LIVE 现场演出" if run_live else "IDLE")
+metrics = [m1.empty() for _ in range(4)] # 指标卡占位符
+
+col_l, col_r = st.columns([2, 1])
+matrix_ph = col_l.empty() # 风险矩阵占位符
+log_ph = col_r.empty()    # 日志流水占位符
 
 # ==========================================
-# 4. 风险矩阵渲染 (物理层级 0)
+# 2. 异步数据泵 (Async Data Pump)
 # ==========================================
-# 关键修复：这里的代码相对于顶层完全不缩进，绝对不会报 IndentationError
-fig = px.imshow(
-    df_corr, text_auto=".2f",
-    color_continuous_scale='RdBu_r', range_color=[-1, 1],
-    template="plotly_dark", aspect="auto"
-)
-fig.update_layout(
-    margin=dict(l=0, r=0, t=0, b=0), 
-    height=450,
-    paper_bgcolor='rgba(0,0,0,0)',
-    plot_bgcolor='rgba(0,0,0,0)'
-)
+async def terminal_engine():
+    """采用异步非阻塞循环，完美兼顾实时性与交互性"""
+    symbols = ["BTC", "ETH", "SOL", "BNB", "ARB"]
+    
+    while True:
+        # A. 极速计算层
+        sim_data = np.random.randn(30, len(symbols))
+        df_corr = pd.DataFrame(sim_data, columns=symbols).corr()
+        
+        # B. 原子化指标更新 (直接注入占位符)
+        metrics[0].metric("账户净值", f"${12450.40 + np.random.uniform(-10, 10):,.2f}")
+        metrics[1].metric("风险敞口", f"{np.random.uniform(15, 25):.1f}%")
+        metrics[2].metric("系统延迟", f"{np.random.randint(2, 8)}ms")
+        metrics[3].metric("引擎状态", "RUNNING" if is_live else "PAUSED")
 
-# 渲染图表与日志表格
-col_left, col_right = st.columns([2, 1])
-with col_left:
-    st.markdown("#### 🌐 全球流动性风险矩阵")
-    st.plotly_chart(fig, use_container_width=True, key=f"matrix_{refresh_count}")
+        # C. 零闪烁绘图层 (严格对齐)
+        fig = px.imshow(
+            df_corr, text_auto=".2f",
+            color_continuous_scale='RdBu_r', range_color=[-1, 1],
+            template="plotly_dark", aspect="auto"
+        )
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=20, b=0), 
+            height=450,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+        
+        # 核心：使用 time.time() 确保每次生成的 key 唯一，强制 Plotly 刷新
+        matrix_ph.plotly_chart(fig, key=f"qx_{time.time()}", use_container_width=True)
 
-with col_right:
-    st.markdown("#### 📜 实时审计流水")
-    log_df = pd.DataFrame({
-        "symbol": ["BTC/USDT", "ETH/USDT"],
-        "side": ["BUY", "SELL"],
-        "exec": ["SUCCESS", "PENDING"],
-        "ts": [time.strftime("%H:%M:%S")] * 2
-    })
-    st.dataframe(log_df, use_container_width=True, height=400)
+        # D. 日志流
+        log_ph.dataframe(
+            pd.DataFrame({
+                "时间": [time.strftime("%H:%M:%S.%f")[:-4]],
+                "动作": ["TICK_SYNC"],
+                "状态": ["√"]
+            }), use_container_width=True, hide_index=True
+        )
+
+        # E. 关键：异步挂起而非线程阻塞
+        # 这允许侧边栏滑块和按钮在等待期间依然能被操作
+        await asyncio.sleep(freq)
+
+# ==========================================
+# 3. 极限激活逻辑
+# ==========================================
+if st.button("🚀 激活全速量化监控链路", use_container_width=True):
+    try:
+        # 启动异步事件循环
+        asyncio.run(terminal_engine())
+    except Exception as e:
+        st.error(f"终端异常: {e}")
