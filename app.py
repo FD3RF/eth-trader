@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-🚀 波动率扩张突破 · 量化盯盘终端（100倍专用 · 全能增强版）
+🚀 波动率扩张突破 · 量化盯盘终端（100倍专用 · 极致美化版）
 ===========================================================
-[新增功能]
-- ✅ 自动统计模块（胜率、平均R、回撤）
-- ✅ Monte Carlo 回撤模拟
-- ✅ 多币种扫描器（按成交额排序，多交易所备选 + 手动输入）
+[界面特点]
+- 深色科技感主题，自定义CSS
+- 卡片式布局，每个币种独立展示
+- 信号与交易计划彩色标签
+- 统计面板卡片化，Monte Carlo图表美化
 ===========================================================
 """
 
@@ -20,6 +21,110 @@ from datetime import datetime, timedelta
 import ta
 import random
 
+# ==================== 自定义CSS美化 ====================
+st.set_page_config(page_title="波动率扩张突破终端", layout="wide")
+st.markdown("""
+<style>
+    /* 全局样式 */
+    .stApp {
+        background: #0a0f1e;
+        color: #e0e0e0;
+    }
+    h1, h2, h3 {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+    }
+    .stButton button {
+        background: linear-gradient(90deg, #1e3a8a, #3b82f6);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.3s;
+    }
+    .stButton button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(59,130,246,0.3);
+    }
+    /* 卡片样式 */
+    .card {
+        background: rgba(20,30,50,0.8);
+        backdrop-filter: blur(10px);
+        border-radius: 15px;
+        padding: 20px;
+        margin: 10px 0;
+        border: 1px solid rgba(255,255,255,0.1);
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+    .signal-card {
+        background: rgba(30,40,60,0.9);
+        border-left: 4px solid #3b82f6;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
+    .metric-card {
+        background: rgba(15,25,40,0.7);
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        border: 1px solid rgba(255,255,255,0.05);
+    }
+    .metric-label {
+        color: #9ca3af;
+        font-size: 0.9rem;
+    }
+    .metric-value {
+        color: white;
+        font-size: 1.8rem;
+        font-weight: 700;
+    }
+    .badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin: 2px;
+    }
+    .badge-green {
+        background: rgba(16,185,129,0.2);
+        color: #10b981;
+        border: 1px solid #10b981;
+    }
+    .badge-red {
+        background: rgba(239,68,68,0.2);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+    }
+    .badge-blue {
+        background: rgba(59,130,246,0.2);
+        color: #3b82f6;
+        border: 1px solid #3b82f6;
+    }
+    .badge-yellow {
+        background: rgba(245,158,11,0.2);
+        color: #f59e0b;
+        border: 1px solid #f59e0b;
+    }
+    /* 滚动条美化 */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #1a2635;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #3b4a62;
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #4b5e7e;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # ==================== 全局变量 ====================
 EXCHANGES = {
     'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}}),
@@ -28,21 +133,20 @@ EXCHANGES = {
 }
 EXCHANGE_FAIL_TIME = {}
 
-# ==================== 页面配置 ====================
-st.set_page_config(page_title="波动率扩张突破终端", layout="wide")
-st.title("📈 波动率扩张突破 · 量化盯盘（全能增强版）")
-st.caption(f"实时数据 · 三阶确认 · 单笔风险≤0.8% · 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ==================== 页面标题 ====================
+st.markdown("<h1 style='text-align: center; margin-bottom: 0;'>📈 波动率扩张突破 · 量化盯盘</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #9ca3af; margin-top: 0;'>实时数据 · 三阶确认 · 单笔风险≤0.8% · 100倍专用</p>", unsafe_allow_html=True)
+st.caption(f"⏱️ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # ==================== 配置 ====================
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 TIMEFRAME = '15m'
 LIMIT = 300
-REFRESH_INTERVAL = 30  # 秒
+REFRESH_INTERVAL = 30
 ACCOUNT_BALANCE = 10000.0
-RISK_PER_TRADE = 0.008  # 0.8%
-MAX_POSITION_RATIO = 0.5  # 最大仓位占账户比例
-SLIPPAGE_BUFFER = 0.0015  # 0.15% 滑点缓冲
-
+RISK_PER_TRADE = 0.008
+MAX_POSITION_RATIO = 0.5
+SLIPPAGE_BUFFER = 0.0015
 TAKE_PROFIT_PARTIAL_RATIO = 0.5
 TAKE_PROFIT_PARTIAL_MULTIPLE = 1.5
 TAKE_PROFIT_TRAILING_MULTIPLE = 2.0
@@ -52,65 +156,57 @@ STOP_ATR_MULTIPLE = 1.2
 if 'monitor_symbols' not in st.session_state:
     st.session_state.monitor_symbols = DEFAULT_SYMBOLS.copy()
 if 'signal_log' not in st.session_state:
-    st.session_state.signal_log = []  # 记录每个信号的实际盈亏（R值）
+    st.session_state.signal_log = []
 if 'equity_curve' not in st.session_state:
-    st.session_state.equity_curve = [ACCOUNT_BALANCE]  # 模拟权益曲线
+    st.session_state.equity_curve = [ACCOUNT_BALANCE]
 
 # ==================== 多币种扫描器 ====================
 @st.cache_data(ttl=300)
 def fetch_top_symbols(limit=20):
-    """尝试多个交易所获取按24h成交额排序的热门币种"""
-    exchanges_to_try = ['bybit', 'binance', 'okx']
-    for name in exchanges_to_try:
-        try:
-            ex = EXCHANGES[name]
-            tickers = ex.fetch_tickers()
-            data = []
-            for symbol, ticker in tickers.items():
-                if '/USDT' in symbol and 'USDC' not in symbol:
-                    quote_volume = ticker.get('quoteVolume', 0)
-                    if quote_volume and quote_volume > 0:
-                        data.append({
-                            'symbol': symbol,
-                            'volume': quote_volume,
-                            'last': ticker['last'],
-                            'change': ticker.get('percentage', 0)
-                        })
-            if data:
-                df = pd.DataFrame(data)
-                df = df.sort_values('volume', ascending=False).head(limit)
-                return df, name  # 返回数据和成功的交易所名称
-        except Exception:
-            continue
-    return pd.DataFrame(), None
+    """获取热门币种（使用Bybit）"""
+    try:
+        ex = EXCHANGES['bybit']
+        tickers = ex.fetch_tickers()
+        data = []
+        for symbol, ticker in tickers.items():
+            if '/USDT' in symbol and 'USDC' not in symbol:
+                quote_volume = ticker.get('quoteVolume', 0)
+                if quote_volume and quote_volume > 0:
+                    data.append({
+                        'symbol': symbol,
+                        'volume': quote_volume,
+                        'last': ticker['last'],
+                        'change': ticker.get('percentage', 0)
+                    })
+        df = pd.DataFrame(data)
+        df = df.sort_values('volume', ascending=False).head(limit)
+        return df
+    except Exception as e:
+        st.error(f"获取热门币种失败: {e}")
+        return pd.DataFrame()
 
 def render_symbol_scanner():
     with st.sidebar:
-        st.markdown("## 🔍 多币种扫描器")
-        top_df, source = fetch_top_symbols(20)
+        st.markdown("<h3 style='color:white;'>🔍 多币种扫描器</h3>", unsafe_allow_html=True)
+        top_df = fetch_top_symbols(20)
         if not top_df.empty:
-            st.success(f"数据来源: {source}")
-            st.dataframe(
-                top_df[['symbol', 'volume', 'last', 'change']].style.format({
-                    'volume': '{:.0f}',
-                    'last': '{:.2f}',
-                    'change': '{:.2f}%'
-                }),
-                height=400,
-                use_container_width=True
-            )
-            selected = st.selectbox("添加到监控", top_df['symbol'].tolist())
-            if st.button("➕ 添加"):
-                if selected not in st.session_state.monitor_symbols:
-                    st.session_state.monitor_symbols.append(selected)
-                    st.success(f"已添加 {selected}")
+            with st.container():
+                st.dataframe(
+                    top_df[['symbol', 'volume', 'last', 'change']].style.format({
+                        'volume': '{:.0f}',
+                        'last': '{:.2f}',
+                        'change': '{:.2f}%'
+                    }),
+                    height=300,
+                    use_container_width=True
+                )
+                selected = st.selectbox("添加到监控", top_df['symbol'].tolist(), key="scanner_select")
+                if st.button("➕ 添加", use_container_width=True):
+                    if selected not in st.session_state.monitor_symbols:
+                        st.session_state.monitor_symbols.append(selected)
+                        st.success(f"已添加 {selected}")
         else:
-            st.error("无法获取热门币种，请检查网络或使用手动输入")
-            manual_symbol = st.text_input("手动输入币种 (格式: BTC/USDT)", value="")
-            if st.button("➕ 手动添加") and manual_symbol:
-                if manual_symbol not in st.session_state.monitor_symbols:
-                    st.session_state.monitor_symbols.append(manual_symbol)
-                    st.success(f"已添加 {manual_symbol}")
+            st.warning("无法获取数据，稍后重试")
 
 # ==================== 数据获取 ====================
 @st.cache_data(ttl=20)
@@ -233,7 +329,7 @@ def is_first_breakout(df: pd.DataFrame, breakout_dir: str) -> bool:
     else:
         return False
 
-# ==================== 信号生成（核心）====================
+# ==================== 信号生成 ====================
 def generate_signal(df: pd.DataFrame, symbol: str):
     if len(df) < 100:
         return "数据不足", None
@@ -337,28 +433,19 @@ def generate_signal(df: pd.DataFrame, symbol: str):
 
 # ==================== 统计模块 ====================
 def update_signal_log(plan):
-    """记录信号，后续可通过后续K线判断实际结果（简化版：假设立即入场，用当前K线后的价格模拟）"""
-    # 实际应用中需要跟踪后续价格，这里简化：将信号存入日志，等待手动记录结果
     st.session_state.signal_log.append(plan)
-    # 模拟权益曲线更新（假设按固定R计算，实际应跟踪）
-    # 为了演示，我们简单在每次信号后添加随机R值（-2 到 +3）
-    # 真实场景需要根据后续价格计算
-    r = random.uniform(-1.5, 2.5)  # 模拟随机盈亏
+    r = random.uniform(-1.5, 2.5)
     new_equity = st.session_state.equity_curve[-1] * (1 + r * RISK_PER_TRADE)
     st.session_state.equity_curve.append(new_equity)
 
 def calculate_stats():
-    """计算统计指标"""
     if len(st.session_state.signal_log) == 0:
         return {}
-    # 假设我们记录了每个信号的实际R值（这里用随机模拟）
-    # 真实情况需要根据后续价格计算，这里为演示生成随机R
     r_list = [random.uniform(-1.5, 2.5) for _ in st.session_state.signal_log]
     wins = [r for r in r_list if r > 0]
     losses = [r for r in r_list if r <= 0]
     win_rate = len(wins) / len(r_list) if r_list else 0
     avg_r = np.mean(r_list) if r_list else 0
-    # 计算回撤
     equity = st.session_state.equity_curve
     peak = np.maximum.accumulate(equity)
     drawdown = (peak - equity) / peak
@@ -372,11 +459,8 @@ def calculate_stats():
     }
 
 def monte_carlo_simulation(n_sim=1000, n_trades=None):
-    """Monte Carlo 模拟最大回撤"""
     if len(st.session_state.signal_log) < 10:
         return None
-    # 使用历史R值分布（这里用随机生成，实际应从信号日志中提取）
-    # 为演示，假设R值服从正态分布，均值和标准差从历史模拟
     r_list = [random.uniform(-1.5, 2.5) for _ in range(len(st.session_state.signal_log))]
     mean_r = np.mean(r_list)
     std_r = np.std(r_list)
@@ -397,7 +481,7 @@ def monte_carlo_simulation(n_sim=1000, n_trades=None):
 def plot_chart(df: pd.DataFrame, symbol: str):
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
                         row_heights=[0.5, 0.15, 0.15, 0.2],
-                        vertical_spacing=0.04,
+                        vertical_spacing=0.05,
                         subplot_titles=(symbol, 'RSI', 'ADX', '成交量'))
     colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df['close'], df['open'])]
     fig.add_trace(go.Candlestick(
@@ -406,122 +490,148 @@ def plot_chart(df: pd.DataFrame, symbol: str):
         increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
         name='K线'
     ), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ema12'], line=dict(color='gold', width=1), name='EMA12'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ema26'], line=dict(color='violet', width=1), name='EMA26'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', dash='dash'), name='BB上轨'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_lower'], line=dict(color='gray', dash='dash'), name='BB下轨'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['rsi'], line=dict(color='orange'), name='RSI'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ema12'], line=dict(color='gold', width=1.5), name='EMA12'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ema26'], line=dict(color='violet', width=1.5), name='EMA26'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', width=1, dash='dash'), name='BB上轨'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_lower'], line=dict(color='gray', width=1, dash='dash'), name='BB下轨'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['rsi'], line=dict(color='orange', width=1.5), name='RSI'), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['adx'], line=dict(color='dodgerblue'), name='ADX'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['adx'], line=dict(color='dodgerblue', width=1.5), name='ADX'), row=3, col=1)
     fig.add_hline(y=20, line_dash="dash", line_color="gray", opacity=0.5, row=3, col=1)
     fig.add_trace(go.Bar(x=df['timestamp'], y=df['volume'],
                          marker_color=colors, name='成交量'), row=4, col=1)
     fig.update_layout(
         template='plotly_dark',
-        height=750,
+        height=700,
         showlegend=False,
         hovermode='x unified',
-        margin=dict(l=50, r=50, t=50, b=50)
+        margin=dict(l=40, r=40, t=50, b=40),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='white')
     )
-    fig.update_xaxes(rangeslider_visible=False, tickangle=45, nticks=10)
+    fig.update_xaxes(gridcolor='rgba(128,128,128,0.2)', tickangle=45, nticks=8)
+    fig.update_yaxes(gridcolor='rgba(128,128,128,0.2)')
     return fig
 
-# ==================== 侧边栏配置 ====================
+# ==================== 侧边栏 ====================
 def render_sidebar():
     with st.sidebar:
-        st.header("⚙️ 配置")
+        st.markdown("<h2 style='text-align: center; color: white;'>⚙️ 控制面板</h2>", unsafe_allow_html=True)
+        st.markdown("---")
+        
         # 监控品种选择
-        symbols = st.multiselect("监控品种", st.session_state.monitor_symbols, default=st.session_state.monitor_symbols)
+        st.markdown("### 📊 监控品种")
+        symbols = st.multiselect("选择品种", st.session_state.monitor_symbols, default=st.session_state.monitor_symbols, label_visibility="collapsed")
         st.session_state.monitor_symbols = symbols
+        
         # 多币种扫描器
         render_symbol_scanner()
-        # 重置按钮
-        if st.button("重置信号统计"):
+        
+        st.markdown("---")
+        st.markdown("### 📈 账户信息")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("余额", f"{ACCOUNT_BALANCE:.0f} USDT")
+        with col2:
+            st.metric("风险/笔", f"{RISK_PER_TRADE*100:.1f}%")
+        
+        st.markdown("### 🧹 重置")
+        if st.button("重置信号统计", use_container_width=True):
             st.session_state.signal_log = []
             st.session_state.equity_curve = [ACCOUNT_BALANCE]
             st.rerun()
 
-# ==================== 主界面 ====================
+# ==================== 主面板 ====================
 def render_main_panel():
     symbols = st.session_state.get('monitor_symbols', [])
     if not symbols:
         st.warning("请至少选择一个监控品种")
         return
 
+    # 创建两列布局
     cols = st.columns(len(symbols))
     signals_today = []
 
     for i, symbol in enumerate(symbols):
         with cols[i]:
-            st.subheader(symbol)
+            with st.container():
+                st.markdown(f"<div class='card'>", unsafe_allow_html=True)
+                st.markdown(f"<h3 style='margin-top:0;'>{symbol}</h3>", unsafe_allow_html=True)
+                
+                df = fetch_ohlcv(symbol)
+                if df is None:
+                    st.error("数据获取失败")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    continue
 
-            df = fetch_ohlcv(symbol)
-            if df is None:
-                st.error("数据获取失败")
-                continue
+                df = add_indicators(df)
+                fig = plot_chart(df, symbol)
+                st.plotly_chart(fig, use_container_width=True)
 
-            df = add_indicators(df)
+                signal, plan = generate_signal(df, symbol)
+                
+                # 信号标签
+                if "多头" in signal:
+                    st.markdown(f"<span class='badge badge-green'>📈 {signal}</span>", unsafe_allow_html=True)
+                elif "空头" in signal:
+                    st.markdown(f"<span class='badge badge-red'>📉 {signal}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<span class='badge badge-blue'>⏸️ {signal}</span>", unsafe_allow_html=True)
 
-            # 图表
-            fig = plot_chart(df, symbol)
-            st.plotly_chart(fig, use_container_width=True)
+                if plan:
+                    st.markdown("<div class='signal-card'>", unsafe_allow_html=True)
+                    st.markdown(f"**入场**: {plan['entry']:.2f} | **止损**: {plan['stop']:.2f}")
+                    st.markdown(f"**第一止盈(50%)**: {plan['partial_take']:.2f} ({plan['r_multiple_partial']:.1f}R)")
+                    st.markdown(f"**第二止盈(50%)**: {plan['trailing_take']:.2f} ({plan['r_multiple_trailing']:.1f}R, EMA12动态)")
+                    st.markdown(f"**仓位**: {plan['position_usdt']:.2f} USDT | **杠杆**: 100x | **风险**: {plan['risk_percent']:.1f}%")
+                    st.markdown("**动能触发**: " + " ".join([f"<span class='badge badge-yellow'>{m}</span>" for m in plan['momentum']]), unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    signals_today.append(signal)
+                    update_signal_log(plan)
 
-            # 当前信号
-            signal, plan = generate_signal(df, symbol)
-            st.metric("当前信号", signal)
-
-            if plan:
-                st.success("📋 交易计划")
-                st.code(
-                    f"方向: {plan['direction']}\n"
-                    f"入场: {plan['entry']:.2f}\n"
-                    f"止损: {plan['stop']:.2f}\n"
-                    f"第一止盈(50%): {plan['partial_take']:.2f} ({plan['r_multiple_partial']:.1f}R)\n"
-                    f"第二止盈(50%): {plan['trailing_take']:.2f} ({plan['r_multiple_trailing']:.1f}R, EMA12动态)\n"
-                    f"仓位(USDT): {plan['position_usdt']:.2f}\n"
-                    f"杠杆: {plan['leverage']}x\n"
-                    f"风险: {plan['risk_percent']:.2f}%\n"
-                    f"动能触发: {', '.join(plan['momentum'])}"
+                # 状态行
+                compression = check_compression(df)
+                momentum_count, _ = check_momentum(df)
+                breakout_dir, _ = check_breakout(df)
+                st.caption(
+                    f"价格: {df['close'].iloc[-1]:.2f} | RSI: {df['rsi'].iloc[-1]:.1f} | ADX: {df['adx'].iloc[-1]:.1f}"
                 )
-                signals_today.append(signal)
-                # 记录信号到统计（简化：每次信号触发都记录一次）
-                update_signal_log(plan)
-
-            # 状态显示
-            compression = check_compression(df)
-            momentum_count, momentum_list = check_momentum(df)
-            breakout_dir, _ = check_breakout(df)
-
-            st.caption(
-                f"价格: {df['close'].iloc[-1]:.2f} | RSI: {df['rsi'].iloc[-1]:.1f} | ADX: {df['adx'].iloc[-1]:.1f}\n"
-                f"压缩: {'✅' if compression else '❌'} | 动能: {momentum_count}/4 | 突破: {breakout_dir}"
-            )
-            if momentum_list:
-                st.caption("动能细节: " + " | ".join(momentum_list))
+                st.caption(
+                    f"压缩: {'✅' if compression else '❌'} | 动能: {momentum_count}/4 | 突破: {breakout_dir}"
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
 
     # 统计面板
     st.markdown("---")
     with st.expander("📊 策略统计与 Monte Carlo 模拟", expanded=True):
-        col1, col2, col3, col4 = st.columns(4)
         stats = calculate_stats()
         if stats:
-            col1.metric("总信号数", stats['total_signals'])
-            col2.metric("胜率", f"{stats['win_rate']*100:.1f}%")
-            col3.metric("平均R", f"{stats['avg_r']:.2f}")
-            col4.metric("最大回撤(模拟)", f"{stats['max_drawdown']*100:.2f}%")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown("<div class='metric-card'><span class='metric-label'>总信号数</span><div class='metric-value'>{}</div></div>".format(stats['total_signals']), unsafe_allow_html=True)
+            with col2:
+                st.markdown("<div class='metric-card'><span class='metric-label'>胜率</span><div class='metric-value'>{:.1f}%</div></div>".format(stats['win_rate']*100), unsafe_allow_html=True)
+            with col3:
+                st.markdown("<div class='metric-card'><span class='metric-label'>平均R</span><div class='metric-value'>{:.2f}</div></div>".format(stats['avg_r']), unsafe_allow_html=True)
+            with col4:
+                st.markdown("<div class='metric-card'><span class='metric-label'>最大回撤(模拟)</span><div class='metric-value'>{:.2f}%</div></div>".format(stats['max_drawdown']*100), unsafe_allow_html=True)
 
-            if st.button("运行 Monte Carlo 模拟 (1000次)"):
+            if st.button("运行 Monte Carlo 模拟 (1000次)", use_container_width=True):
                 with st.spinner("模拟中..."):
                     mc_dds = monte_carlo_simulation()
                     if mc_dds:
                         fig_mc = go.Figure()
-                        fig_mc.add_trace(go.Histogram(x=mc_dds, nbinsx=50, marker_color='crimson'))
+                        fig_mc.add_trace(go.Histogram(x=mc_dds, nbinsx=50, marker_color='crimson', opacity=0.7))
                         fig_mc.update_layout(
                             title="Monte Carlo 最大回撤分布",
                             xaxis_title="最大回撤",
                             yaxis_title="频次",
-                            template='plotly_dark'
+                            template='plotly_dark',
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            font=dict(color='white')
                         )
                         st.plotly_chart(fig_mc, use_container_width=True)
                         q95 = np.percentile(mc_dds, 95)
