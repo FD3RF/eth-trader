@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 import ta
 
+# 页面配置
 st.set_page_config(page_title="币安15m盯盘工具", layout="wide")
 st.title("🚀 币安15分钟合约实时盯盘（高胜率版）")
 st.caption("实时数据 · 双模式信号 · 每天开单 · 当前时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -50,11 +51,11 @@ def fetch_ohlcv(symbol: str):
             ohlcv = ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            # 成功获取数据后，在界面显示来源（调试用）
-            st.sidebar.success(f"数据源: {ex.name} - {symbol}")
+            # 可在侧边栏显示数据源（调试用，正式可注释）
+            # st.sidebar.success(f"数据源: {ex.name} - {symbol}")
             return df
         except Exception as e:
-            st.sidebar.warning(f"{ex.name} 获取 {symbol} 失败: {str(e)[:50]}")
+            # st.sidebar.warning(f"{ex.name} 获取 {symbol} 失败: {str(e)[:50]}")
             continue
 
     # 所有交易所都失败
@@ -62,6 +63,7 @@ def fetch_ohlcv(symbol: str):
     return None
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """计算技术指标"""
     df = df.copy()
     df['ema12'] = ta.trend.ema_indicator(df['close'], window=12)
     df['ema26'] = ta.trend.ema_indicator(df['close'], window=26)
@@ -76,6 +78,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 # ==================== 信号生成 ====================
 def generate_signal(df: pd.DataFrame, symbol: str):
+    """根据最新数据生成交易信号和计划"""
     if len(df) < 50:
         return "数据不足", None
 
@@ -179,6 +182,6 @@ else:
 # 自动刷新提示
 st.info(f"自动刷新中... 下次更新: {REFRESH_INTERVAL}秒后")
 
-# 等待指定时间后刷新页面（简单实现，无需额外库）
+# 等待指定时间后刷新页面
 time.sleep(REFRESH_INTERVAL)
 st.rerun()
