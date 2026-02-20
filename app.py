@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-🚀 波动率扩张突破 · 量化盯盘终端（精简聚焦版）
-================================================
-[优化点]
-- 多交易所自动切换 + 模拟数据兜底
-- K线图高度减小，突出信号与计划
-- 统计面板默认折叠，界面更清爽
-================================================
+🚀 波动率扩张突破 · 量化盯盘（优雅卡片版）
+========================================
+[设计亮点]
+- 每个币种独立卡片，毛玻璃质感
+- 彩色信号标签（多头/空头/等待）
+- 指标值醒目展示，支持徽章
+- 统计面板图标化，默认折叠
+- 深色科技感主题，适配夜间使用
+========================================
 """
 
 import streamlit as st
@@ -21,34 +23,134 @@ import ta
 import random
 
 # ==================== 页面配置 ====================
-st.set_page_config(page_title="波动率扩张突破 · 精简版", layout="wide")
+st.set_page_config(page_title="波动率扩张突破 · 优雅版", layout="wide")
 st.markdown("""
 <style>
-    .stApp { background: #0a0f1e; color: #e0e0e0; }
-    .card {
-        background: rgba(20,30,50,0.8);
-        backdrop-filter: blur(10px);
-        border-radius: 15px;
-        padding: 15px;
-        margin: 10px 0;
-        border: 1px solid rgba(255,255,255,0.1);
+    /* 全局样式 */
+    .stApp {
+        background: linear-gradient(135deg, #0b0f1a 0%, #1a1f2f 100%);
+        color: #e0e0e0;
     }
+    h1, h2, h3 {
+        font-weight: 600;
+        letter-spacing: 0.5px;
+    }
+    .main-header {
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        text-align: center;
+        color: #8b949e;
+        font-size: 0.9rem;
+    }
+    /* 卡片样式 */
+    .coin-card {
+        background: rgba(25, 30, 40, 0.7);
+        backdrop-filter: blur(10px);
+        border-radius: 20px;
+        padding: 1.2rem;
+        border: 1px solid rgba(255,255,255,0.08);
+        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        transition: transform 0.2s;
+    }
+    .coin-card:hover {
+        transform: translateY(-4px);
+        border-color: rgba(255,255,255,0.15);
+    }
+    /* 信号标签 */
     .signal-badge {
         display: inline-block;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.9rem;
+        padding: 6px 16px;
+        border-radius: 40px;
         font-weight: 600;
+        font-size: 1rem;
+        margin: 8px 0;
     }
-    .badge-long { background: rgba(16,185,129,0.2); color: #10b981; border: 1px solid #10b981; }
-    .badge-short { background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid #ef4444; }
-    .badge-wait { background: rgba(59,130,246,0.2); color: #3b82f6; border: 1px solid #3b82f6; }
-    .metric-small { font-size: 1.2rem; font-weight: 600; color: white; }
+    .badge-long {
+        background: rgba(16, 185, 129, 0.15);
+        color: #10b981;
+        border: 1px solid #10b981;
+        box-shadow: 0 0 10px rgba(16,185,129,0.2);
+    }
+    .badge-short {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+        box-shadow: 0 0 10px rgba(239,68,68,0.2);
+    }
+    .badge-wait {
+        background: rgba(59, 130, 246, 0.15);
+        color: #3b82f6;
+        border: 1px solid #3b82f6;
+        box-shadow: 0 0 10px rgba(59,130,246,0.2);
+    }
+    /* 指标徽章 */
+    .metric-badge {
+        background: rgba(255,255,255,0.05);
+        border-radius: 12px;
+        padding: 8px 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid rgba(255,255,255,0.1);
+    }
+    .metric-label {
+        color: #8b949e;
+        font-size: 0.85rem;
+    }
+    .metric-value {
+        color: white;
+        font-weight: 600;
+        font-size: 1.1rem;
+    }
+    .stat-card {
+        background: rgba(30, 35, 45, 0.8);
+        border-radius: 16px;
+        padding: 1rem;
+        text-align: center;
+        border: 1px solid rgba(255,255,255,0.05);
+    }
+    .stat-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: white;
+    }
+    .stat-label {
+        color: #8b949e;
+        font-size: 0.9rem;
+    }
+    /* 分割线 */
+    hr {
+        border: none;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    }
+    /* 按钮美化 */
+    .stButton button {
+        background: rgba(59, 130, 246, 0.2);
+        color: white;
+        border: 1px solid #3b82f6;
+        border-radius: 30px;
+        font-weight: 500;
+        transition: all 0.3s;
+    }
+    .stButton button:hover {
+        background: #3b82f6;
+        color: white;
+        border-color: #3b82f6;
+        transform: scale(1.02);
+    }
+    /* 侧边栏 */
+    .css-1d391kg {
+        background: rgba(15, 20, 30, 0.9);
+        backdrop-filter: blur(10px);
+    }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 波动率扩张突破 · 精简版")
-st.caption(f"⏱️ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.markdown("<h1 class='main-header'>📈 波动率扩张突破 · 优雅卡片版</h1>", unsafe_allow_html=True)
+st.markdown(f"<p class='sub-header'>⏱️ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>", unsafe_allow_html=True)
 
 # ==================== 配置 ====================
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT"]
@@ -320,14 +422,19 @@ def plot_mini_chart(df: pd.DataFrame, symbol: str):
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
-    st.header("⚙️ 控制")
+    st.markdown("### ⚙️ 控制面板")
     st.session_state.monitor_symbols = st.multiselect("监控品种", DEFAULT_SYMBOLS, default=DEFAULT_SYMBOLS)
     st.session_state.use_simulated = st.checkbox("使用模拟数据（当真实数据不可用时）", value=st.session_state.use_simulated)
-    if st.button("重置统计"):
+    if st.button("🔄 重置统计"):
         st.session_state.signal_log = []
         st.session_state.equity_curve = [ACCOUNT_BALANCE]
         st.rerun()
-    st.caption(f"余额: {ACCOUNT_BALANCE:.0f} USDT | 风险/笔: {RISK_PER_TRADE*100:.1f}%")
+    st.markdown("---")
+    st.markdown(f"**余额**: {ACCOUNT_BALANCE:.0f} USDT")
+    st.markdown(f"**风险/笔**: {RISK_PER_TRADE*100:.1f}%")
+    st.markdown(f"**杠杆**: 100x")
+    st.markdown("---")
+    st.caption("数据源自动切换: Bybit → Binance → OKX → 模拟")
 
 # ==================== 主面板 ====================
 if not st.session_state.monitor_symbols:
@@ -338,10 +445,13 @@ else:
     for i, sym in enumerate(st.session_state.monitor_symbols):
         with cols[i]:
             with st.container():
-                st.markdown(f"<h3 style='margin:0'>{sym}</h3>", unsafe_allow_html=True)
+                st.markdown(f"<div class='coin-card'>", unsafe_allow_html=True)
+                st.markdown(f"<h3 style='margin:0 0 8px 0;'>{sym}</h3>", unsafe_allow_html=True)
+
                 df = fetch_ohlcv(sym, use_simulated=st.session_state.use_simulated)
                 if df is None:
                     st.error("数据获取失败")
+                    st.markdown("</div>", unsafe_allow_html=True)
                     continue
                 df = add_indicators(df)
                 signal, plan = generate_signal(df, sym)
@@ -359,7 +469,8 @@ else:
                     st.markdown(f"🎯 第一止盈: {plan['partial']:.2f} ({plan['r_partial']:.1f}R)")
                     st.markdown(f"🎯 第二止盈: {plan['trail']:.2f} ({plan['r_trail']:.1f}R, EMA12)")
                     st.markdown(f"💰 仓位: {plan['pos_usdt']:.0f} USDT (100x)")
-                    st.caption("动能: " + " ".join([f"`{m}`" for m in plan['momentum']]))
+                    # 动能徽章
+                    st.markdown("**动能触发**：" + " ".join([f"<span style='background:rgba(245,158,11,0.2); color:#f59e0b; padding:2px 8px; border-radius:20px; margin:0 2px;'>{m}</span>" for m in plan['momentum']]), unsafe_allow_html=True)
                     today_signals.append(signal)
                     # 模拟记录
                     st.session_state.signal_log.append(plan)
@@ -371,12 +482,23 @@ else:
                 fig = plot_mini_chart(df, sym)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # 状态行
+                # 指标行
+                last = df.iloc[-1]
                 comp = check_compression(df)
                 mom_cnt, _ = check_momentum(df)
                 breakout, _ = check_breakout(df)
-                st.caption(f"价格: {df['close'].iloc[-1]:.0f} | RSI: {df['rsi'].iloc[-1]:.1f} | ADX: {df['adx'].iloc[-1]:.1f}")
-                st.caption(f"压缩: {'✅' if comp else '❌'} 动能: {mom_cnt}/4 突破: {breakout}")
+                st.markdown(f"""
+                <div style='display:flex; flex-wrap:wrap; gap:10px; margin-top:10px;'>
+                    <span class='metric-badge'><span class='metric-label'>价格</span><span class='metric-value'>{last['close']:.0f}</span></span>
+                    <span class='metric-badge'><span class='metric-label'>RSI</span><span class='metric-value'>{last['rsi']:.1f}</span></span>
+                    <span class='metric-badge'><span class='metric-label'>ADX</span><span class='metric-value'>{last['adx']:.1f}</span></span>
+                    <span class='metric-badge'><span class='metric-label'>压缩</span><span class='metric-value'>{'✅' if comp else '❌'}</span></span>
+                    <span class='metric-badge'><span class='metric-label'>动能</span><span class='metric-value'>{mom_cnt}/4</span></span>
+                    <span class='metric-badge'><span class='metric-label'>突破</span><span class='metric-value'>{breakout}</span></span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown("</div>", unsafe_allow_html=True)
 
     # 统计面板（默认折叠）
     with st.expander("📊 统计与蒙特卡洛", expanded=False):
@@ -389,22 +511,26 @@ else:
                 '最大回撤': f"{random.uniform(0.05,0.15)*100:.1f}%"
             }
             cola, colb, colc, cold = st.columns(4)
-            cola.metric("总信号", stats['总信号'])
-            colb.metric("胜率", stats['胜率'])
-            colc.metric("平均R", stats['平均R'])
-            cold.metric("最大回撤", stats['最大回撤'])
+            with cola:
+                st.markdown(f"<div class='stat-card'><div class='stat-value'>{stats['总信号']}</div><div class='stat-label'>总信号</div></div>", unsafe_allow_html=True)
+            with colb:
+                st.markdown(f"<div class='stat-card'><div class='stat-value'>{stats['胜率']}</div><div class='stat-label'>胜率</div></div>", unsafe_allow_html=True)
+            with colc:
+                st.markdown(f"<div class='stat-card'><div class='stat-value'>{stats['平均R']}</div><div class='stat-label'>平均R</div></div>", unsafe_allow_html=True)
+            with cold:
+                st.markdown(f"<div class='stat-card'><div class='stat-value'>{stats['最大回撤']}</div><div class='stat-label'>最大回撤</div></div>", unsafe_allow_html=True)
 
-            if st.button("运行蒙特卡洛 (1000次)"):
+            if st.button("🚀 运行蒙特卡洛模拟 (1000次)"):
                 # 简易蒙特卡洛演示
                 mc_dds = np.random.beta(2, 8, 1000) * 0.3
                 fig_mc = go.Figure(data=[go.Histogram(x=mc_dds, nbinsx=40, marker_color='crimson')])
                 fig_mc.update_layout(title="最大回撤分布", xaxis_title="回撤", yaxis_title="频次", template='plotly_dark')
                 st.plotly_chart(fig_mc, use_container_width=True)
                 q95 = np.percentile(mc_dds, 95)
-                st.info(f"95% 置信回撤: {q95*100:.2f}%")
+                st.success(f"95% 置信回撤: {q95*100:.2f}%")
         else:
-            st.info("暂无信号记录")
+            st.info("📭 暂无信号记录，等待信号触发...")
 
-    st.info(f"自动刷新中... {REFRESH_INTERVAL}秒后更新")
+    st.info(f"⏳ 自动刷新中... {REFRESH_INTERVAL}秒后更新")
     time.sleep(REFRESH_INTERVAL)
     st.rerun()
