@@ -176,9 +176,21 @@ def append_to_db(table: str, row: dict) -> None:
         c.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", list(row.values()))
         conn.commit()
 
-def load_from_db(table: str, limit: int = None, condition: str = "", params: tuple = ()) -> pd.DataFrame:
+def load_from_db(table: str, limit: int = None, condition: str = "", params: tuple = (), order_by: str = None) -> pd.DataFrame:
+    """
+    从数据库加载数据。
+    :param table: 表名
+    :param limit: 限制返回行数
+    :param condition: SQL WHERE 条件（例如 "WHERE symbol=?"），需包含 WHERE 关键字
+    :param params: 参数元组
+    :param order_by: 排序字段，例如 "time DESC"
+    """
     conn = get_db_conn()
-    query = f"SELECT * FROM {table} {condition} ORDER BY time DESC"
+    query = f"SELECT * FROM {table}"
+    if condition:
+        query += f" {condition}"
+    if order_by:
+        query += f" ORDER BY {order_by}"
     if limit:
         query += f" LIMIT {limit}"
     return pd.read_sql_query(query, conn, params=params)
@@ -685,7 +697,7 @@ def dynamic_kelly_fraction() -> float:
 
 # ==================== 会话状态初始化 ====================
 def init_session_state() -> None:
-    equity_df = load_from_db('equity_curve', limit=500)
+    equity_df = load_from_db('equity_curve', limit=500, order_by='time DESC')
     equity_curve = deque(maxlen=500)
     if not equity_df.empty:
         for _, row in equity_df.iterrows():
@@ -2656,7 +2668,7 @@ class UIRenderer:
                     st.session_state.telegram_chat_id = chat_id
 
                 if st.button("📂 查看历史交易记录", key="view_history_button"):
-                    df_trades = load_from_db('trades', limit=20)
+                    df_trades = load_from_db('trades', limit=20, order_by='time DESC')
                     st.dataframe(df_trades)
 
                 if st.button("🔧 数据修复", key="fix_data_button"):
