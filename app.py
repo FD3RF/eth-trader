@@ -5,7 +5,7 @@
 [新增功能]
 - ✅ 自动统计模块（胜率、平均R、回撤）
 - ✅ Monte Carlo 回撤模拟
-- ✅ 多币种扫描器（按成交额排序）
+- ✅ 多币种扫描器（按成交额排序，多交易所备选 + 手动输入）
 ===========================================================
 """
 
@@ -59,33 +59,37 @@ if 'equity_curve' not in st.session_state:
 # ==================== 多币种扫描器 ====================
 @st.cache_data(ttl=300)
 def fetch_top_symbols(limit=20):
-    """获取按24h成交额排序的热门币种（使用Bybit）"""
-    try:
-        ex = EXCHANGES['bybit']
-        tickers = ex.fetch_tickers()
-        data = []
-        for symbol, ticker in tickers.items():
-            if '/USDT' in symbol and 'USDC' not in symbol:
-                quote_volume = ticker.get('quoteVolume', 0)
-                if quote_volume and quote_volume > 0:
-                    data.append({
-                        'symbol': symbol,
-                        'volume': quote_volume,
-                        'last': ticker['last'],
-                        'change': ticker.get('percentage', 0)
-                    })
-        df = pd.DataFrame(data)
-        df = df.sort_values('volume', ascending=False).head(limit)
-        return df
-    except Exception as e:
-        st.error(f"获取热门币种失败: {e}")
-        return pd.DataFrame()
+    """尝试多个交易所获取按24h成交额排序的热门币种"""
+    exchanges_to_try = ['bybit', 'binance', 'okx']
+    for name in exchanges_to_try:
+        try:
+            ex = EXCHANGES[name]
+            tickers = ex.fetch_tickers()
+            data = []
+            for symbol, ticker in tickers.items():
+                if '/USDT' in symbol and 'USDC' not in symbol:
+                    quote_volume = ticker.get('quoteVolume', 0)
+                    if quote_volume and quote_volume > 0:
+                        data.append({
+                            'symbol': symbol,
+                            'volume': quote_volume,
+                            'last': ticker['last'],
+                            'change': ticker.get('percentage', 0)
+                        })
+            if data:
+                df = pd.DataFrame(data)
+                df = df.sort_values('volume', ascending=False).head(limit)
+                return df, name  # 返回数据和成功的交易所名称
+        except Exception:
+            continue
+    return pd.DataFrame(), None
 
 def render_symbol_scanner():
     with st.sidebar:
         st.markdown("## 🔍 多币种扫描器")
-        top_df = fetch_top_symbols(20)
+        top_df, source = fetch_top_symbols(20)
         if not top_df.empty:
+            st.success(f"数据来源: {source}")
             st.dataframe(
                 top_df[['symbol', 'volume', 'last', 'change']].style.format({
                     'volume': '{:.0f}',
@@ -101,7 +105,12 @@ def render_symbol_scanner():
                     st.session_state.monitor_symbols.append(selected)
                     st.success(f"已添加 {selected}")
         else:
-            st.warning("无法获取数据")
+            st.error("无法获取热门币种，请检查网络或使用手动输入")
+            manual_symbol = st.text_input("手动输入币种 (格式: BTC/USDT)", value="")
+            if st.button("➕ 手动添加") and manual_symbol:
+                if manual_symbol not in st.session_state.monitor_symbols:
+                    st.session_state.monitor_symbols.append(manual_symbol)
+                    st.success(f"已添加 {manual_symbol}")
 
 # ==================== 数据获取 ====================
 @st.cache_data(ttl=20)
