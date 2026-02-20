@@ -10,3 +10,4 @@ pytz
 scikit-learn
 joblib
 scikit-optimize
+streamlit-autorefresh
