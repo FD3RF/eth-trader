@@ -4,12 +4,11 @@
 ===================================================
 [功能说明]
 - 实时获取BTC/USDT和ETH/USDT 15m K线（优先Bybit，备选Binance/OKX）
-- 计算核心指标：EMA12/26、RSI14、布林带、ADX14、ATR
-- 双模式信号：趋势模式（高胜率） + 震荡模式（补每天开单）
+- 计算核心指标：EMA12/26、RSI14、布林带、ADX14、ATR、成交量比率
+- 双模式信号：趋势模式（ADX>23） + 震荡模式（布林带+RSI+成交量）
 - 明确显示当前趋势方向 + 交易计划（入场/止损/止盈）
 - 自动刷新（每30秒）
-- 胜率导向：趋势信号优先，震荡补位，目标每天1-3单
-- 可直接运行：streamlit run stare.py
+- 修改说明：ADX阈值降至23，震荡模式RSI放宽至40/60，增加成交量确认（>1.2）
 ===================================================
 """
 
@@ -51,19 +50,15 @@ def fetch_ohlcv(symbol: str):
             ohlcv = ex.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            # 可在侧边栏显示数据源（调试用，正式可注释）
-            # st.sidebar.success(f"数据源: {ex.name} - {symbol}")
             return df
-        except Exception as e:
-            # st.sidebar.warning(f"{ex.name} 获取 {symbol} 失败: {str(e)[:50]}")
+        except Exception:
             continue
 
-    # 所有交易所都失败
     st.error(f"无法获取 {symbol} 数据，请检查网络连接或尝试使用VPN。")
     return None
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """计算技术指标"""
+    """计算技术指标，包括成交量比率"""
     df = df.copy()
     df['ema12'] = ta.trend.ema_indicator(df['close'], window=12)
     df['ema26'] = ta.trend.ema_indicator(df['close'], window=26)
@@ -74,11 +69,14 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['bb_lower'] = bb.bollinger_lband()
     df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
     df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    # 成交量比率
+    df['volume_sma'] = df['volume'].rolling(window=20).mean()
+    df['volume_ratio'] = df['volume'] / df['volume_sma']
     return df
 
-# ==================== 信号生成 ====================
+# ==================== 信号生成（您的修改版）====================
 def generate_signal(df: pd.DataFrame, symbol: str):
-    """根据最新数据生成交易信号和计划"""
+    """根据最新数据生成交易信号和计划（更活跃的震荡模式）"""
     if len(df) < 50:
         return "数据不足", None
 
@@ -94,27 +92,30 @@ def generate_signal(df: pd.DataFrame, symbol: str):
     bb_lower = last['bb_lower']
     bb_middle = last['bb_middle']
     atr = last['atr']
+    volume_ratio = last['volume_ratio']  # 直接从指标列获取
 
     signal = "观望"
     plan = None
 
-    # 趋势模式（高胜率优先）
-    if adx > 25:  # 强趋势
-        if ema12 > ema26 and prev['ema12'] <= prev['ema26']:  # 金叉
-            signal = f"强势多头信号 ({symbol})"
-            plan = f"入场：{price:.2f} 多\n止损：{price - atr*1.5:.2f}\n止盈：{price + atr*3:.2f} (2倍风险)"
-        elif ema12 < ema26 and prev['ema12'] >= prev['ema26']:  # 死叉
-            signal = f"强势空头信号 ({symbol})"
-            plan = f"入场：{price:.2f} 空\n止损：{price + atr*1.5:.2f}\n止盈：{price - atr*3:.2f} (2倍风险)"
+    # 趋势模式（ADX > 23）
+    if adx > 23:
+        if ema12 > ema26 and prev['ema12'] <= prev['ema26']:
+            signal = f"多头趋势信号 ({symbol})"
+            plan = f"入场多：{price:.2f}\n止损：{price - atr*1.5:.2f}\n止盈：{price + atr*3:.2f}"
+        elif ema12 < ema26 and prev['ema12'] >= prev['ema26']:
+            signal = f"空头趋势信号 ({symbol})"
+            plan = f"入场空：{price:.2f}\n止损：{price + atr*1.5:.2f}\n止盈：{price - atr*3:.2f}"
 
-    # 震荡模式（补每天开单）
-    elif adx <= 25:
-        if price <= bb_lower and rsi < 35:
+    # 震荡模式（放宽条件 + 成交量确认）
+    else:
+        # 接近下轨（1%范围内）+ RSI<40 + 放量
+        if price <= bb_lower * 1.01 and rsi < 40 and volume_ratio > 1.2:
             signal = f"震荡多头信号 ({symbol})"
-            plan = f"入场：{price:.2f} 多（下轨反弹）\n止损：{price - atr*1.2:.2f}\n止盈：{bb_middle:.2f} (中轨)"
-        elif price >= bb_upper and rsi > 65:
+            plan = f"入场多：{price:.2f}（下轨反弹）\n止损：{price - atr*1.2:.2f}\n止盈：{bb_middle:.2f}"
+        # 接近上轨（1%范围内）+ RSI>60 + 放量
+        elif price >= bb_upper * 0.99 and rsi > 60 and volume_ratio > 1.2:
             signal = f"震荡空头信号 ({symbol})"
-            plan = f"入场：{price:.2f} 空（上轨回落）\n止损：{price + atr*1.2:.2f}\n止盈：{bb_middle:.2f} (中轨)"
+            plan = f"入场空：{price:.2f}（上轨回落）\n止损：{price + atr*1.2:.2f}\n止盈：{bb_middle:.2f}"
 
     return signal, plan
 
@@ -153,7 +154,7 @@ for i, symbol in enumerate(SYMBOLS):
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df['adx'], line=dict(color='blue'), name="ADX"), row=3, col=1)
-        fig.add_hline(y=25, line_dash="dash", line_color="gray", row=3, col=1)
+        fig.add_hline(y=23, line_dash="dash", line_color="gray", row=3, col=1)  # 阈值改为23
 
         fig.update_layout(height=600, template="plotly_dark", showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
@@ -167,7 +168,7 @@ for i, symbol in enumerate(SYMBOLS):
             st.code(plan)
             signals_today.append(signal)
 
-        st.caption(f"最新价格: {df['close'].iloc[-1]:.2f} | RSI: {df['rsi'].iloc[-1]:.1f} | ADX: {df['adx'].iloc[-1]:.1f}")
+        st.caption(f"最新价格: {df['close'].iloc[-1]:.2f} | RSI: {df['rsi'].iloc[-1]:.1f} | ADX: {df['adx'].iloc[-1]:.1f} | 量比: {df['volume_ratio'].iloc[-1]:.2f}")
 
 # ==================== 总结 ====================
 st.markdown("### 当日信号总结")
