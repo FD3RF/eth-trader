@@ -13,7 +13,7 @@ from datetime import datetime
 # ================================
 # 1. 核心参数与看板设置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 10级双向 AI (OKX)", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH 100x 终极双向 AI (OKX)", page_icon="⚖️")
 
 SYMBOL = "ETH/USDT:USDT"            # OKX 永续合约
 REFRESH_MS = 2500                   # 2.5秒刷新
@@ -60,7 +60,7 @@ BREAKOUT_VOL_RATIO = 1.5       # 成交量放大倍数
 BREAKOUT_ATR_SURGE = True      # ATR surge需为True
 BREAKOUT_ADX_MIN = 25          # ADX最小值
 
-st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_ultimate")
+st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_final")
 
 # ================================
 # 2. 初始化交易所和模型
@@ -120,17 +120,24 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算函数
+# 5. 指标计算函数（修复VWAP索引）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     """计算所有需要的指标，返回DataFrame和最新特征向量"""
+    # 将时间戳列转换为datetime并设置为索引，确保有序（VWAP要求）
+    for df in [df_5m, df_15m, df_1h]:
+        df['t'] = pd.to_datetime(df['t'], unit='ms')
+        df.set_index('t', inplace=True)
+        df.sort_index(inplace=True)  # 确保按时间升序排列
+
     # ----- 5m 指标（用于动量核 + 模型）-----
     df_5m["rsi"] = ta.rsi(df_5m["c"], length=14)
     df_5m["ma20"] = ta.sma(df_5m["c"], length=20)
     df_5m["ma60"] = ta.sma(df_5m["c"], length=60)
     macd = ta.macd(df_5m["c"])
     df_5m["macd"] = macd["MACD_12_26_9"]
-    df_5m["macd_signal"] = macd["MACDs_12_26_9"]   # 标准信号线（请根据您的训练脚本调整）
+    # 注意：请根据您的训练脚本调整此行，如果训练时用了MACD线作为信号线，则使用MACD_12_26_9；如果用了标准信号线，则使用MACDs_12_26_9
+    df_5m["macd_signal"] = macd["MACD_12_26_9"]   # 默认与训练对齐（请根据实际情况修改）
     df_5m["atr"] = ta.atr(df_5m["h"], df_5m["l"], df_5m["c"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["c"]
     df_5m["adx"] = ta.adx(df_5m["h"], df_5m["l"], df_5m["c"], length=14)["ADX_14"]
@@ -138,6 +145,7 @@ def compute_features(df_5m, df_15m, df_1h):
     # 动量核所需指标
     df_5m["ema9"] = ta.ema(df_5m["c"], length=9)
     df_5m["ema21"] = ta.ema(df_5m["c"], length=21)
+    # VWAP 现在会在有序索引下正确计算
     df_5m["vwap"] = ta.vwap(df_5m["h"], df_5m["l"], df_5m["c"], df_5m["v"])
     df_5m["volume_ma20"] = ta.sma(df_5m["v"], length=20)
     # ATR扩张判断：当前ATR > 20期平均ATR * 1.2
@@ -329,7 +337,7 @@ with st.sidebar:
 # ================================
 # 8. 主界面
 # ================================
-st.title("⚖️ ETH 100x 10级双向评分 AI 决策终端 (趋势+动量+模型)")
+st.title("⚖️ ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -402,8 +410,8 @@ try:
         # 检测爆发结构
         is_breakout = detect_breakout(df_5m)
         
-        # 当前K线时间戳
-        current_candle_time = df_5m['t'].iloc[-1]
+        # 当前K线时间戳（毫秒）
+        current_candle_time = df_5m.index[-1].value / 10**6  # 转换为毫秒
         
         # 冷却时间检查（基于K线数量）
         if st.session_state.last_signal_candle is not None:
@@ -497,7 +505,7 @@ try:
             if st.session_state.last_signal_candle != current_candle_time:
                 st.session_state.active_signal = None
         
-        # 顶部仪表盘
+        # 顶部仪表盘（使用索引作为x轴不影响显示，但需确保x使用索引）
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ETH 实时价", f"${current_price}")
         col2.metric("趋势核 (多/空)", f"{trend_long}/{trend_short}")
@@ -548,9 +556,9 @@ try:
         else:
             st.info("🔎 当前无符合要求的信号")
         
-        # 显示K线图（5m）
+        # 显示K线图（5m），使用索引作为x轴
         fig = go.Figure(data=[go.Candlestick(
-            x=pd.to_datetime(df_5m['t'], unit='ms'),
+            x=df_5m.index,  # 现在是 DatetimeIndex
             open=df_5m['o'], high=df_5m['h'], low=df_5m['l'], close=df_5m['c']
         )])
         fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
