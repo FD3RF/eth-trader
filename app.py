@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🤖 AI 自进化交易平台 VAI v9.0 终极整合版
+🤖 AI 自进化交易平台 VAI v9.0 终极版 · 纯真实数据模式
 ===========================================================
 功能：
 - 多周期共振策略（5m/15m/1h）
@@ -14,6 +14,7 @@
 - 当前价格标签显示最新价及涨跌幅
 - 每个币种下方显示详细多时间框架信号
 - 完整回测中心、风险仪表板、交易统计
+- 纯真实数据模式：不再有“使用模拟数据”选项，默认从交易所获取
 ===========================================================
 """
 import streamlit as st
@@ -34,7 +35,7 @@ import os
 nest_asyncio.apply()
 
 # ==================== 深色主题CSS ====================
-st.set_page_config(page_title="VAI v9.0 终极整合版", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="VAI v9.0 终极版", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; color: #ffffff; }
@@ -78,7 +79,6 @@ EXCHANGES = [
 
 # ==================== 会话状态初始化 ====================
 defaults = {
-    'use_simulated': True,
     'real_trading': False,
     'dry_run': True,
     'api_key': '',
@@ -101,8 +101,8 @@ defaults = {
     'total_trades': 0,
     'winning_trades': 0,
     'total_pnl': 0.0,
-    'max_trades_per_day': 30,          # 每日开单上限
-    'preferred_exchange': 'binance',    # 首选交易所
+    'max_trades_per_day': 30,
+    'preferred_exchange': 'binance',
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -119,8 +119,9 @@ if api_key_from_env and not st.session_state.api_key:
 if secret_from_env and not st.session_state.secret:
     st.session_state.secret = secret_from_env
 
-# ==================== 模拟K线生成 ====================
+# ==================== 模拟K线生成（仅作为最后回退）====================
 def generate_simulated_ohlcv(symbol, timeframe, limit=300):
+    """当所有交易所都失败时，临时生成模拟数据"""
     key = f"{symbol}_{timeframe}"
     st.session_state.sim_step += 1
     np.random.seed(hash(key + str(st.session_state.sim_step)) % 2**32)
@@ -154,8 +155,9 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=300):
     st.session_state.sim_prices[key] = prices
     return df
 
-# ==================== 多交易所数据获取 ====================
+# ==================== 多交易所数据获取（纯真实模式）====================
 def fetch_ohlcv(symbol, timeframe, limit=300, days_back=None):
+    """从交易所获取真实数据，如果所有交易所都失败则生成模拟数据并警告"""
     cache_key = f"{symbol}_{timeframe}_{limit}"
     now = datetime.now()
     if cache_key in st.session_state.cached_ohlcv:
@@ -163,37 +165,36 @@ def fetch_ohlcv(symbol, timeframe, limit=300, days_back=None):
         if (now - cached_time).seconds < 20:
             return cached_df
 
-    if st.session_state.use_simulated:
+    df = None
+    # 按优先级尝试交易所
+    for exch in EXCHANGES:
+        try:
+            ex = exch['class']({
+                'enableRateLimit': True,
+                'options': exch['options']
+            })
+            # 对 symbol 进行可能的格式转换
+            exch_symbol = symbol
+            if exch['name'] == 'okx' and '/USDT' in symbol:
+                exch_symbol = symbol.replace('/USDT', '/USDT:USDT')
+            if exch['name'] == 'bybit' and '/USDT' in symbol:
+                exch_symbol = symbol.replace('/USDT', '/USDT:USDT')
+            if days_back:
+                since = int((datetime.now() - timedelta(days=days_back)).timestamp()*1000)
+                ohlcv = ex.fetch_ohlcv(exch_symbol, timeframe, since=since, limit=limit)
+            else:
+                ohlcv = ex.fetch_ohlcv(exch_symbol, timeframe, limit=limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 使用 {exch['name']} 数据源")
+            break
+        except Exception as e:
+            continue
+
+    if df is None:
+        # 所有交易所均失败，使用模拟数据并警告
+        st.warning(f"⚠️ 所有交易所均获取数据失败，临时使用模拟数据")
         df = generate_simulated_ohlcv(symbol, timeframe, limit)
-    else:
-        df = None
-        # 按优先级尝试交易所
-        for exch in EXCHANGES:
-            try:
-                ex = exch['class']({
-                    'enableRateLimit': True,
-                    'options': exch['options']
-                })
-                # 对 symbol 进行可能的格式转换
-                exch_symbol = symbol
-                if exch['name'] == 'okx' and '/USDT' in symbol:
-                    exch_symbol = symbol.replace('/USDT', '/USDT:USDT')
-                if exch['name'] == 'bybit' and '/USDT' in symbol:
-                    exch_symbol = symbol.replace('/USDT', '/USDT:USDT')
-                if days_back:
-                    since = int((datetime.now() - timedelta(days=days_back)).timestamp()*1000)
-                    ohlcv = ex.fetch_ohlcv(exch_symbol, timeframe, since=since, limit=limit)
-                else:
-                    ohlcv = ex.fetch_ohlcv(exch_symbol, timeframe, limit=limit)
-                df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 使用 {exch['name']} 数据源")
-                break
-            except Exception as e:
-                continue
-        if df is None:
-            st.warning("所有交易所均获取失败，使用模拟数据")
-            df = generate_simulated_ohlcv(symbol, timeframe, limit)
 
     st.session_state.cached_ohlcv[cache_key] = (now, df)
     return df
@@ -583,7 +584,7 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 主标题 ====================
-st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 终极整合版 · 多周期共振策略", unsafe_allow_html=True)
+st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 终极版 · 纯真实数据模式", unsafe_allow_html=True)
 st.caption("🌟 已开启多交易所切换 + 增强指标 + 止盈/移动止损 · 每25秒自动刷新")
 
 # ==================== 主标签页 ====================
@@ -790,11 +791,10 @@ with tab3:
 
 with tab4:
     st.header("⚙️ 设定")
-    st.session_state.use_simulated = st.checkbox("使用模拟数据", st.session_state.use_simulated)
+    # 注意：已移除“使用模拟数据”复选框
     st.session_state.real_trading = st.checkbox("启用真实交易", st.session_state.real_trading)
     st.session_state.dry_run = st.checkbox("乾跑模式（不下真实单）", st.session_state.dry_run)
     if st.session_state.real_trading:
-        # 如果从环境变量或secrets读取到了密钥，自动填充
         st.session_state.api_key = st.text_input("Binance API Key", st.session_state.api_key, type="password")
         st.session_state.secret = st.text_input("Binance Secret", st.session_state.secret, type="password")
         if not st.session_state.api_key or not st.session_state.secret:
@@ -813,6 +813,6 @@ with tab4:
 st_autorefresh(interval=25000, key="auto_refresh")
 st.markdown("""
 <div style="text-align:center; color:#666; font-size:14px;">
-    ⭐ 短线优化版 VAI v9.0 终极版 · 每25秒自动刷新 · 多交易所 + 增强指标 + 移动止损/止盈
+    ⭐ 短线优化版 VAI v9.0 终极版 · 纯真实数据 · 每25秒自动刷新 · 多交易所 + 增强指标 + 移动止损/止盈
 </div>
 """, unsafe_allow_html=True)
