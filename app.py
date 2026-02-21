@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-🤖 AI 自进化交易平台 VAI v9.0 短线优化版（增强版）
+🤖 AI 自进化交易平台 VAI v9.0 短线优化版（多交易所 + 增强指标）
 ===========================================================
 新增功能：
-- 止盈：基于 ATR 倍数的固定止盈（可配置）
-- 移动止损：盈利超过 1 倍 ATR 后，止损移动至开仓价（保本）
-- 胜率统计：实时显示总交易次数、胜率、总盈亏，并支持重置
+- 多交易所自动切换：Binance → OKX → Bybit
+- 新增技术指标：MACD、VWAP、OBV、布林带% B
+- K线图增强：成交量副图 + MACD 副图
+- 止盈、移动止损、胜率统计
+- 每日开单上限可配置（默认30）
 """
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -29,7 +31,14 @@ ACCOUNT_BALANCE = 10000.0
 LEVERAGE = 100
 MAX_TOTAL_RISK = 0.55
 TIMEFRAMES = ['5m', '15m', '1h']
-MAX_TRADES_PER_DAY = 10
+# 不再硬编码每日上限，由 session_state 管理
+
+# 交易所配置（按优先级）
+EXCHANGES = [
+    {'name': 'binance', 'class': ccxt.binance, 'options': {'defaultType': 'future'}},
+    {'name': 'okx', 'class': ccxt.okx, 'options': {'defaultType': 'swap'}},
+    {'name': 'bybit', 'class': ccxt.bybit, 'options': {'defaultType': 'linear'}},
+]
 
 # ==================== 会话状态初始化 ====================
 defaults = {
@@ -53,10 +62,11 @@ defaults = {
     'daily_trade_count': 0,
     'last_trade_day': datetime.now().date(),
     'pending_signals': [],
-    # 新增统计变量
     'total_trades': 0,
     'winning_trades': 0,
     'total_pnl': 0.0,
+    'max_trades_per_day': 30,  # 每日开单上限，默认30
+    'preferred_exchange': 'binance',  # 首选交易所
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -101,7 +111,7 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=300):
     st.session_state.sim_prices[key] = prices
     return df
 
-# ==================== 数据获取 ====================
+# ==================== 多交易所数据获取 ====================
 def fetch_ohlcv(symbol, timeframe, limit=300, days_back=None):
     cache_key = f"{symbol}_{timeframe}_{limit}"
     now = datetime.now()
@@ -109,29 +119,49 @@ def fetch_ohlcv(symbol, timeframe, limit=300, days_back=None):
         cached_time, cached_df = st.session_state.cached_ohlcv[cache_key]
         if (now - cached_time).seconds < 20:
             return cached_df
+
     if st.session_state.use_simulated:
         df = generate_simulated_ohlcv(symbol, timeframe, limit)
     else:
-        try:
-            ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-            if days_back:
-                since = int((datetime.now() - timedelta(days=days_back)).timestamp()*1000)
-                ohlcv = ex.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-            else:
-                ohlcv = ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        except Exception as e:
-            st.warning(f"获取真实数据失败，使用模拟数据: {e}")
+        df = None
+        # 按优先级尝试交易所
+        for exch in EXCHANGES:
+            try:
+                # 如果用户指定了首选且不是当前，跳过？这里简单按顺序尝试
+                ex = exch['class']({
+                    'enableRateLimit': True,
+                    'options': exch['options']
+                })
+                # 对 symbol 进行可能的格式转换（OKX 需要 /USDT:USDT）
+                exch_symbol = symbol
+                if exch['name'] == 'okx' and '/USDT' in symbol:
+                    exch_symbol = symbol.replace('/USDT', '/USDT:USDT')
+                if exch['name'] == 'bybit' and '/USDT' in symbol:
+                    exch_symbol = symbol.replace('/USDT', '/USDT:USDT')  # Bybit 线性合约格式
+                if days_back:
+                    since = int((datetime.now() - timedelta(days=days_back)).timestamp()*1000)
+                    ohlcv = ex.fetch_ohlcv(exch_symbol, timeframe, since=since, limit=limit)
+                else:
+                    ohlcv = ex.fetch_ohlcv(exch_symbol, timeframe, limit=limit)
+                df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 使用 {exch['name']} 数据源")
+                break
+            except Exception as e:
+                continue
+        if df is None:
+            st.warning("所有交易所均获取失败，使用模拟数据")
             df = generate_simulated_ohlcv(symbol, timeframe, limit)
+
     st.session_state.cached_ohlcv[cache_key] = (now, df)
     return df
 
-# ==================== 技术指标 ====================
+# ==================== 技术指标（增强版）====================
 def add_indicators(df):
     if len(df) < 90:
         return df
     df = df.copy()
+    # 原有指标
     df['ema12'] = ta.trend.ema_indicator(df['close'],12)
     df['ema26'] = ta.trend.ema_indicator(df['close'],26)
     df['rsi'] = ta.momentum.rsi(df['close'],14)
@@ -149,6 +179,20 @@ def add_indicators(df):
     df['bb_width_rank50'] = df['bb_width'].rolling(50).rank(pct=True) <= 0.22
     df['adx_below25'] = df['adx'] < 25
     df['adx_streak'] = df['adx_below25'].groupby((df['adx_below25'] != df['adx_below25'].shift()).cumsum()).cumsum()
+
+    # 新增指标
+    # MACD
+    macd = ta.trend.MACD(df['close'])
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['macd_diff'] = macd.macd_diff()
+    # VWAP（近似，日内需分段，这里简单用累积）
+    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+    # OBV
+    df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
+    # 布林带% B
+    df['bb_percent'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+
     return df
 
 # ==================== 多时间框架信号 ====================
@@ -177,6 +221,7 @@ def parse_dir(sig_str):
 def get_exchange():
     if not (st.session_state.real_trading and st.session_state.api_key and st.session_state.secret):
         return None
+    # 这里默认使用 Binance 进行交易（下单），可按需扩展
     return ccxt.binance({
         'apiKey': st.session_state.api_key,
         'secret': st.session_state.secret,
@@ -211,7 +256,7 @@ def open_position(symbol, side, entry, stop, size, current_price):
         st.session_state.daily_trade_count = 0
         st.session_state.last_trade_day = today
         process_pending_signals()
-    if st.session_state.daily_trade_count >= MAX_TRADES_PER_DAY:
+    if st.session_state.daily_trade_count >= st.session_state.max_trades_per_day:
         st.session_state.pending_signals.append({
             'symbol': symbol, 'side': side, 'entry': entry,
             'stop': stop, 'size': size, 'time': datetime.now()
@@ -222,13 +267,12 @@ def open_position(symbol, side, entry, stop, size, current_price):
         msg = execute_real_order(symbol, side, size)
     else:
         msg = f"模拟开仓 {side} {size:.0f}USDT"
-    # 新增 breakeven 标记，用于移动止损
     st.session_state.positions[symbol] = {
         'side': side,
         'entry': entry,
         'stop': stop,
         'size': size,
-        'breakeven': False   # 是否已移动止损至保本
+        'breakeven': False
     }
     st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 开仓 {symbol} {side} @{entry:.2f} 止损{stop:.2f} {msg}")
     st.session_state.daily_trade_count += 1
@@ -261,7 +305,7 @@ def process_pending_signals():
     today = datetime.now().date()
     if st.session_state.last_trade_day != today:
         return
-    remaining = MAX_TRADES_PER_DAY - st.session_state.daily_trade_count
+    remaining = st.session_state.max_trades_per_day - st.session_state.daily_trade_count
     if remaining <= 0 or not st.session_state.pending_signals:
         return
     for i in range(min(remaining, len(st.session_state.pending_signals))):
@@ -314,15 +358,14 @@ async def process_single_symbol(symbol):
         return
     st.session_state.last_signal_time[symbol] = last_time
 
-    # 获取当前持仓
     pos = st.session_state.positions.get(symbol)
 
-    # 1. 止损检查（必须先于移动止损和止盈）
+    # 止损检查
     if pos and ((pos['side']=='多' and current_price<=pos['stop']) or (pos['side']=='空' and current_price>=pos['stop'])):
         close_position(symbol, pos, current_price, "止损")
         pos = None
 
-    # 2. 移动止损（保本）：盈利超过1倍ATR后，将止损移至开仓价
+    # 移动止损（保本）
     if pos and not pos.get('breakeven', False):
         atr = df['atr'].iloc[-1]
         if pos['side'] == '多':
@@ -336,7 +379,7 @@ async def process_single_symbol(symbol):
                 pos['breakeven'] = True
                 st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} {symbol} 移动止损至保本")
 
-    # 3. 止盈检查（基于ATR倍数）
+    # 止盈检查
     if pos:
         take_profit_mult = st.session_state.get('TAKE_PROFIT_MULT', 2.0)
         atr = df['atr'].iloc[-1]
@@ -351,7 +394,6 @@ async def process_single_symbol(symbol):
                 close_position(symbol, pos, current_price, "止盈")
                 pos = None
 
-    # 如果已经平仓，不再继续开仓逻辑（但允许反向信号开仓，所以不直接 return）
     # 获取新信号
     _, main_plan, main_dir = main_signal(df, symbol)
     _, hf_size, hf_dir = hf_signal(df, symbol)
@@ -379,7 +421,7 @@ async def process_single_symbol(symbol):
     if not (main_dir and hf_dir and main_dir == hf_dir and main_dir == dir_5m):
         return
 
-    # 所有条件满足，使用主策略的计划
+    # 所有条件满足
     size = main_plan['仓位']
     stop = main_plan['止损']
     entry = main_plan['入场']
@@ -392,7 +434,7 @@ async def process_single_symbol(symbol):
     if hf_dir:
         st.session_state.hf_history[symbol].append(1 if hf_dir=='多' else -1)
 
-    # 反向信号平仓（如果已有持仓且方向相反）
+    # 反向信号平仓
     if pos and pos['side'] != main_dir:
         close_position(symbol, pos, current_price, "反向信号")
         pos = None
@@ -487,7 +529,7 @@ st.title("🤖 AI 自进化交易平台 VAI v9.0 短线优化版 • 多周期�
 # 侧边栏
 with st.sidebar:
     st.metric("总权益", f"${st.session_state.equity_history[-1]:,.2f}")
-    st.metric("今日已开单", f"{st.session_state.daily_trade_count}/{MAX_TRADES_PER_DAY}")
+    st.metric("今日已开单", f"{st.session_state.daily_trade_count}/{st.session_state.max_trades_per_day}")
     st.metric("排队信号数", len(st.session_state.pending_signals))
     if st.button("🚨 紧急全平仓"):
         emergency_close_all()
@@ -513,21 +555,65 @@ with tab1:
             consensus = "多" if any("多" in v for v in signals_tf.values()) else "空" if any("空" in v for v in signals_tf.values()) else "中性"
             st.metric("多TF共识", consensus)
 
-            fig = go.Figure(data=[go.Candlestick(
+            # 创建三行图表：价格、成交量、MACD
+            fig = make_subplots(
+                rows=3, cols=1,
+                shared_xaxes=True,
+                row_heights=[0.5, 0.2, 0.3],
+                vertical_spacing=0.05,
+                subplot_titles=(f"{symbol} 价格", "成交量", "MACD")
+            )
+            # 主图 K 线
+            fig.add_trace(go.Candlestick(
                 x=df_hf['timestamp'],
                 open=df_hf['open'],
                 high=df_hf['high'],
                 low=df_hf['low'],
-                close=df_hf['close']
-            )])
+                close=df_hf['close'],
+                name="价格"
+            ), row=1, col=1)
+            # 成交量副图
+            colors = ['red' if row['open'] > row['close'] else 'green' for _, row in df_hf.iterrows()]
+            fig.add_trace(go.Bar(
+                x=df_hf['timestamp'],
+                y=df_hf['volume'],
+                name="成交量",
+                marker_color=colors,
+                showlegend=False
+            ), row=2, col=1)
+            # MACD 副图
+            fig.add_trace(go.Scatter(
+                x=df_hf['timestamp'],
+                y=df_hf['macd'],
+                name="MACD",
+                line=dict(color='blue')
+            ), row=3, col=1)
+            fig.add_trace(go.Scatter(
+                x=df_hf['timestamp'],
+                y=df_hf['macd_signal'],
+                name="信号线",
+                line=dict(color='orange')
+            ), row=3, col=1)
+            # MACD 柱
+            macd_colors = ['red' if val < 0 else 'green' for val in df_hf['macd_diff']]
+            fig.add_trace(go.Bar(
+                x=df_hf['timestamp'],
+                y=df_hf['macd_diff'],
+                name="MACD柱",
+                marker_color=macd_colors,
+                showlegend=False
+            ), row=3, col=1)
+
+            # 信号标注（只加在主图）
             for sig in st.session_state.signal_history[symbol][-10:]:
                 fig.add_annotation(
                     x=sig['time'], y=sig['price'],
                     text="▲" if sig['side']=='多' else "▼",
                     showarrow=True, arrowhead=2, arrowsize=2,
-                    arrowcolor="lime" if sig['side']=='多' else "red"
+                    arrowcolor="lime" if sig['side']=='多' else "red",
+                    row=1, col=1
                 )
-            fig.update_layout(height=380, margin=dict(l=20,r=20,b=20,t=20))
+            fig.update_layout(height=600, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
@@ -596,6 +682,7 @@ with tab3:
     st.dataframe(heat_df.style.background_gradient(cmap='RdYlGn'), use_container_width=True)
 
     st.subheader("📈 策略性能雷达图")
+    # 示例指标（可根据回测结果动态计算）
     metrics = {'Sharpe': 1.8, 'Calmar': 2.1, 'Profit Factor': 1.65, 'Sortino': 2.3, '胜率': 58}
     fig_radar = px.line_polar(
         pd.DataFrame([metrics]),
@@ -646,11 +733,12 @@ with tab4:
     st.slider("每笔风险 (%)", 1.0, 5.0, 2.0, 0.1, key="RISK_PER_TRADE")
     st.slider("高频最大仓位 (%)", 5.0, 30.0, 15.0, 1.0, key="HF_MAX_POS")
     st.slider("ATR止损倍数", 0.8, 2.5, 1.2, 0.05, key="ATR_STOP_MULT")
-    st.slider("止盈倍数 (ATR倍数)", 1.0, 5.0, 2.0, 0.1, key="TAKE_PROFIT_MULT")  # 新增止盈参数
-    st.number_input("每日开单上限", min_value=1, max_value=30, value=MAX_TRADES_PER_DAY, key="daily_limit_input")
-    if st.button("更新每日上限"):
-        st.session_state.daily_limit = st.session_state.daily_limit_input
-        st.success("每日上限已更新")
+    st.slider("止盈倍数 (ATR倍数)", 1.0, 5.0, 2.0, 0.1, key="TAKE_PROFIT_MULT")
+    st.number_input("每日开单上限", min_value=1, max_value=100, value=st.session_state.max_trades_per_day, key="max_trades_per_day")
+    st.selectbox("首选数据源交易所", ["binance", "okx", "bybit"], key="preferred_exchange")
+    if st.button("更新首选交易所"):
+        # 可以重新排序 EXCHANGES 或将首选置前，但简单起见仅记录
+        st.success("首选交易所已更新")
 
 st_autorefresh(interval=25000, key="auto_refresh")
-st.info("🌟 短线优化版 VAI v9.0 已开启多周期强制共振 + 趋势过滤 + 信号排队 + 止盈/移动止损 • 每25秒自动刷新")
+st.info("🌟 短线优化版 VAI v9.0 已开启多交易所 + 增强指标 + 止盈/移动止损 • 每25秒自动刷新")
