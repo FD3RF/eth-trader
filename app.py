@@ -13,7 +13,7 @@ from datetime import datetime
 # ================================
 # 1. 核心参数与看板设置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 双向评分 AI (OKX)", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH 100x 10级双向 AI (OKX)", page_icon="⚖️")
 
 SYMBOL = "ETH/USDT:USDT"            # OKX 永续合约
 REFRESH_MS = 2500                   # 2.5秒刷新
@@ -31,7 +31,13 @@ MIN_ATR_PCT = 0.0025
 # 冷却时间：连续信号之间至少间隔 2 根 5m K 线（10分钟 = 600秒）
 COOLDOWN_SECONDS = 600
 
-st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai")
+# 多空信心分最小差值，低于此值不交易
+MIN_SCORE_GAP = 10
+
+# 成交量放大倍数要求（原1.5，放宽至1.2，避免错失机会但排除缩量）
+VOLUME_RATIO_MIN = 1.2
+
+st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_v10")
 
 # ================================
 # 2. 初始化交易所和模型
@@ -107,7 +113,11 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["ema21"] = ta.ema(df_5m["c"], length=21)
     df_5m["vwap"] = ta.vwap(df_5m["h"], df_5m["l"], df_5m["c"], df_5m["v"])
     df_5m["volume_ma20"] = ta.sma(df_5m["v"], length=20)
-    df_5m["atr_expand"] = df_5m["atr"] / df_5m["atr"].shift(1) - 1   # ATR扩张率
+    df_5m["atr_expand"] = df_5m["atr"] / df_5m["atr"].shift(1) - 1   # ATR扩张率（简化版，后续改用均线比较）
+    
+    # 改用更稳健的ATR扩张判断：当前ATR > 20期平均ATR * 1.2
+    df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean()
+    df_5m["atr_surge"] = df_5m["atr"] > df_5m["atr_ma20"] * 1.2
     
     # ----- 15m 指标（用于趋势核）-----
     df_15m["ema200"] = ta.ema(df_15m["c"], length=200)
@@ -212,12 +222,12 @@ def compute_momentum_score(df_5m):
         short_score += 20
 
     # 成交量放大 (25分，多空都加)
-    if c['v'] > c['volume_ma20'] * 1.5:
+    if c['v'] > c['volume_ma20'] * VOLUME_RATIO_MIN:
         long_score += 25
         short_score += 25
 
-    # ATR扩张 (25分，多空都加)
-    if c['atr_expand'] > 0.1:
+    # ATR扩张 (25分，多空都加，使用改进后的条件)
+    if c['atr_surge']:
         long_score += 25
         short_score += 25
 
@@ -232,7 +242,7 @@ def compute_model_prob(df_5m, latest_feat):
     return prob_l, prob_s
 
 # ================================
-# 7. 侧边栏（与之前一致）
+# 7. 侧边栏（与之前一致，略作优化）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -262,7 +272,7 @@ with st.sidebar:
 # ================================
 # 8. 主界面
 # ================================
-st.title("⚖️ ETH 100x 双向评分 AI 决策终端 (趋势+动量+模型)")
+st.title("⚖️ ETH 100x 10级双向评分 AI 决策终端 (趋势+动量+模型)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -291,33 +301,55 @@ try:
         final_long = trend_long * TREND_WEIGHT + mom_long * MOMENTUM_WEIGHT + prob_l * MODEL_WEIGHT
         final_short = trend_short * TREND_WEIGHT + mom_short * MOMENTUM_WEIGHT + prob_s * MODEL_WEIGHT
         
-        # 波动率过滤：ATR百分比 < 0.25% 时禁止交易
-        atr_pct = df_5m['atr_pct'].iloc[-1]
-        if atr_pct < MIN_ATR_PCT:
-            st.warning(f"⚠️ 当前波动率过低 (ATR% = {atr_pct:.3%})，低于 {MIN_ATR_PCT:.2%}，禁止交易。")
-            direction = None
-            final_score = 0
-        else:
-            # 冷却时间检查
-            current_time = time.time()
-            time_since_last = current_time - st.session_state.last_signal_time
-            if time_since_last < COOLDOWN_SECONDS:
-                st.info(f"⏳ 冷却中，还需 {COOLDOWN_SECONDS - time_since_last:.0f} 秒才能产生新信号。")
-                direction = None
-                final_score = 0
-            else:
-                # 取高分方向
-                if final_long > final_short and final_long >= FINAL_CONF_THRES:
-                    direction = "LONG"
-                    final_score = final_long
-                elif final_short > final_long and final_short >= FINAL_CONF_THRES:
-                    direction = "SHORT"
-                    final_score = final_short
-                else:
-                    direction = None
-                    final_score = 0
+        # 获取最新值用于条件检查
+        c5 = df_5m.iloc[-1]
+        vol_ratio = c5['v'] / c5['volume_ma20'] if c5['volume_ma20'] > 0 else 0
+        atr_pct = c5['atr_pct']
         
-        # 顶部仪表盘（显示各核分数）
+        # 趋势方向一致性检查（15m和1h的趋势偏向必须一致）
+        trend_bias_long = trend_long > trend_short
+        trend_bias_short = trend_short > trend_long
+        
+        # 多空信心分差值
+        score_gap = abs(final_long - final_short)
+        
+        # 初始化为无信号
+        direction = None
+        final_score = 0
+        filter_reasons = []
+        
+        # 检查所有过滤条件
+        # 1. 波动率过滤
+        if atr_pct < MIN_ATR_PCT:
+            filter_reasons.append(f"波动率过低 (ATR% = {atr_pct:.3%})")
+        # 2. 冷却时间
+        current_time = time.time()
+        time_since_last = current_time - st.session_state.last_signal_time
+        if time_since_last < COOLDOWN_SECONDS:
+            filter_reasons.append(f"冷却中，剩余 {COOLDOWN_SECONDS - time_since_last:.0f} 秒")
+        # 3. 成交量放大
+        if vol_ratio < VOLUME_RATIO_MIN:
+            filter_reasons.append(f"成交量不足 (倍数 {vol_ratio:.2f})")
+        # 4. 多空差值
+        if score_gap < MIN_SCORE_GAP:
+            filter_reasons.append(f"多空信心分差过小 ({score_gap:.1f} < {MIN_SCORE_GAP})")
+        # 5. 方向确定和趋势一致
+        if final_long > final_short and final_long >= FINAL_CONF_THRES:
+            if not trend_bias_long:
+                filter_reasons.append("趋势核不支持多头 (trend_long < trend_short)")
+            else:
+                direction = "LONG"
+                final_score = final_long
+        elif final_short > final_long and final_short >= FINAL_CONF_THRES:
+            if not trend_bias_short:
+                filter_reasons.append("趋势核不支持空头 (trend_short < trend_long)")
+            else:
+                direction = "SHORT"
+                final_score = final_short
+        else:
+            filter_reasons.append("最终信心分未达门槛")
+        
+        # 顶部仪表盘
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ETH 实时价", f"${current_price}")
         col2.metric("趋势核 (多/空)", f"{trend_long}/{trend_short}")
@@ -325,18 +357,26 @@ try:
         col4.metric("模型 (多/空)", f"{prob_l:.0f}%/{prob_s:.0f}%")
         col5.metric("最终信心", f"{final_long:.0f}/{final_short:.0f}")
         
+        # 显示当前过滤状态
+        if filter_reasons:
+            st.warning("⛔ 当前不满足信号条件: " + " | ".join(filter_reasons))
+        else:
+            st.success("✅ 所有过滤条件通过，等待信号触发...")
+        
         st.markdown("---")
         
-        # 显示最终信号（如果存在）
+        # 如果方向确定，输出信号
         if direction:
-            # 记录信号时间
-            st.session_state.last_signal_time = time.time()
+            # 更新冷却时间（只有信号真正触发时才更新，且仅在信号出现时设置一次）
+            st.session_state.last_signal_time = current_time
             
             st.success(f"🎯 **高置信度交易信号：{direction}** (信心分 {final_score:.1f})")
             
-            # 止损止盈计算（使用5m的ATR）
+            # 止损止盈计算（硬风控上限0.3%）
             atr_raw = df_5m['atr'].iloc[-1]
-            sl_dist = min(atr_raw * 1.5, current_price * 0.004)  # 放宽至0.4%
+            max_sl = current_price * 0.003   # 绝对止损上限 0.3%
+            atr_sl = atr_raw * 1.5
+            sl_dist = min(atr_sl, max_sl)    # 取两者较小值，确保不超0.3%
             sl = current_price - sl_dist if direction == "LONG" else current_price + sl_dist
             tp = current_price + sl_dist * 2.5 if direction == "LONG" else current_price - sl_dist * 2.0
             
@@ -358,7 +398,7 @@ try:
                     "模型": f"{prob_l:.0f}%/{prob_s:.0f}%"
                 })
         else:
-            st.info("🔎 当前无符合要求的信号 (可能因波动率低、冷却中或信心不足)")
+            st.info("🔎 当前无符合要求的信号")
         
         # 显示K线图（5m）
         fig = go.Figure(data=[go.Candlestick(
