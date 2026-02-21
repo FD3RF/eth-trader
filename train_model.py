@@ -9,78 +9,70 @@ import joblib
 import os
 
 # =============================
-# 1. 核心参数与 UI
+# CONFIG
 # =============================
-SYMBOL = 'ETH/USDT:USDT'  # Bybit 合约格式
-REFRESH_MS = 2000        # 2秒刷新，兼顾性能与实时性
-CIRCUIT_BREAKER_PCT = 0.005 
+st.set_page_config(layout="wide", page_title="ETH 100x AI-Pro (Bybit)")
 
-st.set_page_config(layout="wide", page_title="ETH 100x AI (Bybit)", page_icon="🤖")
-st_autorefresh(interval=REFRESH_MS, key="bybit_ai_update")
+SYMBOL = st.sidebar.text_input("Trading Pair", "ETH/USDT:USDT", help="Bybit linear perpetual")
+LEVERAGE = st.sidebar.slider("Leverage (1-100x)", 1, 100, 100)
+REFRESH_MS = st.sidebar.slider("Refresh (ms)", 1000, 5000, 2000)
+CIRCUIT_BREAKER_PCT = 0.003  # tightened for 100x safety
 
-# =============================
-# 2. 交易所与模型加载
-# =============================
+st_autorefresh(interval=REFRESH_MS, key="bybit_monitor")
+
+# Init
 @st.cache_resource
 def init_system():
-    # 初始化交易所
     exch = ccxt.bybit({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'linear'}
+        "enableRateLimit": True,
+        "options": {"defaultType": "linear"},
+        # "proxies": {"http": "...", "https": "..."}  # ← UNCOMMENT & FILL
     })
-    
-    # 加载 AI 模型
     model = None
-    if os.path.exists('eth_ai_model.pkl'):
-        model = joblib.load('eth_ai_model.pkl')
+    if os.path.exists("eth_ai_model.pkl"):
+        model = joblib.load("eth_ai_model.pkl")
     return exch, model
 
 exchange, ai_model = init_system()
 
-# 状态管理
 if 'last_price' not in st.session_state: st.session_state.last_price = 0
 if 'system_halted' not in st.session_state: st.session_state.system_halted = False
 
 # =============================
-# 3. 数据处理与 AI 预测
+# DATA + FEATURES (NaN-safe)
 # =============================
-def get_latest_analysis():
-    # 获取 5m 数据
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe='5m', limit=100)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+def get_analysis_data():
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "5m", limit=150)  # extra history for indicators
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     
-    # 计算特征 (必须与 train_model.py 保持高度一致)
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['ma20'] = ta.sma(df['close'], length=20)
-    df['ma60'] = ta.sma(df['close'], length=60)
-    macd = ta.macd(df['close'])
-    df['hist'] = macd['MACDh_12_26_9']
-    df['adx'] = ta.adx(df['high'], df['low'], df['close'])['ADX_14']
+    df["rsi"] = ta.rsi(df["close"], length=14)
+    df["ma20"] = ta.sma(df["close"], length=20)
+    df["ma60"] = ta.sma(df["close"], length=60)
+    macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
+    df["macd"] = macd["MACD_12_26_9"]
+    df["macd_signal"] = macd["MACDs_12_26_9"]
+    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+    df["adx"] = ta.adx(df["high"], df["low"], df["close"], length=14)["ADX_14"]
     
-    # 为 AI 准备最新的特征向量
-    features = df[['rsi', 'ma20', 'ma60', 'hist', 'adx']].tail(1)
-    
-    prediction = None
-    if ai_model:
-        # 假设模型输出 1 为看涨，0 为看平/跌
-        prediction = ai_model.predict(features)[0]
-        
-    return df, prediction
+    df = df.dropna().reset_index(drop=True)  # ← CRITICAL FIX
+    features = df[['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr', 'adx']].iloc[-1:].values
+    return df, features
 
 # =============================
-# 4. 实时看板渲染
+# UI
 # =============================
-st.title("🤖 ETH 100x AI 智能作战系统 (Bybit 版)")
+st.title("🛡️ ETH 100x AI 专家级自适应监控 (Bybit版)")
 
-if st.sidebar.button("🔌 重置系统"):
+if st.sidebar.button("🔌 重置系统熔断"):
     st.session_state.system_halted = False
     st.session_state.last_price = 0
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
-    
-    # 熔断监测
+    funding = ticker.get('fundingRate', None)
+
+    # Circuit breaker
     if st.session_state.last_price != 0:
         change = abs(current_price - st.session_state.last_price) / st.session_state.last_price
         if change > CIRCUIT_BREAKER_PCT:
@@ -88,35 +80,44 @@ try:
     st.session_state.last_price = current_price
 
     if st.session_state.system_halted:
-        st.error(f"🚨 触发熔断保护！检测到异常瞬间波动。")
+        st.error(f"🚨 系统熔断触发！价格波动 > {CIRCUIT_BREAKER_PCT*100}%")
     else:
-        # 获取分析数据
-        df, pred = get_latest_analysis()
-        last_row = df.iloc[-1]
+        df, current_feat = get_analysis_data()
         
-        # 状态展示
-        c1, c2, c3 = st.columns(3)
-        c1.metric("ETH Bybit Price", f"${current_price}")
-        c2.metric("AI Model Status", "ACTIVE ✅" if ai_model else "INDICATOR ONLY ⚠️")
-        c3.metric("Trend Strength (ADX)", f"{round(last_row['adx'], 1)}")
+        prediction = None
+        if ai_model is not None:
+            prediction = ai_model.predict(current_feat)[0]
 
-        # 核心信号区
-        st.divider()
-        if pred == 1:
-            st.success("🎯 **AI 预测信号：看涨 (LONG)**")
-            st.balloons()
-        elif pred == 0:
-            st.error("🎯 **AI 预测信号：看跌 (SHORT)**")
+        # Metrics
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("ETH 实时价", f"${current_price:,.2f}")
+        c2.metric("AI 预测", "看涨 🚀" if prediction == 1 else "观望/看跌 ⌛")
+        c3.metric("ATR (5m)", f"{df['atr'].iloc[-1]:.4f}")
+        c4.metric("ADX 强度", f"{df['adx'].iloc[-1]:.1f}")
+        c5.metric("资金费率", f"{funding*100:.4f}%" if funding else "N/A")
+
+        # Trading Plan
+        if prediction == 1:
+            st.success("### 🎯 AI 作战建议：**LONG (多)**")
+            atr = df["atr"].iloc[-1]
+            sl_dist = min(atr * 1.8, current_price * 0.0025)  # safer
+            sl = current_price - sl_dist
+            tp = current_price + sl_dist * 3.0   # 1:3 RR
+            liq_price = current_price * (1 - 1/LEVERAGE * 1.05)  # approx
+
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("入场", f"${current_price:,.2f}")
+            sc2.metric("止损", f"${sl:,.2f} (-{sl_dist/current_price*100:.2f}%)")
+            sc3.metric("止盈", f"${tp:,.2f} (+{sl_dist*3/current_price*100:.2f}%)")
+            sc4.metric("约爆仓价", f"${liq_price:,.2f}")
         else:
-            st.info("📊 AI 正在观察市场结构，暂无高置信度预测...")
+            st.info("📊 市场动能积蓄中，AI 建议**持币观望**...")
 
-        # 可视化
-        fig = go.Figure(data=[go.Candlestick(
-            x=pd.to_datetime(df['timestamp'], unit='ms'),
-            open=df['open'], high=df['high'], low=df['low'], close=df['close']
-        )])
-        fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
+        # Chart
+        fig = go.Figure(data=[go.Candlestick(x=pd.to_datetime(df['timestamp'], unit='ms'),
+                        open=df['open'], high=df['high'], low=df['low'], close=df['close'])])
+        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.error(f"连接或预测异常: {e}")
+    st.error(f"⚠️ 连接异常: {str(e)}\n\n**提示**: 尝试开启VPN/代理，或检查网络")
