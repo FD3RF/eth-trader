@@ -7,11 +7,12 @@
 - 主策略与高频策略融合
 - 移动止损、止盈、每日开单上限（动态配置）
 - 多交易所自动切换（Binance/OKX/Bybit）
-- 实时交易界面采用深色专业风格，三币种三层图表（价格+成交量+MACD）
-- 每个币种下方显示详细多时间框架信号
+- API密钥自动从Streamlit Secrets或环境变量读取
+- 实时交易界面深色专业风格，三币种三层图表（价格+成交量+MACD）
 - K线图叠加EMA20/EMA50移动平均线
 - 成交量柱状图透明度60%
 - 当前价格标签显示最新价及涨跌幅
+- 每个币种下方显示详细多时间框架信号
 - 完整回测中心、风险仪表板、交易统计
 ===========================================================
 """
@@ -28,6 +29,7 @@ from datetime import datetime, timedelta
 import asyncio
 import nest_asyncio
 from scipy.stats import t
+import os
 
 nest_asyncio.apply()
 
@@ -42,6 +44,23 @@ st.markdown("""
     .stButton>button:hover { background-color: #30363d; }
 </style>
 """, unsafe_allow_html=True)
+
+# ==================== 从环境变量或secrets读取API密钥 ====================
+def get_api_keys():
+    """优先从st.secrets读取，其次从环境变量读取"""
+    api_key = ""
+    secret = ""
+    try:
+        # 尝试从st.secrets读取（Streamlit Cloud）
+        api_key = st.secrets.get("API_KEY", "")
+        secret = st.secrets.get("SECRET", "")
+    except:
+        pass
+    if not api_key:
+        api_key = os.environ.get("BINANCE_API_KEY", "")
+    if not secret:
+        secret = os.environ.get("BINANCE_SECRET", "")
+    return api_key, secret
 
 # ==================== 配置 ====================
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
@@ -92,6 +111,13 @@ if 'last_signal_time' not in st.session_state:
     st.session_state.last_signal_time = {sym: None for sym in SYMBOLS}
 if 'cached_ohlcv' not in st.session_state:
     st.session_state.cached_ohlcv = {}
+
+# ==================== 自动填充API密钥 ====================
+api_key_from_env, secret_from_env = get_api_keys()
+if api_key_from_env and not st.session_state.api_key:
+    st.session_state.api_key = api_key_from_env
+if secret_from_env and not st.session_state.secret:
+    st.session_state.secret = secret_from_env
 
 # ==================== 模拟K线生成 ====================
 def generate_simulated_ohlcv(symbol, timeframe, limit=300):
@@ -180,8 +206,8 @@ def add_indicators(df):
     # 原有指标
     df['ema12'] = ta.trend.ema_indicator(df['close'],12)
     df['ema26'] = ta.trend.ema_indicator(df['close'],26)
-    df['ema20'] = ta.trend.ema_indicator(df['close'],20)   # 新增EMA20
-    df['ema50'] = ta.trend.ema_indicator(df['close'],50)   # 新增EMA50
+    df['ema20'] = ta.trend.ema_indicator(df['close'],20)
+    df['ema50'] = ta.trend.ema_indicator(df['close'],50)
     df['rsi'] = ta.momentum.rsi(df['close'],14)
     df['adx'] = ta.trend.adx(df['high'],df['low'],df['close'],14)
     df['atr'] = ta.volatility.average_true_range(df['high'],df['low'],df['close'],14)
@@ -768,16 +794,11 @@ with tab4:
     st.session_state.real_trading = st.checkbox("启用真实交易", st.session_state.real_trading)
     st.session_state.dry_run = st.checkbox("乾跑模式（不下真实单）", st.session_state.dry_run)
     if st.session_state.real_trading:
-        api_key_from_secrets = st.secrets.get("API_KEY", "")
-        secret_from_secrets = st.secrets.get("SECRET", "")
-        if api_key_from_secrets and not st.session_state.api_key:
-            st.session_state.api_key = api_key_from_secrets
-        if secret_from_secrets and not st.session_state.secret:
-            st.session_state.secret = secret_from_secrets
+        # 如果从环境变量或secrets读取到了密钥，自动填充
         st.session_state.api_key = st.text_input("Binance API Key", st.session_state.api_key, type="password")
         st.session_state.secret = st.text_input("Binance Secret", st.session_state.secret, type="password")
         if not st.session_state.api_key or not st.session_state.secret:
-            st.warning("请输入API密钥或使用 Streamlit Secrets 配置")
+            st.warning("请输入API密钥或使用 Streamlit Secrets / 环境变量配置")
 
     st.slider("每笔风险 (%)", 1.0, 5.0, 2.0, 0.1, key="RISK_PER_TRADE")
     st.slider("高频最大仓位 (%)", 5.0, 30.0, 15.0, 1.0, key="HF_MAX_POS")
