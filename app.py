@@ -10,6 +10,9 @@ import os
 import time
 from datetime import datetime
 
+# 设置 pandas 选项，抑制未来版本的 downcasting 警告（可选）
+pd.set_option('future.no_silent_downcasting', True)
+
 # ================================
 # 1. 核心参数与看板设置
 # ================================
@@ -145,8 +148,8 @@ def compute_features(df_5m, df_15m, df_1h):
     # 动量核所需指标
     df_5m["ema9"] = ta.ema(df_5m["c"], length=9)
     df_5m["ema21"] = ta.ema(df_5m["c"], length=21)
-    # VWAP 现在会在有序索引下正确计算
-    df_5m["vwap"] = ta.vwap(df_5m["h"], df_5m["l"], df_5m["c"], df_5m["v"])
+    # 使用 DataFrame 方法计算 VWAP，避免索引警告
+    df_5m = df_5m.ta.vwap(append=True)   # 添加 'VWAP' 列
     df_5m["volume_ma20"] = ta.sma(df_5m["v"], length=20)
     # ATR扩张判断：当前ATR > 20期平均ATR * 1.2
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean()
@@ -155,7 +158,7 @@ def compute_features(df_5m, df_15m, df_1h):
     # ----- 15m 指标（用于趋势核）-----
     df_15m["ema200"] = ta.ema(df_15m["c"], length=200)
     df_15m["adx"] = ta.adx(df_15m["h"], df_15m["l"], df_15m["c"], length=14)["ADX_14"]
-    df_15m["vwap"] = ta.vwap(df_15m["h"], df_15m["l"], df_15m["c"], df_15m["v"])
+    df_15m = df_15m.ta.vwap(append=True)
     df_15m["hh"] = df_15m["h"].rolling(20).max()      # 20周期最高点
     df_15m["ll"] = df_15m["l"].rolling(20).min()      # 20周期最低点
     # EMA斜率（当前值与前5根比较）
@@ -164,7 +167,7 @@ def compute_features(df_5m, df_15m, df_1h):
     # ----- 1h 指标（用于趋势核）-----
     df_1h["ema200"] = ta.ema(df_1h["c"], length=200)
     df_1h["adx"] = ta.adx(df_1h["h"], df_1h["l"], df_1h["c"], length=14)["ADX_14"]
-    df_1h["vwap"] = ta.vwap(df_1h["h"], df_1h["l"], df_1h["c"], df_1h["v"])
+    df_1h = df_1h.ta.vwap(append=True)
     df_1h["hh"] = df_1h["h"].rolling(20).max()
     df_1h["ll"] = df_1h["l"].rolling(20).min()
     # EMA斜率（当前值与前3根比较，1h周期长，取3根足够）
@@ -205,12 +208,12 @@ def compute_trend_score(df_15m, df_1h):
         short_score += 15
 
     # VWAP (每项10分)
-    if c15['c'] > c15['vwap']:
+    if c15['c'] > c15['VWAP']:
         long_score += 10
     else:
         short_score += 10
 
-    if c1h['c'] > c1h['vwap']:
+    if c1h['c'] > c1h['VWAP']:
         long_score += 10
     else:
         short_score += 10
@@ -259,7 +262,7 @@ def compute_momentum_score(df_5m):
         short_score += 30
 
     # 价格 vs VWAP (20分)
-    if c['c'] > c['vwap']:
+    if c['c'] > c['VWAP']:
         long_score += 20
     else:
         short_score += 20
@@ -320,7 +323,7 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        st.dataframe(log_df, use_container_width=True, height=350)
+        st.dataframe(log_df, width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
             st.rerun()
@@ -562,7 +565,7 @@ try:
             open=df_5m['o'], high=df_5m['h'], low=df_5m['l'], close=df_5m['c']
         )])
         fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 except Exception as e:
     st.sidebar.error(f"系统运行异常: {e}")
