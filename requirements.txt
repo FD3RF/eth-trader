@@ -3,8 +3,8 @@ altair==5.5.0
 pandas==2.3.3
 scikit-learn==1.6.1
 numpy==2.2.6
-plotly==6.5.2
-ccxt==4.5.39
 pandas-ta==0.4.71b0
+ccxt==4.5.39
+plotly==6.5.2
 joblib==1.5.3
-streamlit-autorefresh==1.0.1
+# 其余依赖请从日志中补全，所有版本都应像上面一样写死
