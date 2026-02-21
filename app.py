@@ -9,6 +9,9 @@
 - 多交易所自动切换（Binance/OKX/Bybit）
 - 实时交易界面采用深色专业风格，三币种三层图表（价格+成交量+MACD）
 - 每个币种下方显示详细多时间框架信号
+- K线图叠加EMA20/EMA50移动平均线
+- 成交量柱状图透明度60%
+- 当前价格标签显示最新价及涨跌幅
 - 完整回测中心、风险仪表板、交易统计
 ===========================================================
 """
@@ -177,6 +180,8 @@ def add_indicators(df):
     # 原有指标
     df['ema12'] = ta.trend.ema_indicator(df['close'],12)
     df['ema26'] = ta.trend.ema_indicator(df['close'],26)
+    df['ema20'] = ta.trend.ema_indicator(df['close'],20)   # 新增EMA20
+    df['ema50'] = ta.trend.ema_indicator(df['close'],50)   # 新增EMA50
     df['rsi'] = ta.momentum.rsi(df['close'],14)
     df['adx'] = ta.trend.adx(df['high'],df['low'],df['close'],14)
     df['atr'] = ta.volatility.average_true_range(df['high'],df['low'],df['close'],14)
@@ -216,13 +221,14 @@ def multi_tf_signal(symbol):
         _, main_plan, main_dir = main_signal(df, symbol)
         _, _, hf_dir = hf_signal(df, symbol)
         final_dir = main_dir or hf_dir
-        signals[tf] = f"{final_dir} (强)" if main_dir and hf_dir else f"{final_dir} (中)" if final_dir else "观望"
+        # 简化显示，只返回方向
+        signals[tf] = final_dir if final_dir else "观望"
     return signals
 
 def parse_dir(sig_str):
-    if '多' in sig_str:
+    if sig_str == "多" or "多" in str(sig_str):
         return '多'
-    elif '空' in sig_str:
+    elif sig_str == "空" or "空" in str(sig_str):
         return '空'
     else:
         return None
@@ -375,7 +381,7 @@ async def process_single_symbol(symbol):
         close_position(symbol, pos, current_price, "止损")
         pos = None
 
-    # 移动止损（保本）——动态显示在持仓信息中，这里更新状态
+    # 移动止损（保本）
     if pos and not pos.get('breakeven', False):
         atr = df['atr'].iloc[-1]
         if pos['side'] == '多':
@@ -567,7 +573,7 @@ with tab1:
             st.subheader(symbol)
             df_hf = add_indicators(fetch_ohlcv(symbol, '5m', limit=150))
             signals_tf = multi_tf_signal(symbol)
-            consensus = "多" if any("多" in v for v in signals_tf.values()) else "空" if any("空" in v for v in signals_tf.values()) else "中性"
+            consensus = "多" if list(signals_tf.values()).count('多') >= 2 else "空" if list(signals_tf.values()).count('空') >= 2 else "中性"
             st.caption(f"多TF共识：**{consensus}**")
 
             # 三层图表（价格+成交量+MACD）
@@ -578,7 +584,7 @@ with tab1:
                 vertical_spacing=0.02,
                 subplot_titles=(f"{symbol} 价格", "成交量", "MACD")
             )
-            # 价格K线 + MACD线 + 信号线
+            # 价格K线
             fig.add_trace(go.Candlestick(
                 x=df_hf['timestamp'],
                 open=df_hf['open'],
@@ -589,6 +595,18 @@ with tab1:
                 increasing_line_color="#00ff9d",
                 decreasing_line_color="#ff4d4d"
             ), row=1, col=1)
+
+            # EMA20/50移动平均线
+            fig.add_trace(go.Scatter(
+                x=df_hf['timestamp'], y=df_hf['ema20'],
+                name="EMA20", line=dict(color="#ffaa00", width=1.5)
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=df_hf['timestamp'], y=df_hf['ema50'],
+                name="EMA50", line=dict(color="#aa88ff", width=1.5)
+            ), row=1, col=1)
+
+            # MACD线
             fig.add_trace(go.Scatter(
                 x=df_hf['timestamp'], y=df_hf['macd'],
                 name="MACD", line=dict(color="#00b0ff")
@@ -597,12 +615,14 @@ with tab1:
                 x=df_hf['timestamp'], y=df_hf['macd_signal'],
                 name="信号线", line=dict(color="#ffd700")
             ), row=1, col=1)
-            # 成交量（绿涨红跌）
+
+            # 成交量（透明度0.6）
             colors = ['#00ff9d' if o < c else '#ff4d4d' for o, c in zip(df_hf['open'], df_hf['close'])]
             fig.add_trace(go.Bar(
                 x=df_hf['timestamp'], y=df_hf['volume'],
-                name="成交量", marker_color=colors
+                name="成交量", marker_color=colors, opacity=0.6
             ), row=2, col=1)
+
             # MACD柱
             colors_hist = ['#00ff9d' if h > 0 else '#ff4d4d' for h in df_hf['macd_diff']]
             fig.add_trace(go.Bar(
@@ -619,6 +639,20 @@ with tab1:
                     arrowcolor="lime" if sig['side']=='多' else "red",
                     row=1, col=1
                 )
+
+            # 当前价格标签
+            latest_price = df_hf['close'].iloc[-1]
+            prev_price = df_hf['close'].iloc[-2]
+            price_change = (latest_price - prev_price) / prev_price * 100
+            price_label = f"当前: {latest_price:.2f} ({price_change:+.2f}%)"
+            fig.add_annotation(
+                x=df_hf['timestamp'].iloc[-1], y=latest_price,
+                text=price_label,
+                showarrow=True, arrowhead=1, arrowsize=1, arrowwidth=2,
+                arrowcolor="#ffffff", bgcolor="#21262d", bordercolor="#ffffff",
+                borderwidth=1, borderpad=4, font=dict(color="white", size=12),
+                ax=40, ay=-40, row=1, col=1
+            )
 
             fig.update_layout(height=620, margin=dict(t=30, b=10, l=10, r=10),
                               plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
