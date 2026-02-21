@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🤖 AI 自进化交易平台 VAI v9.0 最终稳定版
+🤖 AI 自进化交易平台 VAI v9.0 终极稳定版
 ===========================================================
 修复：
 - 所有弃用警告（use_container_width → width，T/H → min/h）
@@ -26,7 +26,7 @@ from retry import retry
 
 nest_asyncio.apply()
 
-st.set_page_config(page_title="VAI v9.0 最终稳定版", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="VAI v9.0 终极稳定版", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; color: #ffffff; }
@@ -107,7 +107,7 @@ if secret_from_env and not st.session_state.secret:
     st.session_state.secret = secret_from_env
 
 # ==================== 模拟K线生成（使用新频率格式）====================
-def generate_simulated_ohlcv(symbol, timeframe, limit=150):  # 减少数据量
+def generate_simulated_ohlcv(symbol, timeframe, limit=150):
     key = f"{symbol}_{timeframe}"
     st.session_state.sim_step += 1
     np.random.seed(hash(key + str(st.session_state.sim_step)) % 2**32)
@@ -123,7 +123,7 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=150):  # 减少数据量
         ret = t.rvs(df=3.8, loc=np.random.normal(0,0.00008), scale=vol)
         prices.append(prices[-1]*(1+ret))
     prices = np.array(prices)
-    # 更新频率格式：'5m' → '5min', '15m' → '15min', '1h' → '1h'
+    # 使用 Pandas 推荐的频率格式：'5min', '15min', '1h'
     freq_map = {'5m': '5min', '15m': '15min', '1h': '1h'}
     freq = freq_map.get(timeframe, '15min')
     end_time = datetime.now()
@@ -277,7 +277,7 @@ def update_chart(symbol):
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
-    st.title("📊 VAI v9.0 最终版")
+    st.title("📊 VAI v9.0 终极版")
     st.metric("总权益", f"${st.session_state.equity_history[-1]:,.2f}")
     st.metric("今日已开单", f"{st.session_state.daily_trade_count}/{st.session_state.max_trades_per_day}")
     st.metric("排队信号数", len(st.session_state.pending_signals))
@@ -292,7 +292,7 @@ with st.sidebar:
     st.session_state.performance_mode = st.checkbox("性能模式（120秒刷新）", value=st.session_state.performance_mode)
 
 # ==================== 主界面 ====================
-st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 最终稳定版", unsafe_allow_html=True)
+st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 终极稳定版", unsafe_allow_html=True)
 st.caption("🌟 已修复所有弃用警告 · 支持性能模式 · 数据缓存30秒 · 模拟/真实切换")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📈 实时交易", "🔙 回测中心", "📊 风险仪表板", "⚙️ 设定"])
