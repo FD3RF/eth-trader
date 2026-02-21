@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-ETH 短线策略监控器 (1m/5m)
-============================================
-- 从 Binance 获取实时K线
-- 指标：VWAP (20周期), EMA(9), EMA(21), ATR(14)
-- 信号条件：价格突破VWAP + EMA金叉/死叉 + 成交量放大
-- 自动计算止损(1.5*ATR)和止盈(2*ATR)
-- 显示盈亏比和回撤预警
-============================================
+🤖 ETH 合約短線策略監控系統 V1.0
+核心邏輯：1m + 5m 雙週期共振
+指標：VWAP + EMA9/21 金叉/死叉 + 成交量爆量
+風險：100倍槓桿，SL=1.5×ATR 或 0.3% 強制，TP=3×ATR（盈虧比 2:1）
+只監控不交易，實時從 Binance 期貨獲取數據
 """
+
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import ccxt
@@ -18,180 +16,136 @@ import ta
 from datetime import datetime
 import time
 
-st.set_page_config(page_title="ETH 短线监控器", layout="wide")
-st.title("📈 ETH 短线策略监控器 (1分钟/5分钟)")
-st.caption("数据源：Binance · 仅监控不下单 · 自动刷新每5秒")
+st.set_page_config(page_title="ETH 短線監控", layout="wide")
+st.title("🚀 ETH 合約短線策略監控系統 V1.0")
+st.caption("1m + 5m 雙週期共振 • VWAP + EMA9/21 + ATR14 • 實時監控 • 每8秒刷新")
 
-# ==================== 获取数据 ====================
-@st.cache_data(ttl=5, show_spinner=False)
-def fetch_ohlcv(symbol='ETH/USDT', timeframe='1m', limit=150):
-    """从 Binance 获取K线数据"""
-    try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'future'}  # 永续合约数据
-        })
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df
-    except Exception as e:
-        st.error(f"数据获取失败: {e}")
-        return pd.DataFrame()
+# ==================== 配置 ====================
+SYMBOL = "ETH/USDT:USDT"   # Binance 永續合約
+EXCHANGE = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
 
-# ==================== 计算指标 ====================
-def calculate_indicators(df):
-    """计算所需指标：ATR, EMA9, EMA21, VWAP, 成交量均值"""
-    if len(df) < 30:
-        return df
-    df = df.copy()
-    # ATR
-    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
-    # EMA
-    df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-    df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-    # VWAP (20周期成交量加权平均价)
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    df['vwap'] = (typical_price * df['volume']).rolling(20).sum() / df['volume'].rolling(20).sum()
-    # 成交量均值（前5根）
-    df['vol_ma5'] = df['volume'].shift(1).rolling(5).mean()  # 当前不包含自身
+# ==================== 數據獲取 ====================
+@st.cache_data(ttl=8)
+def fetch_klines(timeframe, limit=500):
+    ohlcv = EXCHANGE.fetch_ohlcv(SYMBOL, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
-# ==================== 检测信号 ====================
-def check_signals(df):
-    """返回最新信号（如果存在）"""
+def add_indicators(df):
+    df = df.copy()
+    df['ema9'] = ta.trend.ema_indicator(df['close'], 9)
+    df['ema21'] = ta.trend.ema_indicator(df['close'], 21)
+    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], 14)
+    
+    # VWAP（累積計算，接近當日VWAP效果）
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    df['tpv'] = typical_price * df['volume']
+    df['cum_tpv'] = df['tpv'].cumsum()
+    df['cum_vol'] = df['volume'].cumsum()
+    df['vwap'] = df['cum_tpv'] / df['cum_vol']
+    
+    # 成交量5根均值
+    df['vol_ma5'] = df['volume'].rolling(5).mean()
+    return df
+
+# ==================== 信號邏輯 ====================
+def detect_signal(df):
     if len(df) < 30:
-        return None
+        return None, None, None, None, None
+    
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 多头条件
-    long_condition = (
-        last['close'] > last['vwap'] and
-        prev['ema9'] <= prev['ema21'] and
-        last['ema9'] > last['ema21'] and
-        last['volume'] > last['vol_ma5']
-    )
-    # 空头条件
-    short_condition = (
-        last['close'] < last['vwap'] and
-        prev['ema9'] >= prev['ema21'] and
-        last['ema9'] < last['ema21'] and
-        last['volume'] > last['vol_ma5']
-    )
+    # EMA 金叉/死叉
+    ema_cross_long = (prev['ema9'] < prev['ema21']) and (last['ema9'] > last['ema21'])
+    ema_cross_short = (prev['ema9'] > prev['ema21']) and (last['ema9'] < last['ema21'])
     
-    if long_condition:
-        return {'direction': '多', 'price': last['close'], 'atr': last['atr']}
-    elif short_condition:
-        return {'direction': '空', 'price': last['close'], 'atr': last['atr']}
-    else:
-        return None
-
-# ==================== 初始化会话状态 ====================
-if 'last_signal' not in st.session_state:
-    st.session_state.last_signal = {
-        '1m': {'direction': None, 'entry': None, 'sl': None, 'tp': None, 'time': None},
-        '5m': {'direction': None, 'entry': None, 'sl': None, 'tp': None, 'time': None}
-    }
-
-# ==================== 主面板 ====================
-col1, col2 = st.columns(2)
-
-for idx, tf in enumerate(['1m', '5m']):
-    with [col1, col2][idx]:
-        st.subheader(f"{tf} 周期")
-        
-        # 获取数据
-        df = fetch_ohlcv(timeframe=tf)
-        if df.empty:
-            st.warning("等待数据...")
-            continue
-        
-        # 计算指标
-        df = calculate_indicators(df)
-        if len(df) < 30:
-            st.warning("数据不足")
-            continue
-        
-        # 最新价格和ATR
-        last = df.iloc[-1]
-        price = last['close']
+    # 價格突破VWAP + 成交量爆量
+    vol_condition = last['volume'] > last['vol_ma5'] * 1.3
+    
+    long_signal = ema_cross_long and (last['close'] > last['vwap']) and vol_condition
+    short_signal = ema_cross_short and (last['close'] < last['vwap']) and vol_condition
+    
+    if long_signal or short_signal:
+        direction = "多頭計劃 🔥" if long_signal else "空頭計劃 🔥"
+        entry = last['close']
         atr = last['atr']
+        sl = entry - 1.5 * atr if long_signal else entry + 1.5 * atr
+        # 0.3% 強制保護
+        sl = max(sl, entry * 0.997) if long_signal else min(sl, entry * 1.003)
+        tp = entry + 3 * atr if long_signal else entry - 3 * atr
+        rr = abs((tp - entry) / (entry - sl)) if long_signal else abs((entry - tp) / (sl - entry))
         
-        # 检测信号
-        signal = check_signals(df)
-        now = datetime.now()
-        
-        # 如果检测到新信号，更新 session_state
-        if signal:
-            direction = signal['direction']
-            entry = signal['price']
-            atr_val = signal['atr']
-            # 计算止损/止盈
-            if direction == '多':
-                sl = entry - 1.5 * atr_val
-                tp = entry + 2.0 * atr_val
-            else:
-                sl = entry + 1.5 * atr_val
-                tp = entry - 2.0 * atr_val
-            # 计算盈亏比
-            if abs(entry - sl) > 0:
-                if direction == '多':
-                    rr = (tp - entry) / (entry - sl)
-                else:
-                    rr = (entry - tp) / (sl - entry)
-            else:
-                rr = 0
-            
-            # 更新状态（如果价格有明显变化才视为新信号，防止频繁同方向重复）
-            last_sig = st.session_state.last_signal[tf]
-            if last_sig['direction'] != direction or abs(entry - (last_sig['entry'] or 0)) > 0.01 * entry:
-                st.session_state.last_signal[tf] = {
-                    'direction': direction,
-                    'entry': entry,
-                    'sl': sl,
-                    'tp': tp,
-                    'rr': rr,
-                    'time': now
-                }
-        
-        # 获取当前状态
-        sig = st.session_state.last_signal[tf]
-        
-        # 显示当前价格和ATR
-        col_price, col_atr, col_vol = st.columns(3)
-        col_price.metric("当前价", f"{price:.2f}")
-        col_atr.metric("ATR(14)", f"{atr:.2f}")
-        col_vol.metric("成交量", f"{last['volume']:.0f}")
-        
-        # 显示信号状态
-        if sig['direction']:
-            st.success(f"当前信号: **{sig['direction']}**")
-            st.metric("入场建议", f"{sig['entry']:.2f}")
-            st.metric("止损建议", f"{sig['sl']:.2f}")
-            st.metric("止盈建议", f"{sig['tp']:.2f}")
-            st.metric("盈亏比预期", f"{sig['rr']:.2f}")
-            
-            # 回撤预警（基于当前价格与入场价的偏离）
-            if sig['direction'] == '多':
-                drawdown = (price - sig['entry']) / sig['entry'] * 100
-                warning = drawdown < -0.3
-            else:
-                drawdown = (sig['entry'] - price) / sig['entry'] * 100
-                warning = drawdown < -0.3
-            
-            if warning:
-                st.error(f"⚠️ 回撤超过 0.3%！当前回撤: {drawdown:.2f}%")
-            else:
-                st.info(f"当前回撤: {drawdown:.2f}%")
-        else:
-            st.info("无信号")
-        
-        # 显示最近K线时间
-        st.caption(f"最新K线: {last['timestamp'].strftime('%H:%M:%S')}")
+        return direction, round(entry, 4), round(sl, 4), round(tp, 4), round(rr, 2)
+    
+    return "觀望", None, None, None, None
 
-# 自动刷新
-st_autorefresh(interval=5000, key="auto_refresh")  # 5秒刷新
+# ==================== Streamlit 儀表板 ====================
+col1, col2 = st.columns([3, 1])
 
-st.markdown("---")
-st.caption("策略逻辑：价格突破VWAP + EMA9/21金叉/死叉 + 成交量放大 · 止损 1.5×ATR · 止盈 2×ATR")
+with col1:
+    st.subheader("1分鐘圖表")
+    df1 = add_indicators(fetch_klines('1m'))
+    signal1, entry1, sl1, tp1, rr1 = detect_signal(df1)
+    
+    fig1 = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.20, 0.25])
+    fig1.add_trace(go.Candlestick(x=df1['timestamp'], open=df1['open'], high=df1['high'], low=df1['low'], close=df1['close']), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=df1['timestamp'], y=df1['vwap'], name="VWAP", line=dict(color="#ffd700", width=2)), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=df1['timestamp'], y=df1['ema9'], name="EMA9", line=dict(color="#00ff9d")), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=df1['timestamp'], y=df1['ema21'], name="EMA21", line=dict(color="#ff4d4d")), row=1, col=1)
+    fig1.add_trace(go.Bar(x=df1['timestamp'], y=df1['volume'], name="成交量"), row=2, col=1)
+    fig1.add_trace(go.Bar(x=df1['timestamp'], y=df1['macd_hist'] if 'macd_hist' in df1 else df1['volume']*0, name="MACD柱"), row=3, col=1)
+    st.plotly_chart(fig1, use_container_width=True, width="stretch")
+
+with col2:
+    st.subheader("5分鐘圖表")
+    df5 = add_indicators(fetch_klines('5m'))
+    signal5, entry5, sl5, tp5, rr5 = detect_signal(df5)
+    
+    fig5 = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.20, 0.25])
+    fig5.add_trace(go.Candlestick(x=df5['timestamp'], open=df5['open'], high=df5['high'], low=df5['low'], close=df5['close']), row=1, col=1)
+    fig5.add_trace(go.Scatter(x=df5['timestamp'], y=df5['vwap'], name="VWAP", line=dict(color="#ffd700", width=2)), row=1, col=1)
+    fig5.add_trace(go.Scatter(x=df5['timestamp'], y=df5['ema9'], name="EMA9", line=dict(color="#00ff9d")), row=1, col=1)
+    fig5.add_trace(go.Scatter(x=df5['timestamp'], y=df5['ema21'], name="EMA21", line=dict(color="#ff4d4d")), row=1, col=1)
+    st.plotly_chart(fig5, use_container_width=True, width="stretch")
+
+# ==================== 信號總結 ====================
+st.divider()
+col_sig1, col_sig2, col_sig3 = st.columns(3)
+
+with col_sig1:
+    st.metric("1分鐘信號", signal1 or "觀望")
+    if signal1 and "計劃" in signal1:
+        st.success(f"入場建議價: **{entry1}**")
+        st.error(f"止損建議價: **{sl1}**")
+        st.success(f"止盈建議價: **{tp1}**")
+        st.info(f"盈虧比預期: **{rr1}:1**")
+
+with col_sig2:
+    st.metric("5分鐘信號", signal5 or "觀望")
+    if signal5 and "計劃" in signal5:
+        st.success(f"入場建議價: **{entry5}**")
+        st.error(f"止損建議價: **{sl5}**")
+        st.success(f"止盈建議價: **{tp5}**")
+        st.info(f"盈虧比預期: **{rr5}:1**")
+
+with col_sig3:
+    st.subheader("當前市場狀態")
+    price = fetch_klines('1m')['close'].iloc[-1]
+    st.metric("ETH 最新價", f"${price:,.2f}", f"{(price - fetch_klines('1m')['close'].iloc[-2])/fetch_klines('1m')['close'].iloc[-2]*100:+.2f}%")
+
+# ==================== 終端實時打印 ====================
+with st.expander("📜 終端實時日誌"):
+    st.write(f"[{datetime.now().strftime('%H:%M:%S')}] 1m信號: {signal1 or '觀望'} | 5m信號: {signal5 or '觀望'}")
+    if signal1 and "計劃" in signal1:
+        st.write(f"   → 多頭計劃 | 入場 {entry1} | SL {sl1} | TP {tp1} | RR {rr1}:1")
+    if signal5 and "計劃" in signal5:
+        st.write(f"   → 空頭計劃 | 入場 {entry5} | SL {sl5} | TP {tp5} | RR {rr5}:1")
+
+st_autorefresh(interval=8000, key="auto")
+
+st.caption("只監控 • 不執行任何下單 • 數據來自 Binance 永續合約")
