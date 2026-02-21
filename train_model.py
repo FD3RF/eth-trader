@@ -5,81 +5,84 @@ import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+import jobit # 如果你训练的模型是 pkl，确保环境有 joblib
 
 # =============================
-# 1. 核心参数 (Bybit 优化)
+# 1. 核心参数 (100x 高响应配置)
 # =============================
-SYMBOL = "ETH/USDT:USDT" # Bybit 合约的标准符号格式
-REFRESH_MS = 1500        # 本地部署响应速度
+SYMBOL = "ETH/USDT:USDT"  # Bybit 永续合约标准符号
+REFRESH_MS = 1000        # 1秒极速刷新
 CIRCUIT_BREAKER_PCT = 0.005 
 
 st.set_page_config(layout="wide", page_title="ETH 100x Pro (Bybit)", page_icon="📈")
-st_autorefresh(interval=REFRESH_MS, key="local_update")
+st_autorefresh(interval=REFRESH_MS, key="bybit_update")
 
 # =============================
-# 2. 交易所切换逻辑
+# 2. 交易所初始化 (切换为 Bybit)
 # =============================
 @st.cache_resource
 def get_exchange():
-    # 这里切换为 Bybit
-    # Bybit 通常不需要代理也能在很多地区直连 API
+    # Bybit API 通常比 Binance 限制更少
     return ccxt.bybit({
         "enableRateLimit": True,
         "options": {
-            "defaultType": "linear", # 使用线性合约（USDT本位）
-        }
-        # 如果 Bybit 也报错，再取消下面代理的注释
+            "defaultType": "linear", # 线性合约
+        },
+        # 如果你本地需要代理，请取消下面两行的注释：
         # "proxies": {'http': 'http://127.0.0.1:7890', 'https': 'http://127.0.0.1:7890'},
     })
 
 exchange = get_exchange()
 
+# 状态管理
 if 'last_price' not in st.session_state: st.session_state.last_price = 0
 if 'system_halted' not in st.session_state: st.session_state.system_halted = False
 
 # =============================
-# 3. 核心算法 (10级 5m/15m 联动)
+# 3. 核心算法 (兼容你的 train_model 指标)
 # =============================
 
-def fetch_data(symbol, timeframe, limit=100):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+def fetch_signals(symbol):
+    # 获取 5m 数据进行计算
+    ohlcv = exchange.fetch_ohlcv(symbol, "5m", limit=100)
     df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-    return df
-
-def get_pro_signals(df5, df15):
-    # 15m 趋势基准
-    ema21_15 = ta.ema(df15["c"], 21).iloc[-1]
-    curr_15 = df15["c"].iloc[-1]
     
-    # 5m 动能指标
-    df5["ema9"] = ta.ema(df5["c"], 9)
-    df5["rsi"] = ta.rsi(df5["c"], 14)
-    df5["adx"] = ta.adx(df5["h"], df5["l"], df5["c"], 14)["ADX_14"]
-    macd = ta.macd(df5["c"])
-    df5["hist"] = macd["MACDh_12_26_9"]
+    # 匹配你 train_model.py 中的技术指标
+    df["rsi"] = ta.rsi(df["c"], 14)
+    df["ma20"] = ta.sma(df["c"], 20)
+    df["ma60"] = ta.sma(df["c"], 60)
+    macd = ta.macd(df["c"])
+    df["hist"] = macd["MACDh_12_26_9"]
+    df["atr"] = ta.atr(df["h"], df["l"], df["c"], 14)
+    df["adx"] = ta.adx(df["h"], df["l"], df["c"], 14)["ADX_14"]
     
-    last = df5.iloc[-1]
+    last = df.iloc[-1]
+    
+    # 综合评分逻辑 (针对 100x 杠杆)
     score = 0
+    score += 30 if last["c"] > last["ma20"] else -30
+    score += 20 if last["hist"] > 0 else -20
+    score += 25 if last["adx"] > 25 else 0
+    if last["rsi"] > 60: score += 25
+    elif last["rsi"] < 40: score -= 25
     
-    # 评分逻辑
-    score += 30 if curr_15 > ema21_15 else -30       # 15m 结构趋势
-    score += 20 if last["ema9"] > last["c"] else -20  # 短期乖离
-    score += 25 if last["hist"] > 0 else -25          # MACD 柱状图
-    score += 25 if last["adx"] > 25 else 0            # 趋势强度
-    
-    return score
+    return df, score
 
 # =============================
 # 4. 实时监控界面
 # =============================
 st.title("🛡️ ETH 100x Bybit Pro 监控系统")
 
+if st.sidebar.button("🔌 重置系统"):
+    st.session_state.system_halted = False
+    st.session_state.last_price = 0
+
 try:
-    # 获取最新价
+    # 实时价格捕获
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
     
-    # 毫秒级熔断检测
+    # 熔断检测
     if st.session_state.last_price != 0:
         change = abs(current_price - st.session_state.last_price) / st.session_state.last_price
         if change > CIRCUIT_BREAKER_PCT:
@@ -87,41 +90,38 @@ try:
     st.session_state.last_price = current_price
 
     if st.session_state.system_halted:
-        st.error(f"🚨 触发熔断保护！检测到异常波动: {change:.4%}")
-        if st.button("重启系统"):
-            st.session_state.system_halted = False
+        st.error(f"🚨 触发熔断保护！波动率过高。")
     else:
-        # 获取多周期数据
-        df5 = fetch_data(SYMBOL, "5m")
-        df15 = fetch_data(SYMBOL, "15m")
+        # 数据与信号处理
+        df, score = fetch_signals(SYMBOL)
         
-        score = get_pro_signals(df5, df15)
-        
-        # 仪表盘显示
+        # 顶层看板
         c1, c2, c3 = st.columns(3)
         c1.metric("ETH Bybit Price", f"${current_price}")
-        c2.metric("Pro Score", f"{score} pt", delta=f"{score}")
-        c3.metric("Leverage Risk", "100x ⚠️", delta_color="inverse")
+        c2.metric("Trend Score", f"{score} pt", delta=f"{round(score,1)}")
+        c3.metric("Execution Status", "READY" if abs(score) < 80 else "HIGH ALERT")
 
         # 信号输出
         if abs(score) >= 60:
             side = "LONG 🟢" if score > 0 else "SHORT 🔴"
-            st.markdown(f"## 建议操作: {side}")
-            # 自动计算 100x 止损 (使用 5m ATR)
-            atr = ta.atr(df5["h"], df5["l"], df5["c"], 14).iloc[-1]
-            sl = current_price - (atr * 1.5) if score > 0 else current_price + (atr * 1.5)
-            st.write(f"**建议止损位:** {round(sl, 2)}")
+            st.markdown(f"### 🎯 建议方向: {side}")
+            
+            # 计算 100x 的安全止损（基于 ATR）
+            atr_val = df["atr"].iloc[-1]
+            sl = current_price - (atr_val * 1.5) if score > 0 else current_price + (atr_val * 1.5)
+            st.warning(f"100x 止损参考价: {round(sl, 2)}")
         else:
-            st.info("📊 动能积蓄中... 结构分不足以支撑 100x 入场。")
+            st.info("📊 市场动能不足，等待信号中...")
 
-        # 可视化 K 线
+        # 绘制实时 K 线
         fig = go.Figure(data=[go.Candlestick(
-            x=pd.to_datetime(df5['t'], unit='ms'),
-            open=df5['o'], high=df5['h'], low=df5['l'], close=df5['c']
+            x=pd.to_datetime(df['t'], unit='ms'),
+            open=df['o'], high=df['h'], low=df['l'], close=df['c'],
+            name="ETH 5m"
         )])
-        fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
+        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.error(f"Bybit 连接失败: {e}")
-    st.info("提示: 如果 Bybit 也无法连接，请尝试开启加速器的『全局模式』。")
+    st.error(f"❌ 链接异常: {e}")
+    st.info("💡 建议：如果 Bybit 依然无法访问，请检查加速器是否开启了『TUN模式』或『全局模式』。")
