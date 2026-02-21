@@ -332,8 +332,8 @@ def compute_momentum_score(df_5m):
 
     return min(long_score, 100), min(short_score, 100)
 
-def compute_model_prob(df_5m, latest_feat):
-    """获取模型概率并转换为分数 (0-100)，如果概率为0则回退到50"""
+def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
+    """获取模型概率并转换为分数 (0-100)，如果概率为0则回退到趋势核方向"""
     if model_long is None or model_short is None:
         return 50, 50
     
@@ -344,14 +344,20 @@ def compute_model_prob(df_5m, latest_feat):
     else:
         latest_feat = latest_feat.fillna(0)
     
+    # 调试：显示最新特征值
+    st.sidebar.write("最新特征值：", latest_feat.iloc[0].to_dict())
+    
     try:
         prob_l = model_long.predict_proba(latest_feat)[0][1] * 100
         prob_s = model_short.predict_proba(latest_feat)[0][1] * 100
         
-        # 如果概率为0（可能由于特征异常），回退到50
+        # 如果概率为0（可能由于特征异常），回退到基于趋势核的默认值
         if prob_l == 0 and prob_s == 0:
-            st.sidebar.warning("⚠️ 模型概率均为0，使用中性值50%")
-            prob_l = prob_s = 50
+            st.sidebar.warning("⚠️ 模型概率均为0，使用趋势核方向作为默认概率")
+            if trend_long > trend_short:
+                prob_l, prob_s = 60, 40
+            else:
+                prob_l, prob_s = 40, 60
         elif prob_l == 0:
             prob_l = 50
         elif prob_s == 0:
@@ -518,7 +524,7 @@ try:
         # 计算各项评分
         trend_long, trend_short, raw_trend_long, raw_trend_short = compute_trend_score(df_15m, df_1h)
         mom_long, mom_short = compute_momentum_score(df_5m)
-        prob_l, prob_s = compute_model_prob(df_5m, latest_feat)
+        prob_l, prob_s = compute_model_prob(df_5m, latest_feat, trend_long, trend_short)
         
         # 归一化分数
         trend_long_norm = trend_long / 100.0
