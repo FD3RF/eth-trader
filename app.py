@@ -93,13 +93,15 @@ if 'last_price' not in st.session_state:
 if 'system_halted' not in st.session_state:
     st.session_state.system_halted = False
 if 'signal_log' not in st.session_state:
-    st.session_state.signal_log = []  # 每个元素为字典，包含时间、方向、价格、信心分、是否盈利
+    st.session_state.signal_log = []  # 历史信号记录（包含盈亏）
 if 'last_signal_time' not in st.session_state:
     st.session_state.last_signal_time = 0
 if 'active_signal' not in st.session_state:
-    st.session_state.active_signal = None
+    st.session_state.active_signal = None   # 当前活动信号（持仓）
 if 'last_signal_candle' not in st.session_state:
     st.session_state.last_signal_candle = None
+if 'position' not in st.session_state:
+    st.session_state.position = None  # 持仓信息：{'side','entry','sl','tp','entry_time','score'}
 if 'stats' not in st.session_state:
     st.session_state.stats = {
         'total_trades': 0,
@@ -132,7 +134,7 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算函数（修复VWAP索引，避免None值）
+# 5. 指标计算函数（修复VWAP拼写）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     """计算所有需要的指标，返回DataFrame和最新特征向量"""
@@ -148,7 +150,7 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["ma60"] = ta.sma(df_5m["c"], length=60)
     macd = ta.macd(df_5m["c"])
     df_5m["macd"] = macd["MACD_12_26_9"]
-    # 注意：根据您的训练脚本调整，此处使用MACD线（常见错误），如需信号线请改为MACDs_12_26_9
+    # 根据您的训练脚本调整，这里使用 MACD 线（常见），如需信号线请改为 MACDs_12_26_9
     df_5m["macd_signal"] = macd["MACD_12_26_9"]   
     df_5m["atr"] = ta.atr(df_5m["h"], df_5m["l"], df_5m["c"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["c"]
@@ -157,9 +159,8 @@ def compute_features(df_5m, df_15m, df_1h):
     # 动量核所需指标
     df_5m["ema9"] = ta.ema(df_5m["c"], length=9)
     df_5m["ema21"] = ta.ema(df_5m["c"], length=21)
-    df_5m = df_5m.ta.vwap(append=True)   # 添加 'VWAP' 列
+    df_5m = df_5m.ta.vwap(append=True)   # 生成 'VWAP' 列
     df_5m["volume_ma20"] = ta.sma(df_5m["v"], length=20)
-    # ATR扩张判断：当前ATR > 20期平均ATR * 1.2
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean()
     df_5m["atr_surge"] = df_5m["atr"] > df_5m["atr_ma20"] * 1.2
     
@@ -169,7 +170,6 @@ def compute_features(df_5m, df_15m, df_1h):
     df_15m = df_15m.ta.vwap(append=True)
     df_15m["hh"] = df_15m["h"].rolling(20).max()
     df_15m["ll"] = df_15m["l"].rolling(20).min()
-    # EMA斜率（当前值与前5根比较）
     df_15m["ema200_slope"] = df_15m["ema200"] - df_15m["ema200"].shift(5)
     
     # ----- 1h 指标（用于趋势核）-----
@@ -180,20 +180,19 @@ def compute_features(df_5m, df_15m, df_1h):
     df_1h["ll"] = df_1h["l"].rolling(20).min()
     df_1h["ema200_slope"] = df_1h["ema200"] - df_1h["ema200"].shift(3)
     
-    # 填充NaN（使用0填充可能导致错误判断，但至少避免None）
+    # 填充NaN（用0填充，避免后续比较出错）
     df_5m = df_5m.fillna(0)
     df_15m = df_15m.fillna(0)
     df_1h = df_1h.fillna(0)
     
     # 最新一行特征（用于模型预测）
     feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
-    # 确保没有NaN
     latest_feat = df_5m[feat_cols].iloc[-1:].fillna(0)
     
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 双向评分函数（增加防None保护）
+# 6. 双向评分函数
 # ================================
 def compute_trend_score(df_15m, df_1h):
     """计算趋势核的多空分数 (0-100)，ADX作为倍率因子，返回原始和放大后分数"""
@@ -203,7 +202,7 @@ def compute_trend_score(df_15m, df_1h):
     long_score = 0
     short_score = 0
 
-    # EMA200 (每项15分) + 斜率验证（确保值非0）
+    # EMA200 (每项15分) + 斜率验证
     if c15['c'] > c15['ema200'] and c15['ema200_slope'] > 0:
         long_score += 15
     elif c15['c'] < c15['ema200'] and c15['ema200_slope'] < 0:
@@ -214,7 +213,7 @@ def compute_trend_score(df_15m, df_1h):
     elif c1h['c'] < c1h['ema200'] and c1h['ema200_slope'] < 0:
         short_score += 15
 
-    # VWAP (每项10分)
+    # VWAP (每项10分) —— 注意列名是 'VWAP'
     if c15['c'] > c15['VWAP']:
         long_score += 10
     else:
@@ -292,7 +291,6 @@ def compute_model_prob(df_5m, latest_feat):
     """获取模型概率并转换为分数 (0-100)"""
     if model_long is None or model_short is None:
         return 50, 50
-    # 确保特征中没有NaN
     latest_feat = latest_feat.fillna(0)
     prob_l = model_long.predict_proba(latest_feat)[0][1] * 100
     prob_s = model_short.predict_proba(latest_feat)[0][1] * 100
@@ -303,7 +301,6 @@ def detect_momentum_decay(df_5m):
     if len(df_5m) < 4:
         return False
     macd_vals = df_5m['macd'].iloc[-4:].values
-    # 检查最后3个差值是否均为负（即连续下降）
     return (macd_vals[3] < macd_vals[2] and
             macd_vals[2] < macd_vals[1] and
             macd_vals[1] < macd_vals[0])
@@ -317,7 +314,52 @@ def detect_breakout(df_5m):
             c['adx'] > BREAKOUT_ADX_MIN)
 
 # ================================
-# 7. 侧边栏（含统计面板）
+# 7. 盈亏统计函数（检查持仓是否触发止损/止盈）
+# ================================
+def check_position_exit(position, current_price):
+    """检查持仓是否达到止损或止盈，若触发则返回盈亏百分比和退出原因，否则返回None"""
+    if position is None:
+        return None
+    side = position['side']
+    entry = position['entry']
+    sl = position['sl']
+    tp = position['tp']
+    
+    if side == 'LONG':
+        if current_price <= sl:
+            # 止损
+            pnl = (sl - entry) / entry  # 负值
+            return pnl, '止损'
+        elif current_price >= tp:
+            # 止盈
+            pnl = (tp - entry) / entry
+            return pnl, '止盈'
+    else:  # SHORT
+        if current_price >= sl:
+            pnl = (entry - sl) / entry  # 负值
+            return pnl, '止损'
+        elif current_price <= tp:
+            pnl = (entry - tp) / entry
+            return pnl, '止盈'
+    return None
+
+def update_stats(pnl):
+    """更新统计信息"""
+    stats = st.session_state.stats
+    stats['total_trades'] += 1
+    stats['total_pnl'] += pnl * 100  # 转为百分比
+    if pnl > 0:
+        stats['wins'] += 1
+        stats['current_consecutive_losses'] = 0
+    else:
+        stats['losses'] += 1
+        stats['current_consecutive_losses'] += 1
+        if stats['current_consecutive_losses'] > stats['max_consecutive_losses']:
+            stats['max_consecutive_losses'] = stats['current_consecutive_losses']
+    stats['last_update'] = datetime.now()
+
+# ================================
+# 8. 侧边栏（含统计面板）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -334,7 +376,8 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         st.metric("总交易次数", stats['total_trades'])
-        st.metric("胜率", f"{(stats['wins']/max(stats['total_trades'],1)*100):.1f}%")
+        win_rate = (stats['wins'] / max(stats['total_trades'], 1)) * 100
+        st.metric("胜率", f"{win_rate:.1f}%")
         st.metric("最大连亏", stats['max_consecutive_losses'])
     with col2:
         st.metric("盈利次数", stats['wins'])
@@ -345,7 +388,6 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        # 只显示最近20条
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
@@ -359,9 +401,10 @@ with st.sidebar:
         st.session_state.last_signal_time = 0
         st.session_state.active_signal = None
         st.session_state.last_signal_candle = None
+        st.session_state.position = None
 
 # ================================
-# 8. 主界面
+# 9. 主界面
 # ================================
 st.title("⚖️ ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)")
 
@@ -379,6 +422,26 @@ try:
     if st.session_state.system_halted:
         st.error("🚨 触发熔断保护！价格剧烈波动。")
     else:
+        # 检查当前持仓是否触发止损/止盈
+        if st.session_state.position:
+            exit_info = check_position_exit(st.session_state.position, current_price)
+            if exit_info:
+                pnl_percent, reason = exit_info
+                # 扣除手续费和滑点（假设双边手续费+滑点共0.2%）
+                net_pnl = pnl_percent - 0.002  # 简化处理
+                update_stats(net_pnl)
+                # 记录平仓日志
+                pos = st.session_state.position
+                st.session_state.signal_log.append({
+                    "时间": datetime.now().strftime("%H:%M:%S"),
+                    "方向": pos['side'],
+                    "入场价": pos['entry'],
+                    "出场价": current_price,
+                    "盈亏%": f"{net_pnl*100:.2f}",
+                    "原因": reason
+                })
+                st.session_state.position = None  # 清空持仓
+        
         # 获取多周期数据并计算指标
         df_5m, df_15m, df_1h = get_multi_timeframe_data()
         df_5m, df_15m, df_1h, latest_feat = compute_features(df_5m, df_15m, df_1h)
@@ -396,7 +459,6 @@ try:
         prob_l_norm = prob_l / 100.0
         prob_s_norm = prob_s / 100.0
         
-        # 计算最终多空信心分（归一化后加权再乘100）
         final_long = (trend_long_norm * TREND_WEIGHT +
                       mom_long_norm * MOMENTUM_WEIGHT +
                       prob_l_norm * MODEL_WEIGHT) * 100
@@ -411,13 +473,8 @@ try:
         vol_ratio = c5['v'] / c5['volume_ma20'] if c5['volume_ma20'] > 0 else 0
         atr_pct = c5['atr_pct']
         
-        # 趋势强度指数（使用原始分数，避免ADX放大虚增）
         trend_strength_raw = abs(raw_trend_long - raw_trend_short)
-        
-        # 多空信心分差值
         score_gap = abs(final_long - final_short)
-        
-        # 模型概率差值
         model_gap = abs(prob_l - prob_s)
         
         # 市场状态识别
@@ -430,61 +487,39 @@ try:
         else:
             market_state = "NORMAL"
         
-        # 检测动量衰减
         momentum_decay = detect_momentum_decay(df_5m)
-        
-        # 检测爆发结构
         is_breakout = detect_breakout(df_5m)
         
-        # 当前K线时间戳（毫秒）
         current_candle_time = df_5m.index[-1].value / 10**6
         
-        # 冷却时间检查（基于K线数量）
+        # 冷却检查
         if st.session_state.last_signal_candle is not None:
             candles_since_last = (current_candle_time - st.session_state.last_signal_candle) / CANDLE_5M_MS
             cooling = candles_since_last < COOLDOWN_CANDLES
         else:
             cooling = False
         
-        # 初始化无信号
         direction = None
         final_score = 0
         filter_reasons = []
         
-        # 冷却检查
         if cooling:
             filter_reasons.append(f"冷却中，还需 {COOLDOWN_CANDLES - candles_since_last:.1f} 根K线")
-        
-        # 波动率过滤
         if atr_pct < MIN_ATR_PCT:
             filter_reasons.append(f"波动率过低 (ATR% = {atr_pct:.3%})")
-        
-        # 成交量放大
         if vol_ratio < VOLUME_RATIO_MIN:
             filter_reasons.append(f"成交量不足 (倍数 {vol_ratio:.2f})")
-        
-        # 趋势强度指数过滤（基于原始分数）
         if trend_strength_raw < MIN_TREND_STRENGTH:
             filter_reasons.append(f"趋势强度过弱 ({trend_strength_raw} < {MIN_TREND_STRENGTH})")
-        
-        # 多空差值
         if score_gap < MIN_SCORE_GAP:
             filter_reasons.append(f"多空信心分差过小 ({score_gap:.1f} < {MIN_SCORE_GAP})")
-        
-        # 市场状态过滤（震荡期禁止交易）
         if market_state == "RANGE":
             filter_reasons.append("市场处于震荡期 (双ADX<20)")
-        
-        # 动量衰减过滤
         if momentum_decay:
             filter_reasons.append("动量衰减 (MACD连续下降)")
         
-        # 如果上述基础条件不满足，直接跳过方向判断
         if not filter_reasons:
-            # 根据是否爆发调整信心门槛
             current_thres = BREAKOUT_CONF_THRES if is_breakout else FINAL_CONF_THRES
-            
-            # 确定初步方向
             if final_long > final_short and final_long >= current_thres:
                 candidate_dir = "LONG"
                 candidate_score = final_long
@@ -494,7 +529,6 @@ try:
             else:
                 candidate_dir = None
             
-            # 模型方向确认
             if candidate_dir == "LONG" and prob_l < MODEL_DIRECTION_MIN:
                 filter_reasons.append(f"模型多头概率不足 ({prob_l:.1f}% < {MODEL_DIRECTION_MIN}%)")
                 candidate_dir = None
@@ -502,12 +536,10 @@ try:
                 filter_reasons.append(f"模型空头概率不足 ({prob_s:.1f}% < {MODEL_DIRECTION_MIN}%)")
                 candidate_dir = None
             
-            # 模型概率差值过滤
             if candidate_dir and model_gap < MODEL_GAP_MIN:
                 filter_reasons.append(f"模型概率差过小 ({model_gap:.1f} < {MODEL_GAP_MIN})")
                 candidate_dir = None
             
-            # 趋势同步锁绑定方向
             if candidate_dir == "LONG":
                 if not (c15['c'] > c15['ema200'] and c1h['c'] > c1h['ema200']):
                     filter_reasons.append("大周期未支持多头趋势 (15m或1h价格低于EMA200)")
@@ -521,13 +553,12 @@ try:
                 direction = candidate_dir
                 final_score = candidate_score
         
-        # 更新信号锁（基于K线时间戳）
+        # 更新信号锁
         if direction and st.session_state.last_signal_candle != current_candle_time:
             st.session_state.active_signal = direction
             st.session_state.last_signal_candle = current_candle_time
             st.session_state.last_signal_time = time.time()
         elif not direction:
-            # 方向消失，如果当前K线已变，清除活动信号
             if st.session_state.last_signal_candle != current_candle_time:
                 st.session_state.active_signal = None
         
@@ -539,7 +570,6 @@ try:
         col4.metric("模型 (多/空)", f"{prob_l:.0f}%/{prob_s:.0f}%")
         col5.metric("最终信心", f"{final_long:.0f}/{final_short:.0f}")
         
-        # 显示当前过滤状态
         if filter_reasons:
             st.warning("⛔ 当前不满足信号条件: " + " | ".join(filter_reasons))
         else:
@@ -547,44 +577,37 @@ try:
         
         st.markdown("---")
         
-        # 如果存在活动信号且与当前K线时间戳一致，显示交易计划
-        if st.session_state.active_signal and st.session_state.last_signal_candle == current_candle_time:
+        # 如果存在活动信号且没有持仓，则开仓
+        if st.session_state.active_signal and st.session_state.last_signal_candle == current_candle_time and st.session_state.position is None:
             side = st.session_state.active_signal
             st.success(f"🎯 **高置信度交易信号：{side}** (信心分 {final_score:.1f})")
             
-            # 止损止盈计算
             atr_raw = df_5m['atr'].iloc[-1]
-            max_sl = current_price * 0.003   # 绝对止损上限 0.3%
+            max_sl = current_price * 0.003
             atr_sl = atr_raw * 1.5
-            min_sl = current_price * MIN_SL_PCT  # 下限 0.15%
+            min_sl = current_price * MIN_SL_PCT
             sl_dist = max(min_sl, min(atr_sl, max_sl))
             sl = current_price - sl_dist if side == "LONG" else current_price + sl_dist
             tp = current_price + sl_dist * RR if side == "LONG" else current_price - sl_dist * RR
+            
+            # 建立持仓
+            st.session_state.position = {
+                'side': side,
+                'entry': current_price,
+                'sl': sl,
+                'tp': tp,
+                'entry_time': datetime.now(),
+                'score': final_score
+            }
             
             sc1, sc2, sc3 = st.columns(3)
             sc1.write(f"**入场价:** {current_price}")
             sc2.write(f"**止损 (SL):** {round(sl, 2)}")
             sc3.write(f"**止盈 (TP):** {round(tp, 2)}")
-            
-            # 记录日志（此处不更新盈亏，由用户手动或后续回调处理）
-            t_now = datetime.now().strftime("%H:%M:%S")
-            if not st.session_state.signal_log or st.session_state.signal_log[-1]['时间'] != t_now:
-                st.session_state.signal_log.append({
-                    "时间": t_now,
-                    "方向": side,
-                    "价格": current_price,
-                    "信心分": f"{final_score:.1f}",
-                    "趋势": f"{trend_long}/{trend_short}",
-                    "动量": f"{mom_long}/{mom_short}",
-                    "模型": f"{prob_l:.0f}%/{prob_s:.0f}%",
-                    "爆发": "是" if is_breakout else "否"
-                })
-                # 更新总交易次数
-                st.session_state.stats['total_trades'] += 1
         else:
             st.info("🔎 当前无符合要求的信号")
         
-        # 显示K线图（5m）
+        # 显示K线图
         fig = go.Figure(data=[go.Candlestick(
             x=df_5m.index,
             open=df_5m['o'], high=df_5m['h'], low=df_5m['l'], close=df_5m['c']
