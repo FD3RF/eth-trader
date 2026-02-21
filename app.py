@@ -10,13 +10,13 @@ import os
 import time
 from datetime import datetime
 
-# 设置 pandas 选项，抑制未来版本的 downcasting 警告（可选）
+# 设置 pandas 选项，抑制 downcasting 警告
 pd.set_option('future.no_silent_downcasting', True)
 
 # ================================
 # 1. 核心参数与看板设置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 终极双向 AI (OKX)", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH 100x 终极双向评分 AI (OKX)", page_icon="⚖️")
 
 SYMBOL = "ETH/USDT:USDT"            # OKX 永续合约
 REFRESH_MS = 2500                   # 2.5秒刷新
@@ -60,7 +60,6 @@ CANDLE_5M_MS = 5 * 60 * 1000  # 5分钟对应的毫秒数
 
 # 爆发识别阈值
 BREAKOUT_VOL_RATIO = 1.5       # 成交量放大倍数
-BREAKOUT_ATR_SURGE = True      # ATR surge需为True
 BREAKOUT_ADX_MIN = 25          # ADX最小值
 
 st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_final")
@@ -94,13 +93,23 @@ if 'last_price' not in st.session_state:
 if 'system_halted' not in st.session_state:
     st.session_state.system_halted = False
 if 'signal_log' not in st.session_state:
-    st.session_state.signal_log = []
+    st.session_state.signal_log = []  # 每个元素为字典，包含时间、方向、价格、信心分、是否盈利
 if 'last_signal_time' not in st.session_state:
-    st.session_state.last_signal_time = 0  # 上一次信号触发的时间戳（秒）
+    st.session_state.last_signal_time = 0
 if 'active_signal' not in st.session_state:
-    st.session_state.active_signal = None  # 当前活动信号
+    st.session_state.active_signal = None
 if 'last_signal_candle' not in st.session_state:
-    st.session_state.last_signal_candle = None  # 上一次触发信号的K线时间戳（毫秒）
+    st.session_state.last_signal_candle = None
+if 'stats' not in st.session_state:
+    st.session_state.stats = {
+        'total_trades': 0,
+        'wins': 0,
+        'losses': 0,
+        'total_pnl': 0.0,
+        'max_consecutive_losses': 0,
+        'current_consecutive_losses': 0,
+        'last_update': None
+    }
 
 # ================================
 # 4. 数据获取函数（多时间框架）
@@ -123,15 +132,15 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算函数（修复VWAP索引）
+# 5. 指标计算函数（修复VWAP索引，避免None值）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     """计算所有需要的指标，返回DataFrame和最新特征向量"""
-    # 将时间戳列转换为datetime并设置为索引，确保有序（VWAP要求）
+    # 将时间戳列转换为datetime并设置为索引，确保有序
     for df in [df_5m, df_15m, df_1h]:
         df['t'] = pd.to_datetime(df['t'], unit='ms')
         df.set_index('t', inplace=True)
-        df.sort_index(inplace=True)  # 确保按时间升序排列
+        df.sort_index(inplace=True)
 
     # ----- 5m 指标（用于动量核 + 模型）-----
     df_5m["rsi"] = ta.rsi(df_5m["c"], length=14)
@@ -139,8 +148,8 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["ma60"] = ta.sma(df_5m["c"], length=60)
     macd = ta.macd(df_5m["c"])
     df_5m["macd"] = macd["MACD_12_26_9"]
-    # 注意：请根据您的训练脚本调整此行，如果训练时用了MACD线作为信号线，则使用MACD_12_26_9；如果用了标准信号线，则使用MACDs_12_26_9
-    df_5m["macd_signal"] = macd["MACD_12_26_9"]   # 默认与训练对齐（请根据实际情况修改）
+    # 注意：根据您的训练脚本调整，此处使用MACD线（常见错误），如需信号线请改为MACDs_12_26_9
+    df_5m["macd_signal"] = macd["MACD_12_26_9"]   
     df_5m["atr"] = ta.atr(df_5m["h"], df_5m["l"], df_5m["c"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["c"]
     df_5m["adx"] = ta.adx(df_5m["h"], df_5m["l"], df_5m["c"], length=14)["ADX_14"]
@@ -148,7 +157,6 @@ def compute_features(df_5m, df_15m, df_1h):
     # 动量核所需指标
     df_5m["ema9"] = ta.ema(df_5m["c"], length=9)
     df_5m["ema21"] = ta.ema(df_5m["c"], length=21)
-    # 使用 DataFrame 方法计算 VWAP，避免索引警告
     df_5m = df_5m.ta.vwap(append=True)   # 添加 'VWAP' 列
     df_5m["volume_ma20"] = ta.sma(df_5m["v"], length=20)
     # ATR扩张判断：当前ATR > 20期平均ATR * 1.2
@@ -159,8 +167,8 @@ def compute_features(df_5m, df_15m, df_1h):
     df_15m["ema200"] = ta.ema(df_15m["c"], length=200)
     df_15m["adx"] = ta.adx(df_15m["h"], df_15m["l"], df_15m["c"], length=14)["ADX_14"]
     df_15m = df_15m.ta.vwap(append=True)
-    df_15m["hh"] = df_15m["h"].rolling(20).max()      # 20周期最高点
-    df_15m["ll"] = df_15m["l"].rolling(20).min()      # 20周期最低点
+    df_15m["hh"] = df_15m["h"].rolling(20).max()
+    df_15m["ll"] = df_15m["l"].rolling(20).min()
     # EMA斜率（当前值与前5根比较）
     df_15m["ema200_slope"] = df_15m["ema200"] - df_15m["ema200"].shift(5)
     
@@ -170,22 +178,22 @@ def compute_features(df_5m, df_15m, df_1h):
     df_1h = df_1h.ta.vwap(append=True)
     df_1h["hh"] = df_1h["h"].rolling(20).max()
     df_1h["ll"] = df_1h["l"].rolling(20).min()
-    # EMA斜率（当前值与前3根比较，1h周期长，取3根足够）
     df_1h["ema200_slope"] = df_1h["ema200"] - df_1h["ema200"].shift(3)
     
-    # 填充NaN
-    df_5m = df_5m.ffill().bfill()
-    df_15m = df_15m.ffill().bfill()
-    df_1h = df_1h.ffill().bfill()
+    # 填充NaN（使用0填充可能导致错误判断，但至少避免None）
+    df_5m = df_5m.fillna(0)
+    df_15m = df_15m.fillna(0)
+    df_1h = df_1h.fillna(0)
     
     # 最新一行特征（用于模型预测）
     feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
-    latest_feat = df_5m[feat_cols].iloc[-1:]
+    # 确保没有NaN
+    latest_feat = df_5m[feat_cols].iloc[-1:].fillna(0)
     
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 双向评分函数
+# 6. 双向评分函数（增加防None保护）
 # ================================
 def compute_trend_score(df_15m, df_1h):
     """计算趋势核的多空分数 (0-100)，ADX作为倍率因子，返回原始和放大后分数"""
@@ -195,12 +203,11 @@ def compute_trend_score(df_15m, df_1h):
     long_score = 0
     short_score = 0
 
-    # EMA200 (每项15分) + 斜率验证
+    # EMA200 (每项15分) + 斜率验证（确保值非0）
     if c15['c'] > c15['ema200'] and c15['ema200_slope'] > 0:
         long_score += 15
     elif c15['c'] < c15['ema200'] and c15['ema200_slope'] < 0:
         short_score += 15
-    # 如果价格方向与斜率不一致，不加分（视为假突破）
 
     if c1h['c'] > c1h['ema200'] and c1h['ema200_slope'] > 0:
         long_score += 15
@@ -285,6 +292,8 @@ def compute_model_prob(df_5m, latest_feat):
     """获取模型概率并转换为分数 (0-100)"""
     if model_long is None or model_short is None:
         return 50, 50
+    # 确保特征中没有NaN
+    latest_feat = latest_feat.fillna(0)
     prob_l = model_long.predict_proba(latest_feat)[0][1] * 100
     prob_s = model_short.predict_proba(latest_feat)[0][1] * 100
     return prob_l, prob_s
@@ -308,7 +317,7 @@ def detect_breakout(df_5m):
             c['adx'] > BREAKOUT_ADX_MIN)
 
 # ================================
-# 7. 侧边栏
+# 7. 侧边栏（含统计面板）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -320,10 +329,24 @@ with st.sidebar:
         st.write("费率加载中...")
     
     st.markdown("---")
+    st.subheader("📈 实时统计")
+    stats = st.session_state.stats
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("总交易次数", stats['total_trades'])
+        st.metric("胜率", f"{(stats['wins']/max(stats['total_trades'],1)*100):.1f}%")
+        st.metric("最大连亏", stats['max_consecutive_losses'])
+    with col2:
+        st.metric("盈利次数", stats['wins'])
+        st.metric("亏损次数", stats['losses'])
+        st.metric("总盈亏", f"{stats['total_pnl']:.2f}%")
+    
+    st.markdown("---")
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        st.dataframe(log_df, width='stretch', height=350)
+        # 只显示最近20条
+        st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
             st.rerun()
@@ -414,7 +437,7 @@ try:
         is_breakout = detect_breakout(df_5m)
         
         # 当前K线时间戳（毫秒）
-        current_candle_time = df_5m.index[-1].value / 10**6  # 转换为毫秒
+        current_candle_time = df_5m.index[-1].value / 10**6
         
         # 冷却时间检查（基于K线数量）
         if st.session_state.last_signal_candle is not None:
@@ -508,7 +531,7 @@ try:
             if st.session_state.last_signal_candle != current_candle_time:
                 st.session_state.active_signal = None
         
-        # 顶部仪表盘（使用索引作为x轴不影响显示，但需确保x使用索引）
+        # 顶部仪表盘
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ETH 实时价", f"${current_price}")
         col2.metric("趋势核 (多/空)", f"{trend_long}/{trend_short}")
@@ -543,7 +566,7 @@ try:
             sc2.write(f"**止损 (SL):** {round(sl, 2)}")
             sc3.write(f"**止盈 (TP):** {round(tp, 2)}")
             
-            # 记录日志
+            # 记录日志（此处不更新盈亏，由用户手动或后续回调处理）
             t_now = datetime.now().strftime("%H:%M:%S")
             if not st.session_state.signal_log or st.session_state.signal_log[-1]['时间'] != t_now:
                 st.session_state.signal_log.append({
@@ -556,12 +579,14 @@ try:
                     "模型": f"{prob_l:.0f}%/{prob_s:.0f}%",
                     "爆发": "是" if is_breakout else "否"
                 })
+                # 更新总交易次数
+                st.session_state.stats['total_trades'] += 1
         else:
             st.info("🔎 当前无符合要求的信号")
         
-        # 显示K线图（5m），使用索引作为x轴
+        # 显示K线图（5m）
         fig = go.Figure(data=[go.Candlestick(
-            x=df_5m.index,  # 现在是 DatetimeIndex
+            x=df_5m.index,
             open=df_5m['o'], high=df_5m['h'], low=df_5m['l'], close=df_5m['c']
         )])
         fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
