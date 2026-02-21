@@ -1,11 +1,7 @@
 streamlit>=1.28.0
 streamlit-autorefresh
-ccxt>=4.0.0
 pandas>=1.5.0
 numpy>=1.24.0
 ta>=0.10.2
 plotly>=5.14.0
 scipy>=1.10.0
-nest-asyncio>=1.5.0
-matplotlib>=3.5.0
-retry>=0.9.2
