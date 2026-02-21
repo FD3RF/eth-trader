@@ -1,6 +1,8 @@
-streamlit>=1.28.0
-streamlit-autorefresh
-ccxt>=4.0.0
-pandas>=1.5.0
-numpy>=1.24.0
+streamlit>=1.32.0
+streamlit-autorefresh>=1.0.1
+ccxt>=4.3.0
+pandas>=2.1.0
+numpy>=1.26.0
 ta>=0.10.2
+plotly>=5.18.0
+scipy>=1.11.0
