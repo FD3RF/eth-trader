@@ -44,7 +44,7 @@ if st.sidebar.button("🔌 重置系统熔断"):
     st.session_state.last_price = 0
 
 # =============================
-# 核心函数（基于之前逻辑，适配 pandas_ta）
+# 核心函数
 # =============================
 def fetch_klines(timeframe, limit=100):
     """获取指定周期的K线数据并转换为DataFrame"""
@@ -54,7 +54,7 @@ def fetch_klines(timeframe, limit=100):
     return df
 
 def add_indicators(df):
-    """添加技术指标"""
+    """添加技术指标（使用 pandas_ta）"""
     df['ema9']   = ta.ema(df['close'], length=9)
     df['ema21']  = ta.ema(df['close'], length=21)
     df['rsi']    = ta.rsi(df['close'], length=14)
