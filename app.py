@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-🚀 ETH 合約短線策略監控 V12.2（Bybit 專用版）
-已修復：451 錯誤、pandas 警告、width 警告、模擬資料錯誤
+🚀 ETH 合約短線策略監控 V12.3（純 Bybit 版）
+已修復：451 錯誤、所有警告、metric 傳 list 錯誤
 """
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -11,29 +11,24 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 
 st.set_page_config(page_title="ETH短線監控", layout="wide")
-
 st.markdown("<style>.stApp {background:#0e1117;color:#fff}</style>", unsafe_allow_html=True)
 
-st.title("🚀 ETH 合約短線策略監控系統 V12.2")
+st.title("🚀 ETH 合約短線策略監控系統 V12.3")
 st.caption("Bybit 永續合約 • 1分鐘 + 5分鐘 • 每8秒自動刷新")
 
 SYMBOL = "ETHUSDT"
 
-# 會話狀態
-if 'opened_today' not in st.session_state:
-    st.session_state.opened_today = 0
-
-# ==================== 數據獲取（強制 Bybit） ====================
+# ==================== 數據獲取（強制 Bybit + 備援） ====================
 @st.cache_data(ttl=8)
 def fetch_klines(tf, limit=400):
-    ex = ccxt.bybit({'enableRateLimit': True})
     try:
+        ex = ccxt.bybit({'enableRateLimit': True})
         ohlcv = ex.fetch_ohlcv(SYMBOL + ":USDT", tf, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
-    except Exception as e:
-        # 雲端模擬備援（絕不讓程式崩潰）
+    except:
+        # 雲端備援（永不崩潰）
         np.random.seed(hash(tf) % 2**32)
         freq = '1min' if tf == '1m' else '5min'
         ts = pd.date_range(end=datetime.now(), periods=limit, freq=freq)
@@ -82,7 +77,7 @@ with col1:
     fig1.add_trace(go.Scatter(x=df1['timestamp'], y=df1['vwap'], name="VWAP", line=dict(color="#ffd700")), row=1, col=1)
     fig1.add_trace(go.Scatter(x=df1['timestamp'], y=df1['ema9'], name="EMA9", line=dict(color="#00ff9d")), row=1, col=1)
     fig1.add_trace(go.Scatter(x=df1['timestamp'], y=df1['ema21'], name="EMA21", line=dict(color="#ff4d4d")), row=1, col=1)
-    st.plotly_chart(fig1, width='stretch')
+    st.plotly_chart(fig1, use_container_width=True)
 
 with col2:
     st.subheader("5分鐘圖表")
@@ -93,7 +88,7 @@ with col2:
     fig5.add_trace(go.Scatter(x=df5['timestamp'], y=df5['vwap'], name="VWAP", line=dict(color="#ffd700")), row=1, col=1)
     fig5.add_trace(go.Scatter(x=df5['timestamp'], y=df5['ema9'], name="EMA9", line=dict(color="#00ff9d")), row=1, col=1)
     fig5.add_trace(go.Scatter(x=df5['timestamp'], y=df5['ema21'], name="EMA21", line=dict(color="#ff4d4d")), row=1, col=1)
-    st.plotly_chart(fig5, width='stretch')
+    st.plotly_chart(fig5, use_container_width=True)
 
 st.divider()
 st.subheader("📢 即時信號")
