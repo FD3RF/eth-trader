@@ -8,6 +8,7 @@
 - 移动止损、止盈、每日开单上限（动态配置）
 - 多交易所自动切换（Binance/OKX/Bybit）
 - 实时交易界面采用深色专业风格，三币种三层图表（价格+成交量+MACD）
+- 每个币种下方显示详细多时间框架信号
 - 完整回测中心、风险仪表板、交易统计
 ===========================================================
 """
@@ -609,7 +610,7 @@ with tab1:
                 name="MACD柱", marker_color=colors_hist
             ), row=3, col=1)
 
-            # 信号标注
+            # 信号标注（最近10个）
             for sig in st.session_state.signal_history[symbol][-10:]:
                 fig.add_annotation(
                     x=sig['time'], y=sig['price'],
@@ -623,6 +624,12 @@ with tab1:
                               plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
                               font=dict(color="#ffffff"))
             st.plotly_chart(fig, use_container_width=True)
+
+            # 详细多时间框架信号显示
+            st.markdown("**多TF信号详情**")
+            tf_cols = st.columns(3)
+            for idx, (tf, sig) in enumerate(signals_tf.items()):
+                tf_cols[idx].metric(tf, sig, delta_color="off")
 
 with tab2:
     st.header("🔙 回测中心")
@@ -745,7 +752,6 @@ with tab4:
     st.number_input("每日开单上限", min_value=1, max_value=100, value=st.session_state.max_trades_per_day, key="max_trades_per_day")
     st.selectbox("首选数据源交易所", ["binance", "okx", "bybit"], key="preferred_exchange")
     if st.button("更新首选交易所"):
-        # 可以重新排序 EXCHANGES 或将首选置前，但简单起见仅记录
         st.success("首选交易所已更新")
 
 # ==================== 自动刷新 ====================
