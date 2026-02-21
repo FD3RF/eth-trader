@@ -80,8 +80,7 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]  # 最新在上
-        # 使用 width 参数替换即将弃用的 use_container_width
-        st.dataframe(log_df, width='stretch', height=400)
+        st.dataframe(log_df, width='stretch', height=400)  # 替换 use_container_width
         if st.button("清除日志"):
             st.session_state.signal_log = []
             st.rerun()
@@ -188,7 +187,7 @@ try:
                     "空头%": f"{prob_s*100:.1f}%"
                 })
 
-        # 止损止盈建议（基于 ATR）
+        # 止损止盈建议（基于原始 ATR）
         if side:
             atr = df['atr'].iloc[-1]               # 原始 ATR 用于止损距离
             sl_dist = min(atr * 1.5, current_price * 0.003)   # 止损距离（ATR倍数与0.3%取小）
@@ -209,9 +208,7 @@ try:
             open=df['o'], high=df['h'], low=df['l'], close=df['c']
         )])
         fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
-        # 同样更新 use_container_width 为 width
-        st.plotly_chart(fig, use_container_width=True)  # 此处 use_container_width 还未废弃，但为了统一可改为 width='stretch'，但 plotly_chart 的参数不同，暂时保留
-        # 如果你也想消除 plotly_chart 的警告，可以改为 st.plotly_chart(fig, use_container_width=True) 目前没有警告，保持原样
+        st.plotly_chart(fig, width='stretch')  # 替换 use_container_width
 
 except Exception as e:
     st.sidebar.error(f"运行异常: {e}")
