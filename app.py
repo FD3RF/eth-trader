@@ -22,7 +22,6 @@ st_autorefresh(interval=REFRESH_MS, key="prod_monitor")
 @st.cache_resource
 def init_system():
     """初始化交易所和模型"""
-    # 使用 OKX 永续合约 (swap)
     exch = ccxt.okx({
         "enableRateLimit": True,
         "options": {"defaultType": "swap"}      # swap 表示永续合约
@@ -53,7 +52,7 @@ if st.sidebar.button("🔌 重置系统熔断"):
     st.session_state.last_price = 0
 
 # =============================
-# 2. 生产级特征工程
+# 2. 生产级特征工程（与训练脚本严格对齐）
 # =============================
 def get_safe_analysis_data():
     """获取 K 线数据并计算特征"""
@@ -67,7 +66,7 @@ def get_safe_analysis_data():
             "low": "l", "close": "c", "volume": "v"
         }, inplace=True)
         
-        # 计算指标（与训练脚本严格一致）
+        # 计算指标（与训练脚本完全一致）
         df["rsi"] = ta.rsi(df["c"], length=14)
         df["ma20"] = ta.sma(df["c"], length=20)
         df["ma60"] = ta.sma(df["c"], length=60)
@@ -77,13 +76,14 @@ def get_safe_analysis_data():
         df["macd_signal"] = macd["MACDs_12_26_9"]
         
         df["atr"] = ta.atr(df["h"], df["l"], df["c"], length=14)
+        df["atr_pct"] = df["atr"] / df["c"] * 100    # 转换为百分比，与训练一致
         df["adx"] = ta.adx(df["h"], df["l"], df["c"], length=14)["ADX_14"]
         
         # 填充缺失值
         df = df.ffill().bfill()
         
-        # 特征列（与训练时完全一致）
-        feature_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr', 'adx']
+        # 特征列（严格匹配训练脚本）
+        feature_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
         # 取最新一行特征
         features = df[feature_cols].iloc[-1:].copy()
         
@@ -161,7 +161,7 @@ try:
                 xaxis_rangeslider_visible=False,
                 margin=dict(l=0, r=0, t=0, b=0)
             )
-            st.plotly_chart(fig, width="stretch")   # 代替 use_container_width
+            st.plotly_chart(fig, width="stretch")
         else:
             st.warning("暂无数据，请稍候...")
 
