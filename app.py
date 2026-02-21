@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-🤖 AI 自进化交易平台 VAI v9.0 短线优化版
+🤖 AI 自进化交易平台 VAI v9.0 短线优化版（增强版）
 ===========================================================
-特点：
-- 多周期强制共振：5m/15m/1h 信号必须完全一致
-- 趋势过滤：1h EMA50 方向限制
-- 主策略与高频策略共振
-- 每日开单上限 10 单，多余信号排队
-- 异步并行 + 数据缓存 + 高性能热图 + 多币种回放
-- 完整的回测与风险仪表板
+新增功能：
+- 止盈：基于 ATR 倍数的固定止盈（可配置）
+- 移动止损：盈利超过 1 倍 ATR 后，止损移动至开仓价（保本）
+- 胜率统计：实时显示总交易次数、胜率、总盈亏，并支持重置
 """
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -32,7 +29,7 @@ ACCOUNT_BALANCE = 10000.0
 LEVERAGE = 100
 MAX_TOTAL_RISK = 0.55
 TIMEFRAMES = ['5m', '15m', '1h']
-MAX_TRADES_PER_DAY = 10  # 短线交易，降低每日上限
+MAX_TRADES_PER_DAY = 10
 
 # ==================== 会话状态初始化 ====================
 defaults = {
@@ -56,6 +53,10 @@ defaults = {
     'daily_trade_count': 0,
     'last_trade_day': datetime.now().date(),
     'pending_signals': [],
+    # 新增统计变量
+    'total_trades': 0,
+    'winning_trades': 0,
+    'total_pnl': 0.0,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -65,7 +66,7 @@ if 'last_signal_time' not in st.session_state:
 if 'cached_ohlcv' not in st.session_state:
     st.session_state.cached_ohlcv = {}
 
-# ==================== 模拟K线生成（修复版）====================
+# ==================== 模拟K线生成 ====================
 def generate_simulated_ohlcv(symbol, timeframe, limit=300):
     key = f"{symbol}_{timeframe}"
     st.session_state.sim_step += 1
@@ -84,7 +85,6 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=300):
         prices.append(prices[-1]*(1+ret))
     prices = np.array(prices)
     
-    # 修复：使用兼容的频率格式，只指定 end 和 periods
     freq_map = {'5m': '5T', '15m': '15T', '1h': '1H'}
     freq = freq_map.get(timeframe, '15T')
     end_time = datetime.now()
@@ -222,12 +222,25 @@ def open_position(symbol, side, entry, stop, size, current_price):
         msg = execute_real_order(symbol, side, size)
     else:
         msg = f"模拟开仓 {side} {size:.0f}USDT"
-    st.session_state.positions[symbol] = {'side': side, 'entry': entry, 'stop': stop, 'size': size}
+    # 新增 breakeven 标记，用于移动止损
+    st.session_state.positions[symbol] = {
+        'side': side,
+        'entry': entry,
+        'stop': stop,
+        'size': size,
+        'breakeven': False   # 是否已移动止损至保本
+    }
     st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 开仓 {symbol} {side} @{entry:.2f} 止损{stop:.2f} {msg}")
     st.session_state.daily_trade_count += 1
 
 def close_position(symbol, pos, price, reason):
     pnl = pos['size'] * ((price/pos['entry']-1) if pos['side']=='多' else (1-price/pos['entry'])) * LEVERAGE
+    # 更新统计
+    st.session_state.total_trades += 1
+    st.session_state.total_pnl += pnl
+    if pnl > 0:
+        st.session_state.winning_trades += 1
+
     if st.session_state.real_trading and not st.session_state.dry_run:
         close_side = '空' if pos['side']=='多' else '多'
         msg = execute_real_order(symbol, close_side, pos['size'])
@@ -282,15 +295,15 @@ def hf_signal(df, symbol):
     if len(df)<25: return None,None,None
     last=df.iloc[-1]
     if last['volume_ratio']<=1.65: return None,None,None
-    direction='多' if last['rsi']>60 else '空' if last['rsi']<40 else None  # 短线RSI阈值微调
+    direction='多' if last['rsi']>60 else '空' if last['rsi']<40 else None
     if not direction: return None,None,None
     hist=st.session_state.hf_history[symbol]
     streak=sum(1 for x in reversed(hist) if x>0) if hist and hist[-1]>0 else -sum(1 for x in reversed(hist) if x<0) if hist else 0
     mult=max(0.55,min(2.1,1+streak*0.18))
-    size_usdt=ACCOUNT_BALANCE*st.session_state.get('HF_MAX_POS',0.15)*mult  # 高频仓位比例调低
+    size_usdt=ACCOUNT_BALANCE*st.session_state.get('HF_MAX_POS',0.15)*mult
     return f"HF {direction} {size_usdt:.0f}USDT",size_usdt,direction
 
-# ==================== 异步信号处理（短线优化版）====================
+# ==================== 异步信号处理（增强版）====================
 async def process_single_symbol(symbol):
     df = fetch_ohlcv(symbol, '5m', limit=300)
     df = add_indicators(df)
@@ -301,13 +314,45 @@ async def process_single_symbol(symbol):
         return
     st.session_state.last_signal_time[symbol] = last_time
 
-    # 止损检查
+    # 获取当前持仓
     pos = st.session_state.positions.get(symbol)
+
+    # 1. 止损检查（必须先于移动止损和止盈）
     if pos and ((pos['side']=='多' and current_price<=pos['stop']) or (pos['side']=='空' and current_price>=pos['stop'])):
         close_position(symbol, pos, current_price, "止损")
         pos = None
 
-    # 获取5分钟信号
+    # 2. 移动止损（保本）：盈利超过1倍ATR后，将止损移至开仓价
+    if pos and not pos.get('breakeven', False):
+        atr = df['atr'].iloc[-1]
+        if pos['side'] == '多':
+            if current_price - pos['entry'] > atr:
+                pos['stop'] = pos['entry']
+                pos['breakeven'] = True
+                st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} {symbol} 移动止损至保本")
+        else:
+            if pos['entry'] - current_price > atr:
+                pos['stop'] = pos['entry']
+                pos['breakeven'] = True
+                st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} {symbol} 移动止损至保本")
+
+    # 3. 止盈检查（基于ATR倍数）
+    if pos:
+        take_profit_mult = st.session_state.get('TAKE_PROFIT_MULT', 2.0)
+        atr = df['atr'].iloc[-1]
+        if pos['side'] == '多':
+            take_profit_price = pos['entry'] + atr * take_profit_mult
+            if current_price >= take_profit_price:
+                close_position(symbol, pos, current_price, "止盈")
+                pos = None
+        else:
+            take_profit_price = pos['entry'] - atr * take_profit_mult
+            if current_price <= take_profit_price:
+                close_position(symbol, pos, current_price, "止盈")
+                pos = None
+
+    # 如果已经平仓，不再继续开仓逻辑（但允许反向信号开仓，所以不直接 return）
+    # 获取新信号
     _, main_plan, main_dir = main_signal(df, symbol)
     _, hf_size, hf_dir = hf_signal(df, symbol)
 
@@ -317,7 +362,7 @@ async def process_single_symbol(symbol):
     dir_15m = parse_dir(tf_signals.get('15m', ''))
     dir_1h = parse_dir(tf_signals.get('1h', ''))
 
-    # 短线核心：三个周期必须完全一致
+    # 三个周期必须完全一致
     if not (dir_5m and dir_15m and dir_1h and dir_5m == dir_15m == dir_1h):
         return
 
@@ -347,7 +392,7 @@ async def process_single_symbol(symbol):
     if hf_dir:
         st.session_state.hf_history[symbol].append(1 if hf_dir=='多' else -1)
 
-    # 反向信号平仓
+    # 反向信号平仓（如果已有持仓且方向相反）
     if pos and pos['side'] != main_dir:
         close_position(symbol, pos, current_price, "反向信号")
         pos = None
@@ -457,8 +502,6 @@ tab1, tab2, tab3, tab4 = st.tabs(["📈 实时交易", "🔙 回测中心", "�
 
 with tab1:
     st.subheader("实时市场与信号")
-
-    # 并行处理信号
     run_async(process_all_symbols())
 
     cols = st.columns(len(SYMBOLS))
@@ -477,7 +520,6 @@ with tab1:
                 low=df_hf['low'],
                 close=df_hf['close']
             )])
-            # 显示最近10个信号
             for sig in st.session_state.signal_history[symbol][-10:]:
                 fig.add_annotation(
                     x=sig['time'], y=sig['price'],
@@ -494,7 +536,6 @@ with tab2:
 
     with subtab1:
         st.info("单币种回测功能（可扩展）")
-        # 可添加单币种回测界面
 
     with subtab2:
         st.subheader("🎬 多币种并行回放")
@@ -555,7 +596,6 @@ with tab3:
     st.dataframe(heat_df.style.background_gradient(cmap='RdYlGn'), use_container_width=True)
 
     st.subheader("📈 策略性能雷达图")
-    # 示例指标（可根据回测结果动态计算）
     metrics = {'Sharpe': 1.8, 'Calmar': 2.1, 'Profit Factor': 1.65, 'Sortino': 2.3, '胜率': 58}
     fig_radar = px.line_polar(
         pd.DataFrame([metrics]),
@@ -565,6 +605,22 @@ with tab3:
         title="策略性能雷达图"
     )
     st.plotly_chart(fig_radar, use_container_width=True)
+
+    st.subheader("📊 交易统计")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("总交易次数", st.session_state.total_trades)
+    with col2:
+        win_rate = (st.session_state.winning_trades / st.session_state.total_trades * 100) if st.session_state.total_trades > 0 else 0
+        st.metric("胜率", f"{win_rate:.1f}%")
+    with col3:
+        st.metric("总盈亏", f"${st.session_state.total_pnl:.2f}")
+    with col4:
+        if st.button("重置统计"):
+            st.session_state.total_trades = 0
+            st.session_state.winning_trades = 0
+            st.session_state.total_pnl = 0.0
+            st.rerun()
 
     st.subheader("交易日志")
     log_df = pd.DataFrame(st.session_state.trade_log[-20:], columns=["记录"])
@@ -590,12 +646,11 @@ with tab4:
     st.slider("每笔风险 (%)", 1.0, 5.0, 2.0, 0.1, key="RISK_PER_TRADE")
     st.slider("高频最大仓位 (%)", 5.0, 30.0, 15.0, 1.0, key="HF_MAX_POS")
     st.slider("ATR止损倍数", 0.8, 2.5, 1.2, 0.05, key="ATR_STOP_MULT")
+    st.slider("止盈倍数 (ATR倍数)", 1.0, 5.0, 2.0, 0.1, key="TAKE_PROFIT_MULT")  # 新增止盈参数
     st.number_input("每日开单上限", min_value=1, max_value=30, value=MAX_TRADES_PER_DAY, key="daily_limit_input")
     if st.button("更新每日上限"):
-        # 更新全局变量（注意：此变量在函数外定义，需使用 global 或在其他地方引用 session_state）
-        # 这里简单演示，实际可使用 st.session_state 存储
         st.session_state.daily_limit = st.session_state.daily_limit_input
         st.success("每日上限已更新")
 
 st_autorefresh(interval=25000, key="auto_refresh")
-st.info("🌟 短线优化版 VAI v9.0 已开启多周期强制共振 + 趋势过滤 + 信号排队 • 每25秒自动刷新")
+st.info("🌟 短线优化版 VAI v9.0 已开启多周期强制共振 + 趋势过滤 + 信号排队 + 止盈/移动止损 • 每25秒自动刷新")
