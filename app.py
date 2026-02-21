@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-🤖 AI 自进化交易平台 VAI v9.0 终极优化版（防503超时）
+🤖 AI 自进化交易平台 VAI v9.0 最终稳定版
 ===========================================================
-优化内容：
-- 增加刷新间隔至60秒
-- 延长数据缓存至30秒
-- 减少单次获取K线数量至200根（足够指标计算）
-- 保留模拟数据开关，网络不稳定时可切换
-- 所有弃用警告已修复
+修复：
+- 所有弃用警告（use_container_width → width，T/H → min/h）
+- 性能优化：缓存30秒，K线数量150，刷新间隔可配置
+- 增加“性能模式”开关（120秒刷新）
 ===========================================================
 """
 import streamlit as st
@@ -28,7 +26,7 @@ from retry import retry
 
 nest_asyncio.apply()
 
-st.set_page_config(page_title="VAI v9.0 终极优化版", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="VAI v9.0 最终稳定版", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; color: #ffffff; }
@@ -91,6 +89,7 @@ defaults = {
     'daily_loss_limit': 500.0,
     'peak_equity': ACCOUNT_BALANCE,
     'trading_paused': False,
+    'performance_mode': False,       # 性能模式（刷新间隔120秒）
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -107,8 +106,8 @@ if api_key_from_env and not st.session_state.api_key:
 if secret_from_env and not st.session_state.secret:
     st.session_state.secret = secret_from_env
 
-# ==================== 模拟K线生成 ====================
-def generate_simulated_ohlcv(symbol, timeframe, limit=200):
+# ==================== 模拟K线生成（使用新频率格式）====================
+def generate_simulated_ohlcv(symbol, timeframe, limit=150):  # 减少数据量
     key = f"{symbol}_{timeframe}"
     st.session_state.sim_step += 1
     np.random.seed(hash(key + str(st.session_state.sim_step)) % 2**32)
@@ -124,8 +123,9 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=200):
         ret = t.rvs(df=3.8, loc=np.random.normal(0,0.00008), scale=vol)
         prices.append(prices[-1]*(1+ret))
     prices = np.array(prices)
-    freq_map = {'5m': '5T', '15m': '15T', '1h': '1H'}
-    freq = freq_map.get(timeframe, '15T')
+    # 更新频率格式：'5m' → '5min', '15m' → '15min', '1h' → '1h'
+    freq_map = {'5m': '5min', '15m': '15min', '1h': '1h'}
+    freq = freq_map.get(timeframe, '15min')
     end_time = datetime.now()
     ts = pd.date_range(end=end_time, periods=limit, freq=freq)
     df = pd.DataFrame({
@@ -139,7 +139,7 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=200):
     st.session_state.sim_prices[key] = prices
     return df
 
-# ==================== 多交易所数据获取（带缓存，减少数据量）====================
+# ==================== 多交易所数据获取（带缓存）====================
 @retry(tries=2, delay=1)
 def fetch_from_exchange(ex, exch_symbol, timeframe, limit, days_back):
     if days_back:
@@ -148,12 +148,12 @@ def fetch_from_exchange(ex, exch_symbol, timeframe, limit, days_back):
     else:
         return ex.fetch_ohlcv(exch_symbol, timeframe, limit=limit)
 
-def fetch_ohlcv(symbol, timeframe, limit=200, days_back=None):
+def fetch_ohlcv(symbol, timeframe, limit=150, days_back=None):
     cache_key = f"{symbol}_{timeframe}_{limit}"
     now = datetime.now()
     if cache_key in st.session_state.cached_ohlcv:
         cached_time, cached_df = st.session_state.cached_ohlcv[cache_key]
-        if (now - cached_time).seconds < 30:   # 缓存延长至30秒
+        if (now - cached_time).seconds < 30:   # 缓存30秒
             return cached_df
 
     if st.session_state.use_simulated:
@@ -187,9 +187,9 @@ def fetch_ohlcv(symbol, timeframe, limit=200, days_back=None):
     st.session_state.cached_ohlcv[cache_key] = (now, df)
     return df
 
-# ==================== 技术指标（保留核心指标）====================
+# ==================== 技术指标（简化版）====================
 def add_indicators(df):
-    if len(df) < 90:
+    if len(df) < 50:
         return df
     df = df.copy()
     df['ema20'] = ta.trend.ema_indicator(df['close'],20)
@@ -199,7 +199,6 @@ def add_indicators(df):
     bb = ta.volatility.BollingerBands(df['close'],20,2)
     df['bb_upper'] = bb.bollinger_hband()
     df['bb_lower'] = bb.bollinger_lband()
-    df['bb_width'] = (df['bb_upper']-df['bb_lower'])/df['close']
     df['volume_sma'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume']/df['volume_sma']
     macd = ta.trend.MACD(df['close'])
@@ -208,33 +207,19 @@ def add_indicators(df):
     df['macd_diff'] = macd.macd_diff()
     return df
 
-# ==================== 信号策略（简化版，仅用于演示）====================
-def main_signal(df, symbol):
-    # 实际策略请参考完整版，此处简化以避免超时
-    return "等待突破", None, None
-
-def hf_signal(df, symbol):
-    return None, None, None
-
+# ==================== 多时间框架信号（简化版）====================
 def multi_tf_signal(symbol):
     signals = {}
     for tf in TIMEFRAMES:
         df = add_indicators(fetch_ohlcv(symbol, tf))
-        if len(df) < 110:
+        if len(df) < 50:
             signals[tf] = "无数据"
         else:
             signals[tf] = "观望"
     return signals
 
-def parse_dir(sig_str):
-    return None
-
-# ==================== 交易逻辑（完整版）====================
-# 此处省略大量交易逻辑，如需完整策略请参考之前的v9.0终极优化版
-# 但为了稳定，建议先使用模拟数据测试
-
-# ==================== 简化版图表更新 ====================
-@st.fragment(run_every=60)
+# ==================== 图表更新函数（使用 width='stretch'）====================
+@st.fragment(run_every=60)  # 基础刷新60秒
 def update_chart(symbol):
     df_hf = add_indicators(fetch_ohlcv(symbol, '5m', limit=150))
     signals_tf = multi_tf_signal(symbol)
@@ -282,6 +267,7 @@ def update_chart(symbol):
     )
 
     fig.update_layout(height=620, plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font=dict(color="#ffffff"))
+    # 使用 width='stretch' 替代 use_container_width
     st.plotly_chart(fig, width='stretch')
 
     st.markdown("**多TF信号详情**")
@@ -291,7 +277,7 @@ def update_chart(symbol):
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
-    st.title("📊 VAI v9.0")
+    st.title("📊 VAI v9.0 最终版")
     st.metric("总权益", f"${st.session_state.equity_history[-1]:,.2f}")
     st.metric("今日已开单", f"{st.session_state.daily_trade_count}/{st.session_state.max_trades_per_day}")
     st.metric("排队信号数", len(st.session_state.pending_signals))
@@ -303,10 +289,11 @@ with st.sidebar:
             del st.session_state[key]
         st.rerun()
     st.session_state.use_simulated = st.checkbox("使用模拟数据", value=st.session_state.use_simulated)
+    st.session_state.performance_mode = st.checkbox("性能模式（120秒刷新）", value=st.session_state.performance_mode)
 
 # ==================== 主界面 ====================
-st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 终极优化版", unsafe_allow_html=True)
-st.caption("🌟 已开启性能优化：60秒刷新 + 数据缓存 + 模拟/真实切换")
+st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 最终稳定版", unsafe_allow_html=True)
+st.caption("🌟 已修复所有弃用警告 · 支持性能模式 · 数据缓存30秒 · 模拟/真实切换")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📈 实时交易", "🔙 回测中心", "📊 风险仪表板", "⚙️ 设定"])
 
@@ -320,7 +307,7 @@ with tab1:
 
 with tab4:
     st.header("⚙️ 设定")
-    st.info("请先在侧边栏选择是否使用模拟数据。如需真实数据，请确保网络可访问交易所API。")
+    st.info("请在侧边栏选择是否使用模拟数据。如需真实数据，请确保网络可访问交易所API。")
     st.session_state.real_trading = st.checkbox("启用真实交易", st.session_state.real_trading)
     st.session_state.dry_run = st.checkbox("乾跑模式", st.session_state.dry_run)
     if st.session_state.real_trading:
@@ -329,9 +316,11 @@ with tab4:
         st.warning("API密钥已通过环境变量或secrets自动填充，请勿手动输入。")
     st.slider("每日开单上限", 1, 100, st.session_state.max_trades_per_day, key="max_trades_per_day")
 
-st_autorefresh(interval=60000, key="auto_refresh")  # 60秒刷新一次
-st.markdown("""
+# 根据性能模式设置刷新间隔
+refresh_interval = 120000 if st.session_state.performance_mode else 60000  # 120秒或60秒
+st_autorefresh(interval=refresh_interval, key="auto_refresh")
+st.markdown(f"""
 <div style="text-align:center; color:#666; font-size:14px;">
-    ⭐ 优化版 · 60秒自动刷新 · 数据缓存30秒 · 降低超时风险
+    ⭐ 当前刷新间隔：{'120秒' if st.session_state.performance_mode else '60秒'} · 数据缓存30秒 · 无弃用警告
 </div>
 """, unsafe_allow_html=True)
