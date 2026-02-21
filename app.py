@@ -27,7 +27,7 @@ import nest_asyncio
 from scipy.stats import t
 import os
 import time
-from retry import retry  # pip install retry
+from retry import retry
 import openpyxl
 from io import BytesIO
 
@@ -105,13 +105,13 @@ defaults = {
     'total_pnl': 0.0,
     'max_trades_per_day': 30,
     'preferred_exchange': 'binance',
-    'use_hf': True,                     # 是否使用高频策略
-    'use_ema_filter': True,              # 是否使用EMA趋势过滤
-    'max_drawdown_pct': 20.0,            # 最大回撤百分比（超过则暂停开仓）
-    'daily_loss_limit': 500.0,           # 每日亏损限额（超过则暂停开仓）
-    'peak_equity': ACCOUNT_BALANCE,      # 历史最高权益（用于回撤计算）
-    'trading_paused': False,              # 是否暂停开仓
-    'opt_results': None,                  # 参数优化结果
+    'use_hf': True,
+    'use_ema_filter': True,
+    'max_drawdown_pct': 20.0,
+    'daily_loss_limit': 500.0,
+    'peak_equity': ACCOUNT_BALANCE,
+    'trading_paused': False,
+    'opt_results': None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -165,7 +165,7 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=300):
 
 # ==================== 多交易所数据获取（带重试和缓存）====================
 @retry(tries=3, delay=1, backoff=2)
-def fetch_from_exchange(exch, exch_symbol, timeframe, limit, days_back):
+def fetch_from_exchange(ex, exch_symbol, timeframe, limit, days_back):
     if days_back:
         since = int((datetime.now() - timedelta(days=days_back)).timestamp()*1000)
         return ex.fetch_ohlcv(exch_symbol, timeframe, since=since, limit=limit)
@@ -198,6 +198,7 @@ def fetch_ohlcv(symbol, timeframe, limit=300, days_back=None):
             st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 使用 {exch['name']} 数据源")
             break
         except Exception as e:
+            st.session_state.trade_log.append(f"❌ {exch['name']} 请求失败: {str(e)}")
             continue
 
     if df is None:
@@ -231,16 +232,12 @@ def add_indicators(df):
     df['bb_width_rank50'] = df['bb_width'].rolling(50).rank(pct=True) <= 0.22
     df['adx_below25'] = df['adx'] < 25
     df['adx_streak'] = df['adx_below25'].groupby((df['adx_below25'] != df['adx_below25'].shift()).cumsum()).cumsum()
-    # MACD
     macd = ta.trend.MACD(df['close'])
     df['macd'] = macd.macd()
     df['macd_signal'] = macd.macd_signal()
     df['macd_diff'] = macd.macd_diff()
-    # VWAP
     df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-    # OBV
     df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
-    # 布林带% B
     df['bb_percent'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
     return df
 
@@ -299,20 +296,14 @@ def get_current_price(symbol):
     return df['close'].iloc[-1]
 
 def check_risk_limits():
-    """检查风险限制，返回是否允许开仓"""
     current_equity = st.session_state.equity_history[-1]
-    # 更新峰值
     if current_equity > st.session_state.peak_equity:
         st.session_state.peak_equity = current_equity
-    # 计算当前回撤
     drawdown = (st.session_state.peak_equity - current_equity) / st.session_state.peak_equity * 100
     if drawdown > st.session_state.max_drawdown_pct:
         st.session_state.trading_paused = True
         st.warning(f"🚫 回撤 {drawdown:.1f}% 超过限制 {st.session_state.max_drawdown_pct}%，开仓暂停")
         return False
-    # 检查每日亏损
-    today_pnl = sum(log for log in st.session_state.trade_log if '平仓' in log and 'PnL' in log)
-    # 简单从权益变化计算当日盈亏
     if len(st.session_state.equity_history) > 1:
         start_equity = st.session_state.equity_history[0] if st.session_state.last_trade_day != datetime.now().date() else ACCOUNT_BALANCE
         day_pnl = current_equity - start_equity
@@ -324,7 +315,6 @@ def check_risk_limits():
     return True
 
 def open_position(symbol, side, entry, stop, size, current_price):
-    # 风险检查
     if not check_risk_limits():
         st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} 开仓被风险控制阻止")
         return
@@ -427,23 +417,14 @@ def hf_signal(df, symbol):
     return f"HF {direction} {size_usdt:.0f}USDT",size_usdt,direction
 
 def calculate_signal_strength(df, symbol):
-    """计算信号强度（0-100）"""
-    strength = 50  # 默认中性
+    strength = 50
     last = df.iloc[-1]
-    # 基于RSI偏离度
-    rsi = last['rsi']
-    if rsi > 70:
+    if last['rsi'] > 70 or last['rsi'] < 30:
         strength += 20
-    elif rsi < 30:
-        strength += 20
-    # 基于成交量放大
     if last['volume_ratio'] > 2:
         strength += 10
-    # 基于ADX趋势强度
-    adx = last['adx']
-    if adx > 25:
+    if last['adx'] > 25:
         strength += 10
-    # 基于布林带宽度（低宽度预示突破）
     if last['bb_width'] < last['bb_width'].rolling(50).mean().iloc[-1]:
         strength += 10
     return min(100, max(0, strength))
@@ -461,12 +442,10 @@ async def process_single_symbol(symbol):
 
     pos = st.session_state.positions.get(symbol)
 
-    # 止损检查
     if pos and ((pos['side']=='多' and current_price<=pos['stop']) or (pos['side']=='空' and current_price>=pos['stop'])):
         close_position(symbol, pos, current_price, "止损")
         pos = None
 
-    # 移动止损（保本）
     if pos and not pos.get('breakeven', False):
         atr = df['atr'].iloc[-1]
         if pos['side'] == '多':
@@ -480,7 +459,6 @@ async def process_single_symbol(symbol):
                 pos['breakeven'] = True
                 st.session_state.trade_log.append(f"{datetime.now().strftime('%H:%M')} {symbol} 移动止损至保本")
 
-    # 止盈检查
     if pos:
         take_profit_mult = st.session_state.get('TAKE_PROFIT_MULT', 2.0)
         atr = df['atr'].iloc[-1]
@@ -495,21 +473,17 @@ async def process_single_symbol(symbol):
                 close_position(symbol, pos, current_price, "止盈")
                 pos = None
 
-    # 获取新信号
     _, main_plan, main_dir = main_signal(df, symbol)
     _, hf_size, hf_dir = hf_signal(df, symbol)
 
-    # 获取多周期信号
     tf_signals = multi_tf_signal(symbol)
     dir_5m = parse_dir(tf_signals.get('5m', ''))
     dir_15m = parse_dir(tf_signals.get('15m', ''))
     dir_1h = parse_dir(tf_signals.get('1h', ''))
 
-    # 三个周期必须完全一致
     if not (dir_5m and dir_15m and dir_1h and dir_5m == dir_15m == dir_1h):
         return
 
-    # 趋势过滤：1小时EMA50（可选）
     if st.session_state.use_ema_filter:
         df_1h = fetch_ohlcv(symbol, '1h', limit=100)
         if len(df_1h) >= 50:
@@ -519,16 +493,13 @@ async def process_single_symbol(symbol):
             if dir_5m == '空' and current_price > ema50_1h:
                 return
 
-    # 主策略与高频必须共振且方向一致
     if not (main_dir and hf_dir and main_dir == hf_dir and main_dir == dir_5m):
         return
 
-    # 所有条件满足
     size = main_plan['仓位']
     stop = main_plan['止损']
     entry = main_plan['入场']
 
-    # 记录信号
     st.session_state.signal_history[symbol].append({
         'time': last_time, 'price': entry, 'side': main_dir,
         'type': '共振', 'size': size
@@ -536,12 +507,10 @@ async def process_single_symbol(symbol):
     if hf_dir:
         st.session_state.hf_history[symbol].append(1 if hf_dir=='多' else -1)
 
-    # 反向信号平仓
     if pos and pos['side'] != main_dir:
         close_position(symbol, pos, current_price, "反向信号")
         pos = None
 
-    # 开新仓
     if not pos:
         open_position(symbol, main_dir, entry, stop, size, current_price)
 
@@ -563,7 +532,6 @@ def run_async(coro):
 # ==================== 回测 ====================
 def run_backtest(symbol, days=60, params=None):
     if params:
-        # 使用优化参数覆盖
         for k, v in params.items():
             st.session_state[k] = v
     df = fetch_ohlcv(symbol, '15m', limit=days*96, days_back=days)
@@ -609,10 +577,8 @@ def run_backtest(symbol, days=60, params=None):
     return df, equity, signals, trades
 
 def optimize_parameters(symbol, days=60):
-    """简单网格搜索优化参数"""
     best_sharpe = -np.inf
     best_params = None
-    # 待优化的参数范围
     risk_range = [1.0, 1.5, 2.0, 2.5]
     atr_range = [1.0, 1.2, 1.5, 1.8]
     hf_pos_range = [10, 15, 20]
@@ -626,7 +592,6 @@ def optimize_parameters(symbol, days=60):
                     'HF_MAX_POS': hf/100
                 }
                 df, equity, signals, trades = run_backtest(symbol, days, params)
-                # 计算夏普比率
                 returns = np.diff(equity) / ACCOUNT_BALANCE
                 sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365) if np.std(returns) > 0 else 0
                 win_rate = len([t for t in trades if 'pnl' in t and t['pnl']>0]) / len(trades) if trades else 0
@@ -677,7 +642,6 @@ def update_chart(symbol):
         vertical_spacing=0.02,
         subplot_titles=(f"{symbol} 价格", "成交量", "MACD")
     )
-    # 价格K线
     fig.add_trace(go.Candlestick(
         x=df_hf['timestamp'],
         open=df_hf['open'],
@@ -689,7 +653,6 @@ def update_chart(symbol):
         decreasing_line_color="#ff4d4d"
     ), row=1, col=1)
 
-    # EMA20/50
     fig.add_trace(go.Scatter(
         x=df_hf['timestamp'], y=df_hf['ema20'],
         name="EMA20", line=dict(color="#ffaa00", width=1.5)
@@ -699,7 +662,6 @@ def update_chart(symbol):
         name="EMA50", line=dict(color="#aa88ff", width=1.5)
     ), row=1, col=1)
 
-    # MACD线
     fig.add_trace(go.Scatter(
         x=df_hf['timestamp'], y=df_hf['macd'],
         name="MACD", line=dict(color="#00b0ff")
@@ -709,21 +671,18 @@ def update_chart(symbol):
         name="信号线", line=dict(color="#ffd700")
     ), row=1, col=1)
 
-    # 成交量
     colors = ['#00ff9d' if o < c else '#ff4d4d' for o, c in zip(df_hf['open'], df_hf['close'])]
     fig.add_trace(go.Bar(
         x=df_hf['timestamp'], y=df_hf['volume'],
         name="成交量", marker_color=colors, opacity=0.6
     ), row=2, col=1)
 
-    # MACD柱
     colors_hist = ['#00ff9d' if h > 0 else '#ff4d4d' for h in df_hf['macd_diff']]
     fig.add_trace(go.Bar(
         x=df_hf['timestamp'], y=df_hf['macd_diff'],
         name="MACD柱", marker_color=colors_hist
     ), row=3, col=1)
 
-    # 信号标注
     for sig in st.session_state.signal_history[symbol][-10:]:
         fig.add_annotation(
             x=sig['time'], y=sig['price'],
@@ -733,7 +692,6 @@ def update_chart(symbol):
             row=1, col=1
         )
 
-    # 当前价格标签
     latest_price = df_hf['close'].iloc[-1]
     prev_price = df_hf['close'].iloc[-2]
     price_change = (latest_price - prev_price) / prev_price * 100
@@ -747,13 +705,10 @@ def update_chart(symbol):
         ax=40, ay=-40, row=1, col=1
     )
 
-    # 如果当前有持仓，显示止损/止盈水平线
     pos = st.session_state.positions.get(symbol)
     if pos:
-        # 止损线
         fig.add_hline(y=pos['stop'], line_dash="dash", line_color="red",
                       annotation_text=f"止损 {pos['stop']:.2f}", row=1, col=1)
-        # 止盈线（基于当前ATR估算）
         atr = df_hf['atr'].iloc[-1]
         take_profit_mult = st.session_state.get('TAKE_PROFIT_MULT', 2.0)
         if pos['side'] == '多':
@@ -768,13 +723,11 @@ def update_chart(symbol):
                       font=dict(color="#ffffff"))
     st.plotly_chart(fig, use_container_width=True)
 
-    # 详细多时间框架信号
     st.markdown("**多TF信号详情**")
     tf_cols = st.columns(3)
     for idx, (tf, sig) in enumerate(signals_tf.items()):
         tf_cols[idx].metric(tf, sig, delta_color="off")
 
-    # 显示交易计划
     df_plan = add_indicators(fetch_ohlcv(symbol, '5m', limit=300))
     _, main_plan, main_dir = main_signal(df_plan, symbol)
     if main_plan:
@@ -813,14 +766,12 @@ tab1, tab2, tab3, tab4 = st.tabs(["📈 实时交易", "🔙 回测中心", "�
 
 with tab1:
     st.subheader("实时市场与信号")
-    # 异步处理信号（放在循环外，避免重复）
     run_async(process_all_symbols())
 
     cols = st.columns(len(SYMBOLS))
     for i, symbol in enumerate(SYMBOLS):
         with cols[i]:
             st.subheader(symbol)
-            # 使用 fragment 更新图表
             update_chart(symbol)
 
 with tab2:
@@ -848,7 +799,6 @@ with tab2:
             step = st.slider("同步回放进度", 0, max_len-1, st.session_state.replay_step, key="multi_replay_slider")
             st.session_state.replay_step = step
 
-            # 导出按钮
             if st.button("📥 导出回放数据为CSV"):
                 all_trades = []
                 for sym, data in st.session_state.replay_data.items():
@@ -901,7 +851,6 @@ with tab2:
                 st.success("优化完成！")
                 st.write("最优参数：", best_params)
                 st.dataframe(results_df)
-                # 导出优化结果
                 csv = results_df.to_csv(index=False).encode('utf-8')
                 st.download_button("下载优化结果", data=csv, file_name="optimization_results.csv", mime="text/csv")
 
@@ -913,16 +862,13 @@ with tab3:
     st.dataframe(heat_df.style.background_gradient(cmap='RdYlGn'), use_container_width=True)
 
     st.subheader("📈 策略性能雷达图")
-    # 动态计算实际指标
     if st.session_state.total_trades > 0:
         win_rate = st.session_state.winning_trades / st.session_state.total_trades * 100
-        avg_win = st.session_state.total_pnl / st.session_state.total_trades if st.session_state.total_trades > 0 else 0
-        # 简单估算夏普等（实际需更复杂计算）
         metrics = {
             '胜率': win_rate,
             '总盈亏': st.session_state.total_pnl,
             '交易次数': st.session_state.total_trades,
-            'Sharpe(估)': 1.0,  # 占位
+            'Sharpe(估)': 1.0,
             'Profit Factor': 1.0,
         }
     else:
@@ -955,7 +901,6 @@ with tab3:
     st.subheader("交易日志")
     log_df = pd.DataFrame(st.session_state.trade_log[-50:], columns=["记录"])
     st.dataframe(log_df, use_container_width=True)
-    # 导出日志
     if st.button("导出日志"):
         df_log = pd.DataFrame(st.session_state.trade_log, columns=["记录"])
         csv = df_log.to_csv(index=False).encode('utf-8')
