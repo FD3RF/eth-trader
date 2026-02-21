@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import ccxt
 import pandas as pd
@@ -9,30 +10,20 @@ import joblib
 import os
 from datetime import datetime
 
-# ================================
-# CONFIG
-# ================================
+# 配置
 st.set_page_config(layout="wide", page_title="ETH 100x AI-Pro (OKX)")
-
 SYMBOL = st.sidebar.text_input("Trading Pair", "ETH/USDT:USDT", help="OKX swap symbol")
 LEVERAGE = st.sidebar.slider("Leverage (1-100)", 1, 100, 100)
 REFRESH_MS = st.sidebar.slider("Refresh (ms)", 1000, 5000, 2000)
-CIRCUIT_BREAKER_PCT = 0.003   # 0.3% 熔断阈值
-LONG_CONF_THRES = 0.78        # 多头置信度门槛（可调）
-SHORT_CONF_THRES = 0.82       # 空头置信度门槛（可调）
+CIRCUIT_BREAKER_PCT = 0.003
+LONG_CONF_THRES = 0.78
+SHORT_CONF_THRES = 0.82
 
 st_autorefresh(interval=REFRESH_MS, key="okx_monitor")
 
-# ================================
-# 初始化系统（交易所 + 模型）
-# ================================
 @st.cache_resource
 def init_system():
-    exch = ccxt.okx({
-        "enableRateLimit": True,
-        "options": {"defaultType": "swap"}
-    })
-    # 尝试加载单模型（通用模型）
+    exch = ccxt.okx({"enableRateLimit": True, "options": {"defaultType": "swap"}})
     model = joblib.load("eth_ai_model.pkl") if os.path.exists("eth_ai_model.pkl") else None
     if model is None:
         st.sidebar.error("❌ 未找到模型文件 eth_ai_model.pkl")
@@ -40,9 +31,7 @@ def init_system():
 
 exchange, model = init_system()
 
-# ================================
-# 会话状态管理
-# ================================
+# 会话状态
 if 'last_price' not in st.session_state:
     st.session_state.last_price = 0
 if 'system_halted' not in st.session_state:
@@ -50,9 +39,7 @@ if 'system_halted' not in st.session_state:
 if 'signal_log' not in st.session_state:
     st.session_state.signal_log = []
 
-# ================================
-# 侧边栏：资金费率 + 信号日志
-# ================================
+# 侧边栏（资金费率、信号日志）
 with st.sidebar:
     st.header("📊 实时审计")
     try:
@@ -81,21 +68,18 @@ with st.sidebar:
     else:
         st.info("等待高置信度信号...")
 
-# ================================
-# 核心特征工程（必须与训练对齐）
-# ================================
+# 特征工程
 def get_analysis_data():
     try:
         ohlcv = exchange.fetch_ohlcv(SYMBOL, "5m", limit=100)
         df = pd.DataFrame(ohlcv, columns=["t", "o", "h", "l", "c", "v"])
         
-        # 计算指标（与训练脚本完全一致）
         df["rsi"] = ta.rsi(df["c"], length=14)
         df["ma20"] = ta.sma(df["c"], length=20)
         df["ma60"] = ta.sma(df["c"], length=60)
         macd = ta.macd(df["c"])
         df["macd"] = macd["MACD_12_26_9"]
-        df["macd_signal"] = macd["MACDs_12_26_9"]          # 注意是 MACDs
+        df["macd_signal"] = macd["MACDs_12_26_9"]
         df["atr"] = ta.atr(df["h"], df["l"], df["c"], length=14)
         df["adx"] = ta.adx(df["h"], df["l"], df["c"], length=14)["ADX_14"]
         
@@ -106,9 +90,7 @@ def get_analysis_data():
         st.error(f"数据获取失败: {e}")
         return None, None
 
-# ================================
 # 主界面
-# ================================
 st.title("⚔️ ETH 100x AI 实时监控 (OKX)")
 
 if st.sidebar.button("🔌 重置熔断"):
@@ -119,7 +101,6 @@ try:
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
     
-    # 熔断检测
     if st.session_state.last_price != 0:
         change = abs(current_price - st.session_state.last_price) / st.session_state.last_price
         if change > CIRCUIT_BREAKER_PCT:
@@ -133,15 +114,13 @@ try:
         if df is None or current_feat is None:
             st.stop()
         
-        # 获取模型预测概率（通用模型：第1类为多头，第0类为空头）
         if model is not None:
             prob = model.predict_proba(current_feat)[0]
-            prob_l = prob[1]   # 多头概率
-            prob_s = prob[0]   # 空头概率
+            prob_l = prob[1]
+            prob_s = prob[0]
         else:
             prob_l = prob_s = 0.5
 
-        # 顶栏指标
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("ETH 实时价", f"${current_price}")
         col2.metric("多头置信度", f"{prob_l*100:.1f}%",
@@ -153,7 +132,6 @@ try:
 
         st.markdown("---")
 
-        # 信号判断
         side = None
         if prob_l >= LONG_CONF_THRES and prob_l > prob_s:
             side = "LONG"
@@ -164,7 +142,6 @@ try:
         else:
             st.info("🔎 动能扫描中... AI 建议观望")
 
-        # 记录日志
         if side:
             now_time = datetime.now().strftime("%H:%M:%S")
             if not st.session_state.signal_log or st.session_state.signal_log[-1]['时间'] != now_time:
@@ -176,7 +153,6 @@ try:
                     "空头%": f"{prob_s*100:.1f}%"
                 })
 
-        # 动态止损止盈
         if side:
             atr = df['atr'].iloc[-1]
             sl_dist = min(atr * 1.5, current_price * 0.003)
@@ -191,7 +167,6 @@ try:
             sc2.write(f"**止损 (SL):** {round(sl, 2)}")
             sc3.write(f"**止盈 (TP):** {round(tp, 2)}")
 
-        # K线图
         fig = go.Figure(data=[go.Candlestick(
             x=pd.to_datetime(df['t'], unit='ms'),
             open=df['o'], high=df['h'], low=df['l'], close=df['c']
