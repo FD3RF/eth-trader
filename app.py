@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🤖 AI 自进化交易平台 VAI v9.0 终极稳定版
+🤖 AI 自进化交易平台 VAI v9.0 最终稳定版
 ===========================================================
 修复：
 - 所有弃用警告（use_container_width → width，T/H → min/h）
@@ -26,7 +26,7 @@ from retry import retry
 
 nest_asyncio.apply()
 
-st.set_page_config(page_title="VAI v9.0 终极稳定版", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="VAI v9.0 最终稳定版", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; color: #ffffff; }
@@ -292,7 +292,7 @@ with st.sidebar:
     st.session_state.performance_mode = st.checkbox("性能模式（120秒刷新）", value=st.session_state.performance_mode)
 
 # ==================== 主界面 ====================
-st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 终极稳定版", unsafe_allow_html=True)
+st.markdown("# 🤖 AI 自进化交易平台 VAI v9.0 最终稳定版", unsafe_allow_html=True)
 st.caption("🌟 已修复所有弃用警告 · 支持性能模式 · 数据缓存30秒 · 模拟/真实切换")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📈 实时交易", "🔙 回测中心", "📊 风险仪表板", "⚙️ 设定"])
