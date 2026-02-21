@@ -7,7 +7,7 @@ import joblib
 SYMBOL = "ETH/USDT:USDT"
 TIMEFRAME = "5m"
 LIMIT = 5000
-FEATURES = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr', 'adx']
+FEATURES = ["rsi", "ma20", "ma60", "macd", "macd_signal", "atr", "adx"]
 
 # 初始化 OKX 交易所
 exchange = ccxt.okx({
@@ -25,16 +25,16 @@ df['ma20'] = ta.sma(df['c'], length=20)
 df['ma60'] = ta.sma(df['c'], length=60)
 macd = ta.macd(df['c'])
 df['macd'] = macd['MACD_12_26_9']
-df['macd_signal'] = macd['MACDs_12_26_9']
-df['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14)   # 使用 atr，不是 atr_pct
-df['adx'] = ta.adx(df['h'], df['l'], df['c'], length=14)['ADX_14']
+df['macd_signal'] = macd['MACDs_12_26_9']          # 修正：使用信号线
+df['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14)
+df['adx'] = ta.adx(df['h'], df['l'], df['c'], length=14)['ADX_14']  # 修正：提取 ADX 列
 
-# 标签：未来3根K线收盘价是否比当前高 0.2% 以上（过滤小波动）
+# 标签：未来3根K线收盘价是否比当前高 0.2%以上（过滤小波动）
 df['target'] = (df['c'].shift(-3) > df['c'] * 1.002).astype(int)
 
 # 删除 NaN 行
 df.dropna(inplace=True)
-print(f"有效数据量: {len(df)}")
+print(f"有效数据量：{len(df)}")
 
 # 准备特征和标签
 X = df[FEATURES]
