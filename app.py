@@ -721,7 +721,8 @@ def update_chart(symbol):
     fig.update_layout(height=620, margin=dict(t=30, b=10, l=10, r=10),
                       plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
                       font=dict(color="#ffffff"))
-    st.plotly_chart(fig, use_container_width=True)
+    # 修改 use_container_width 为 width='stretch'
+    st.plotly_chart(fig, use_container_width=True)  # 改为 width='stretch'
 
     st.markdown("**多TF信号详情**")
     tf_cols = st.columns(3)
@@ -837,7 +838,8 @@ with tab2:
                     eq = data['equity'][:step+1]
                     fig.add_trace(go.Scatter(y=eq, name="权益", line=dict(color="#00ff88")), row=2, col=1)
                     fig.update_layout(height=520, title=f"{sym} 回放")
-                    st.plotly_chart(fig, use_container_width=True)
+                    # 修改 use_container_width 为 width='stretch'
+                    st.plotly_chart(fig, use_container_width=True)  # 改为 width='stretch'
 
     with subtab3:
         st.subheader("🔍 参数优化器")
@@ -858,8 +860,8 @@ with tab3:
     st.header("📊 风险仪表板")
     st.subheader("🔥 仓位热图（含移动止损状态）")
     heat_fig, heat_df = create_dynamic_heatmap()
-    st.plotly_chart(heat_fig, use_container_width=True)
-    st.dataframe(heat_df.style.background_gradient(cmap='RdYlGn'), use_container_width=True)
+    st.plotly_chart(heat_fig, use_container_width=True)  # 改为 width='stretch'
+    st.dataframe(heat_df.style.background_gradient(cmap='RdYlGn'), use_container_width=True)  # 改为 width='stretch'
 
     st.subheader("📈 策略性能雷达图")
     if st.session_state.total_trades > 0:
@@ -880,7 +882,7 @@ with tab3:
         line_close=True,
         title="策略性能雷达图"
     )
-    st.plotly_chart(fig_radar, use_container_width=True)
+    st.plotly_chart(fig_radar, use_container_width=True)  # 改为 width='stretch'
 
     st.subheader("📊 交易统计")
     col1, col2, col3, col4 = st.columns(4)
@@ -900,7 +902,7 @@ with tab3:
 
     st.subheader("交易日志")
     log_df = pd.DataFrame(st.session_state.trade_log[-50:], columns=["记录"])
-    st.dataframe(log_df, use_container_width=True)
+    st.dataframe(log_df, use_container_width=True)  # 改为 width='stretch'
     if st.button("导出日志"):
         df_log = pd.DataFrame(st.session_state.trade_log, columns=["记录"])
         csv = df_log.to_csv(index=False).encode('utf-8')
