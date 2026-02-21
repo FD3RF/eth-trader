@@ -7,12 +7,13 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import joblib
 import os
+import time
 from datetime import datetime
 
 # ================================
 # 1. 核心参数与看板设置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x Tri-Core AI (OKX)", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="ETH 100x 双向评分 AI (OKX)", page_icon="⚖️")
 
 SYMBOL = "ETH/USDT:USDT"            # OKX 永续合约
 REFRESH_MS = 2500                   # 2.5秒刷新
@@ -24,7 +25,13 @@ TREND_WEIGHT = 0.5
 MOMENTUM_WEIGHT = 0.3
 MODEL_WEIGHT = 0.2
 
-st_autorefresh(interval=REFRESH_MS, key="tri_core_monitor")
+# 波动率过滤：ATR百分比 < 0.25% 时禁止交易
+MIN_ATR_PCT = 0.0025
+
+# 冷却时间：连续信号之间至少间隔 2 根 5m K 线（10分钟 = 600秒）
+COOLDOWN_SECONDS = 600
+
+st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai")
 
 # ================================
 # 2. 初始化交易所和模型
@@ -56,6 +63,8 @@ if 'system_halted' not in st.session_state:
     st.session_state.system_halted = False
 if 'signal_log' not in st.session_state:
     st.session_state.signal_log = []
+if 'last_signal_time' not in st.session_state:
+    st.session_state.last_signal_time = 0  # 上一次信号触发的时间戳（秒）
 
 # ================================
 # 4. 数据获取函数（多时间框架）
@@ -66,15 +75,12 @@ def fetch_ohlcv(timeframe, limit=120):
 
 def get_multi_timeframe_data():
     """获取5m、15m、1h数据并计算指标"""
-    # 5m 数据（用于动量核和模型）
     ohlcv_5m = fetch_ohlcv("5m", 200)
     df_5m = pd.DataFrame(ohlcv_5m, columns=["t", "o", "h", "l", "c", "v"])
     
-    # 15m 数据（用于趋势核）
     ohlcv_15m = fetch_ohlcv("15m", 100)
     df_15m = pd.DataFrame(ohlcv_15m, columns=["t", "o", "h", "l", "c", "v"])
     
-    # 1h 数据（用于趋势核）
     ohlcv_1h = fetch_ohlcv("1h", 100)
     df_1h = pd.DataFrame(ohlcv_1h, columns=["t", "o", "h", "l", "c", "v"])
     
@@ -91,7 +97,7 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["ma60"] = ta.sma(df_5m["c"], length=60)
     macd = ta.macd(df_5m["c"])
     df_5m["macd"] = macd["MACD_12_26_9"]
-    df_5m["macd_signal"] = macd["MACDs_12_26_9"]   # 标准信号线（根据您训练脚本调整）
+    df_5m["macd_signal"] = macd["MACDs_12_26_9"]   # 标准信号线（请根据您的训练脚本调整）
     df_5m["atr"] = ta.atr(df_5m["h"], df_5m["l"], df_5m["c"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["c"]
     df_5m["adx"] = ta.adx(df_5m["h"], df_5m["l"], df_5m["c"], length=14)["ADX_14"]
@@ -129,94 +135,104 @@ def compute_features(df_5m, df_15m, df_1h):
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 评分函数
+# 6. 双向评分函数
 # ================================
 def compute_trend_score(df_15m, df_1h):
-    """计算趋势核评分 (0-100)"""
-    # 取最新值
+    """计算趋势核的多空分数 (0-100)"""
     c15 = df_15m.iloc[-1]
     c1h = df_1h.iloc[-1]
-    
-    score = 0
-    reasons = []
-    
-    # EMA200方向（15m和1h各15分，共30分）
+
+    long_score = 0
+    short_score = 0
+
+    # EMA200 (每项15分)
     if c15['c'] > c15['ema200']:
-        score += 15
-        reasons.append("15m价格>EMA200")
+        long_score += 15
+    else:
+        short_score += 15
+
     if c1h['c'] > c1h['ema200']:
-        score += 15
-        reasons.append("1h价格>EMA200")
-    
-    # ADX强度（15m和1h各15分，共30分）
+        long_score += 15
+    else:
+        short_score += 15
+
+    # ADX 强趋势加权 (每项10分，多空各加，因为趋势强对两方都有利)
     if c15['adx'] > 25:
-        score += 15
-        reasons.append(f"15m ADX={c15['adx']:.1f}>25")
+        long_score += 10
+        short_score += 10
     if c1h['adx'] > 25:
-        score += 15
-        reasons.append(f"1h ADX={c1h['adx']:.1f}>25")
-    
-    # VWAP偏离（15m和1h各10分，共20分）
+        long_score += 10
+        short_score += 10
+
+    # VWAP (每项10分)
     if c15['c'] > c15['vwap']:
-        score += 10
-        reasons.append("15m价格>VWAP")
+        long_score += 10
+    else:
+        short_score += 10
+
     if c1h['c'] > c1h['vwap']:
-        score += 10
-        reasons.append("1h价格>VWAP")
-    
-    # 价格结构高低点（15m和1h各10分，共20分）
-    # 简单规则：价格处于近期区间上半部分加分
+        long_score += 10
+    else:
+        short_score += 10
+
+    # 价格结构高低点 (每项10分)
     range_15 = c15['hh'] - c15['ll']
-    if range_15 > 0 and (c15['c'] - c15['ll']) / range_15 > 0.5:
-        score += 10
-        reasons.append("15m价格处于区间上半部")
-    
+    if range_15 > 0:
+        if (c15['c'] - c15['ll']) / range_15 > 0.5:
+            long_score += 10
+        else:
+            short_score += 10
+
     range_1h = c1h['hh'] - c1h['ll']
-    if range_1h > 0 and (c1h['c'] - c1h['ll']) / range_1h > 0.5:
-        score += 10
-        reasons.append("1h价格处于区间上半部")
-    
-    return min(score, 100), reasons
+    if range_1h > 0:
+        if (c1h['c'] - c1h['ll']) / range_1h > 0.5:
+            long_score += 10
+        else:
+            short_score += 10
+
+    return min(long_score, 100), min(short_score, 100)
 
 def compute_momentum_score(df_5m):
-    """计算动量核评分 (0-100)"""
+    """计算动量核的多空分数 (0-100)"""
     c = df_5m.iloc[-1]
-    score = 0
-    reasons = []
-    
-    # EMA9上穿EMA21 (30分)
+
+    long_score = 0
+    short_score = 0
+
+    # EMA9 vs EMA21 (30分)
     if c['ema9'] > c['ema21']:
-        score += 30
-        reasons.append("EMA9 > EMA21")
-    
-    # 价格在VWAP之上 (20分)
+        long_score += 30
+    else:
+        short_score += 30
+
+    # 价格 vs VWAP (20分)
     if c['c'] > c['vwap']:
-        score += 20
-        reasons.append("价格 > VWAP")
-    
-    # 成交量放大 (25分)
+        long_score += 20
+    else:
+        short_score += 20
+
+    # 成交量放大 (25分，多空都加)
     if c['v'] > c['volume_ma20'] * 1.5:
-        score += 25
-        reasons.append(f"成交量放大 {c['v']/c['volume_ma20']:.1f}倍")
-    
-    # ATR扩张 (25分)
-    if c['atr_expand'] > 0.1:  # ATR扩张超过10%
-        score += 25
-        reasons.append(f"ATR扩张 {c['atr_expand']*100:.1f}%")
-    
-    return min(score, 100), reasons
+        long_score += 25
+        short_score += 25
+
+    # ATR扩张 (25分，多空都加)
+    if c['atr_expand'] > 0.1:
+        long_score += 25
+        short_score += 25
+
+    return min(long_score, 100), min(short_score, 100)
 
 def compute_model_prob(df_5m, latest_feat):
     """获取模型概率并转换为分数 (0-100)"""
     if model_long is None or model_short is None:
-        return 50, 50, "无模型"
-    
-    prob_l = model_long.predict_proba(latest_feat)[0][1]
-    prob_s = model_short.predict_proba(latest_feat)[0][1]
-    return prob_l * 100, prob_s * 100, ""
+        return 50, 50
+    prob_l = model_long.predict_proba(latest_feat)[0][1] * 100
+    prob_s = model_short.predict_proba(latest_feat)[0][1] * 100
+    return prob_l, prob_s
 
 # ================================
-# 7. 侧边栏（与之前类似，略作调整）
+# 7. 侧边栏（与之前一致）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -241,11 +257,12 @@ with st.sidebar:
     if st.button("🔌 重置熔断"):
         st.session_state.system_halted = False
         st.session_state.last_price = 0
+        st.session_state.last_signal_time = 0
 
 # ================================
 # 8. 主界面
 # ================================
-st.title("⚡ ETH 100x 三核 AI 决策终端 (趋势+动量+模型)")
+st.title("⚖️ ETH 100x 双向评分 AI 决策终端 (趋势+动量+模型)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -262,50 +279,66 @@ try:
         st.error("🚨 触发熔断保护！价格剧烈波动。")
     else:
         # 获取多周期数据并计算指标
-        df_5m, df_15m, df_1h, latest_feat = get_multi_timeframe_data()
+        df_5m, df_15m, df_1h = get_multi_timeframe_data()
         df_5m, df_15m, df_1h, latest_feat = compute_features(df_5m, df_15m, df_1h)
         
         # 计算各项评分
-        trend_score, trend_reasons = compute_trend_score(df_15m, df_1h)
-        momentum_score, momentum_reasons = compute_momentum_score(df_5m)
-        prob_l, prob_s, _ = compute_model_prob(df_5m, latest_feat)
+        trend_long, trend_short = compute_trend_score(df_15m, df_1h)
+        mom_long, mom_short = compute_momentum_score(df_5m)
+        prob_l, prob_s = compute_model_prob(df_5m, latest_feat)
         
-        # 计算最终信心分（取多头概率作为模型分，因为趋势和动量已隐含方向）
-        # 注意：此处我们取 prob_l 作为模型分，但实际方向由趋势和动量决定，最终信号应结合三者。
-        # 简便处理：将 prob_l 作为模型分，但最终信号方向需根据趋势+动量判断。
-        model_score = prob_l  # 0-100
-        final_score = trend_score * TREND_WEIGHT + momentum_score * MOMENTUM_WEIGHT + model_score * MODEL_WEIGHT
+        # 计算最终多空信心分
+        final_long = trend_long * TREND_WEIGHT + mom_long * MOMENTUM_WEIGHT + prob_l * MODEL_WEIGHT
+        final_short = trend_short * TREND_WEIGHT + mom_short * MOMENTUM_WEIGHT + prob_s * MODEL_WEIGHT
         
-        # 判断方向：趋势和动量都看多才算多头信号（严格一点）
-        direction = None
-        if trend_score >= 60 and momentum_score >= 60 and prob_l > 50:
-            direction = "LONG"
-        elif trend_score <= 40 and momentum_score <= 40 and prob_s > 50:
-            direction = "SHORT"
-        # 也可根据趋势和动量分数差值判断
+        # 波动率过滤：ATR百分比 < 0.25% 时禁止交易
+        atr_pct = df_5m['atr_pct'].iloc[-1]
+        if atr_pct < MIN_ATR_PCT:
+            st.warning(f"⚠️ 当前波动率过低 (ATR% = {atr_pct:.3%})，低于 {MIN_ATR_PCT:.2%}，禁止交易。")
+            direction = None
+            final_score = 0
+        else:
+            # 冷却时间检查
+            current_time = time.time()
+            time_since_last = current_time - st.session_state.last_signal_time
+            if time_since_last < COOLDOWN_SECONDS:
+                st.info(f"⏳ 冷却中，还需 {COOLDOWN_SECONDS - time_since_last:.0f} 秒才能产生新信号。")
+                direction = None
+                final_score = 0
+            else:
+                # 取高分方向
+                if final_long > final_short and final_long >= FINAL_CONF_THRES:
+                    direction = "LONG"
+                    final_score = final_long
+                elif final_short > final_long and final_short >= FINAL_CONF_THRES:
+                    direction = "SHORT"
+                    final_score = final_short
+                else:
+                    direction = None
+                    final_score = 0
         
-        # 顶部仪表盘
-        col1, col2, col3, col4 = st.columns(4)
+        # 顶部仪表盘（显示各核分数）
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ETH 实时价", f"${current_price}")
-        col2.metric("趋势核", f"{trend_score}", help="\n".join(trend_reasons) if trend_reasons else "")
-        col3.metric("动量核", f"{momentum_score}", help="\n".join(momentum_reasons) if momentum_reasons else "")
-        col4.metric("模型置信", f"{model_score:.1f}%")
+        col2.metric("趋势核 (多/空)", f"{trend_long}/{trend_short}")
+        col3.metric("动量核 (多/空)", f"{mom_long}/{mom_short}")
+        col4.metric("模型 (多/空)", f"{prob_l:.0f}%/{prob_s:.0f}%")
+        col5.metric("最终信心", f"{final_long:.0f}/{final_short:.0f}")
         
         st.markdown("---")
         
-        # 显示最终信心分
-        st.subheader(f"📊 最终 AI 信心分: **{final_score:.1f}** / 100 (门槛 {FINAL_CONF_THRES})")
-        
-        # 只有当最终信心分 > 门槛时，才显示交易计划
-        if final_score >= FINAL_CONF_THRES and direction is not None:
-            side = direction
-            st.success(f"🎯 **高置信度交易信号：{side}** (信心分 {final_score:.1f})")
+        # 显示最终信号（如果存在）
+        if direction:
+            # 记录信号时间
+            st.session_state.last_signal_time = time.time()
+            
+            st.success(f"🎯 **高置信度交易信号：{direction}** (信心分 {final_score:.1f})")
             
             # 止损止盈计算（使用5m的ATR）
             atr_raw = df_5m['atr'].iloc[-1]
             sl_dist = min(atr_raw * 1.5, current_price * 0.004)  # 放宽至0.4%
-            sl = current_price - sl_dist if side == "LONG" else current_price + sl_dist
-            tp = current_price + sl_dist * 2.5 if side == "LONG" else current_price - sl_dist * 2.0
+            sl = current_price - sl_dist if direction == "LONG" else current_price + sl_dist
+            tp = current_price + sl_dist * 2.5 if direction == "LONG" else current_price - sl_dist * 2.0
             
             sc1, sc2, sc3 = st.columns(3)
             sc1.write(f"**入场价:** {current_price}")
@@ -317,15 +350,15 @@ try:
             if not st.session_state.signal_log or st.session_state.signal_log[-1]['时间'] != t_now:
                 st.session_state.signal_log.append({
                     "时间": t_now,
-                    "方向": side,
+                    "方向": direction,
                     "价格": current_price,
                     "信心分": f"{final_score:.1f}",
-                    "趋势": trend_score,
-                    "动量": momentum_score,
-                    "模型": f"{model_score:.1f}%"
+                    "趋势": f"{trend_long}/{trend_short}",
+                    "动量": f"{mom_long}/{mom_short}",
+                    "模型": f"{prob_l:.0f}%/{prob_s:.0f}%"
                 })
         else:
-            st.info("🔎 当前信心分未达阈值，等待高质量机会...")
+            st.info("🔎 当前无符合要求的信号 (可能因波动率低、冷却中或信心不足)")
         
         # 显示K线图（5m）
         fig = go.Figure(data=[go.Candlestick(
