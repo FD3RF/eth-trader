@@ -65,7 +65,7 @@ if 'last_signal_time' not in st.session_state:
 if 'cached_ohlcv' not in st.session_state:
     st.session_state.cached_ohlcv = {}
 
-# ==================== 模拟K线生成 ====================
+# ==================== 模拟K线生成（修复版）====================
 def generate_simulated_ohlcv(symbol, timeframe, limit=300):
     key = f"{symbol}_{timeframe}"
     st.session_state.sim_step += 1
@@ -75,6 +75,7 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=300):
         st.session_state.sim_prices[key] = [base] * limit
     else:
         base = st.session_state.sim_prices[key][-1]
+    
     prices = [base]
     vol = 0.014
     for _ in range(limit-1):
@@ -82,10 +83,13 @@ def generate_simulated_ohlcv(symbol, timeframe, limit=300):
         ret = t.rvs(df=3.8, loc=np.random.normal(0,0.00008), scale=vol)
         prices.append(prices[-1]*(1+ret))
     prices = np.array(prices)
-    freq = {'5m':'5min','15m':'15min','1h':'60min'}.get(timeframe,'15min')
+    
+    # 修复：使用兼容的频率格式，只指定 end 和 periods
+    freq_map = {'5m': '5T', '15m': '15T', '1h': '1H'}
+    freq = freq_map.get(timeframe, '15T')
     end_time = datetime.now()
-    start_time = end_time - timedelta(minutes=int(freq.replace('min','')) * limit)
-    ts = pd.date_range(start=start_time, end=end_time, periods=limit, freq=freq)
+    ts = pd.date_range(end=end_time, periods=limit, freq=freq)
+    
     df = pd.DataFrame({
         'timestamp': ts,
         'open': prices*(1+np.random.uniform(-0.0028,0.0028,limit)),
@@ -588,7 +592,9 @@ with tab4:
     st.slider("ATR止损倍数", 0.8, 2.5, 1.2, 0.05, key="ATR_STOP_MULT")
     st.number_input("每日开单上限", min_value=1, max_value=30, value=MAX_TRADES_PER_DAY, key="daily_limit_input")
     if st.button("更新每日上限"):
-        MAX_TRADES_PER_DAY = st.session_state.daily_limit_input
+        # 更新全局变量（注意：此变量在函数外定义，需使用 global 或在其他地方引用 session_state）
+        # 这里简单演示，实际可使用 st.session_state 存储
+        st.session_state.daily_limit = st.session_state.daily_limit_input
         st.success("每日上限已更新")
 
 st_autorefresh(interval=25000, key="auto_refresh")
