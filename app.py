@@ -2,210 +2,160 @@ import streamlit as st
 import ccxt
 import pandas as pd
 import pandas_ta as ta
+import numpy as np
+import plotly.graph_objects as go
 import time
 from datetime import datetime
 
-# --- 配置区 ---
-SYMBOL = 'ETH/USDT'
+# =============================
+# 1. 核心配置与初始化
+# =============================
+SYMBOL = "ETH/USDT"
+REFRESH_INTERVAL = 3 
 LEVERAGE = 100
-ST_REFRESH = 5  # 刷新频率(秒)
-STOP_PERCENT = 0.003  # 0.3% 固定止损
-PROFIT_RATIO = 2.0     # 止盈为止损距离的2倍
+CIRCUIT_BREAKER_PCT = 0.005 # 0.5% 闪崩熔断
 
-st.set_page_config(page_title="ETH 100x AI Monitor", layout="wide")
-st.title(f"🚀 {SYMBOL} 100x 短线监控器 (5分钟主周期)")
-st.caption("数据源：Binance · 每5秒刷新 · 信号出现时弹窗提醒 · 无真实下单")
+st.set_page_config(layout="wide", page_title="ETH 100x Pro 10-Level System")
+exchange = ccxt.binance({"enableRateLimit": True})
 
-# 初始化交易所（公开数据，无需密钥）
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
+if 'last_price' not in st.session_state: st.session_state.last_price = 0
+if 'system_halted' not in st.session_state: st.session_state.system_halted = False
 
-def fetch_data():
-    """获取三个周期的K线数据并计算指标"""
-    # 获取数据
-    bars_5m = exchange.fetch_ohlcv(SYMBOL, timeframe='5m', limit=100)
-    bars_15m = exchange.fetch_ohlcv(SYMBOL, timeframe='15m', limit=100)
-    bars_1h = exchange.fetch_ohlcv(SYMBOL, timeframe='1h', limit=100)
-    
-    # 转换为 DataFrame
-    df5 = pd.DataFrame(bars_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df15 = pd.DataFrame(bars_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df1h = pd.DataFrame(bars_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    
-    # 转换时间戳
-    for df in [df5, df15, df1h]:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    
-    # 计算指标（使用 pandas_ta）
-    # 5分钟指标
-    df5['ema9'] = ta.ema(df5['close'], length=9)
-    df5['ema21'] = ta.ema(df5['close'], length=21)
-    df5['rsi'] = ta.rsi(df5['close'], length=14)
-    df5['atr'] = ta.atr(df5['high'], df5['low'], df5['close'], length=14)
-    df5['vwap'] = ta.vwap(df5['high'], df5['low'], df5['close'], df5['volume'])
-    df5['volume_ma5'] = df5['volume'].rolling(5).mean()
-    df5['volume_ratio'] = df5['volume'] / df5['volume_ma5'].shift(1)
-    
-    # 15分钟和1小时趋势指标（EMA50）
-    df15['ema50'] = ta.ema(df15['close'], length=50)
-    df1h['ema50'] = ta.ema(df1h['close'], length=50)
-    
-    return df5, df15, df1h
+# =============================
+# 2. 升级版核心函数
+# =============================
 
-def calculate_confidence(df5, row, trend_up):
-    """计算AI信心分（0-100）"""
+def detect_regime(df):
+    """使用 15m 判断大趋势结构，过滤 5m 噪音"""
+    df["adx"] = ta.adx(df["h"], df["l"], df["c"], 14)["ADX_14"]
+    df["atr"] = ta.atr(df["h"], df["l"], df["c"], 14)
+    df["ema21"] = ta.ema(df["c"], 21)
+    
+    adx_mean = df["adx"].tail(20).mean()
+    atr_val = df["atr"].iloc[-1]
+    slope = df["ema21"].iloc[-1] - df["ema21"].iloc[-5]
+    
+    if adx_mean > 25 and abs(slope) > 0.1: return "TREND", atr_val
+    elif atr_val > (df["c"].iloc[-1] * 0.003): return "VOLATILE", atr_val
+    else: return "RANGE", atr_val
+
+def tf_score(df):
+    """Pro 级评分：结合 EMA, MACD, RSI, ADX 和量能确认"""
+    df["ema9"] = ta.ema(df["c"], 9)
+    df["ema21"] = ta.ema(df["c"], 21)
+    df["rsi"] = ta.rsi(df["c"], 14)
+    df["adx"] = ta.adx(df["h"], df["l"], df["c"], 14)["ADX_14"]
+    macd = ta.macd(df["c"])
+    df["hist"] = macd["MACDh_12_26_9"]
+
+    last = df.iloc[-1]
     score = 0
-    
-    # 趋势得分（基于15分钟和1小时EMA50）
-    if trend_up:
-        score += 30
-    else:
-        score += 0  # 逆势不加分，但也不扣分
-    
-    # 动能得分（EMA金叉/死叉）
-    if row['ema9'] > row['ema21']:
-        score += 30
-    
-    # 价格位置（相对VWAP）
-    if row['close'] > row['vwap']:
-        score += 20
-    
-    # 成交量放大（>1.5倍）
-    if row['volume_ratio'] > 1.5:
-        score += 20
-    elif row['volume_ratio'] > 1.2:
-        score += 10
-    
-    # RSI 辅助（避免超买超卖）
-    if 30 < row['rsi'] < 70:
-        score += 10  # 健康区间加分
-    
-    return min(score, 100)
 
-def get_signal():
-    """主信号检测函数"""
-    df5, df15, df1h = fetch_data()
-    
-    if len(df5) < 50 or len(df15) < 50 or len(df1h) < 50:
-        return None, None, None, None, df5, df15, df1h
-    
-    last = df5.iloc[-1]
-    prev = df5.iloc[-2]
-    
-    # 趋势判断（基于15分钟和1小时EMA50）
-    trend_up = (df15['close'].iloc[-1] > df15['ema50'].iloc[-1]) and (df1h['close'].iloc[-1] > df1h['ema50'].iloc[-1])
-    trend_down = (df15['close'].iloc[-1] < df15['ema50'].iloc[-1]) and (df1h['close'].iloc[-1] < df1h['ema50'].iloc[-1])
-    
-    # 计算信心分
-    confidence = calculate_confidence(df5, last, trend_up)
-    
-    # 信号条件
-    long_condition = (
-        trend_up and
-        prev['ema9'] <= prev['ema21'] and
-        last['ema9'] > last['ema21'] and
-        last['close'] > last['vwap'] and
-        last['volume_ratio'] > 1.2
-    )
-    
-    short_condition = (
-        trend_down and
-        prev['ema9'] >= prev['ema21'] and
-        last['ema9'] < last['ema21'] and
-        last['close'] < last['vwap'] and
-        last['volume_ratio'] > 1.2
-    )
-    
-    if long_condition and confidence >= 80:
-        direction = '多'
-        entry = last['close']
-        stop_loss = entry * (1 - STOP_PERCENT)
-        take_profit = entry * (1 + STOP_PERCENT * PROFIT_RATIO)
-        return direction, entry, stop_loss, take_profit, confidence, df5, df15, df1h
-    
-    elif short_condition and confidence >= 80:
-        direction = '空'
-        entry = last['close']
-        stop_loss = entry * (1 + STOP_PERCENT)
-        take_profit = entry * (1 - STOP_PERCENT * PROFIT_RATIO)
-        return direction, entry, stop_loss, take_profit, confidence, df5, df15, df1h
-    
-    else:
-        return None, None, None, None, confidence, df5, df15, df1h
+    # 基础动能评分
+    score += 20 if last["ema9"] > last["ema21"] else -20
+    score += 20 if last["hist"] > 0 else -20
+    score += 25 if last["adx"] > 25 else 0
 
-# 会话状态保存上一个信号，用于弹窗判断
-if 'last_signal' not in st.session_state:
-    st.session_state.last_signal = {'direction': None, 'entry': None, 'time': None}
+    # RSI 强弱过滤
+    if last["rsi"] > 60: score += 15
+    elif last["rsi"] < 40: score -= 15
 
-# 主循环（Streamlit 会不断重新运行，我们用自动刷新）
-# 但为了保持简洁，我们使用 st_autorefresh 并让代码每次运行都获取新数据
+    # 量能确认 (Volume Confirmation)
+    vol_mean = df["v"].rolling(20).mean().iloc[-1]
+    if last["v"] > vol_mean * 1.2:
+        score += 20 if score > 0 else -20
 
-# 放置占位符
+    return score
+
+def exhaustion_prob(df):
+    """核心：计算趋势衰竭概率"""
+    # 纠错：确保指标存在
+    if "adx" not in df or "hist" not in df: return 0
+    adx_drop = df["adx"].iloc[-1] < df["adx"].iloc[-3]
+    hist_shrink = abs(df["hist"].iloc[-1]) < abs(df["hist"].iloc[-2])
+    vol_drop = df["v"].iloc[-1] < df["v"].rolling(20).mean().iloc[-1]
+    return sum([adx_drop, hist_shrink, vol_drop]) / 3
+
+# =============================
+# 3. 主作战循环
+# =============================
+st.title("🛡️ ETH 100x AI 专家自适应系统 (Pro)")
+
+if st.sidebar.button("🔌 重置系统熔断"):
+    st.session_state.system_halted = False
+    st.session_state.last_price = 0
+
 placeholder = st.empty()
 
-# 获取最新信号
-direction, entry, sl, tp, confidence, df5, df15, df1h = get_signal()
-
-# 检查是否为新信号（用于弹窗）
-if direction and entry:
-    last_sig = st.session_state.last_signal
-    if last_sig['direction'] != direction or abs(entry - (last_sig['entry'] or 0)) > 0.01:
-        st.toast(f"🚨 新交易计划: {direction} 入场 {entry:.2f}", icon="💹")
-        st.session_state.last_signal = {'direction': direction, 'entry': entry, 'time': datetime.now()}
-
-# --- 渲染界面 ---
-with placeholder.container():
-    # 顶部指标卡片
-    col1, col2, col3, col4, col5 = st.columns(5)
-    last = df5.iloc[-1] if not df5.empty else None
-    if last is not None:
-        col1.metric("当前价", f"${last['close']:.2f}")
-        col2.metric("ATR(14)", f"{last['atr']:.2f}")
-        col3.metric("RSI", f"{last['rsi']:.1f}")
-        col4.metric("成交量比", f"{last['volume_ratio']:.2f}")
-        col5.metric("AI信心", f"{confidence}%")
-    else:
-        st.warning("等待数据...")
-
-    # 趋势信息
-    st.subheader("📊 趋势过滤 (15分钟 & 1小时 EMA50)")
-    trend_col1, trend_col2, trend_col3 = st.columns(3)
-    if not df15.empty:
-        last15 = df15.iloc[-1]
-        trend15 = "📈 多头" if last15['close'] > last15['ema50'] else "📉 空头"
-        trend_col1.metric("15分钟价格", f"{last15['close']:.2f}")
-        trend_col2.metric("15分钟EMA50", f"{last15['ema50']:.2f}")
-        trend_col3.metric("15分钟趋势", trend15)
-    if not df1h.empty:
-        last1h = df1h.iloc[-1]
-        trend1h = "📈 多头" if last1h['close'] > last1h['ema50'] else "📉 空头"
-        st.metric("1小时趋势", trend1h)
-
-    # 交易计划展示
-    st.markdown("---")
-    st.subheader("📋 最新交易计划")
-    if direction and entry:
-        st.success(f"**{direction}** | 信心分: {confidence}")
-        col_e, col_sl, col_tp = st.columns(3)
-        col_e.metric("入场价", f"{entry:.2f}")
-        col_sl.metric("止损价", f"{sl:.2f}")
-        col_tp.metric("止盈价", f"{tp:.2f}")
+while True:
+    try:
+        # 1. 毫秒级熔断检测 (修复 Bug 版)
+        ticker = exchange.fetch_ticker(SYMBOL)
+        current_price = ticker['last']
+        change = 0
         
-        # 风险警示
-        risk_pct = abs(entry - sl) / entry * 100 * LEVERAGE
-        st.error(f"⚠️ 100倍杠杆风险：若止损，本金损失约 {risk_pct:.1f}%")
-    else:
-        st.info("⏳ 暂无符合80%以上信心的交易计划")
+        if st.session_state.last_price != 0:
+            change = abs(current_price - st.session_state.last_price) / st.session_state.last_price
+            if change > CIRCUIT_BREAKER_PCT:
+                st.session_state.system_halted = True
+        
+        st.session_state.last_price = current_price
+        
+        if st.session_state.system_halted:
+            st.error(f"🚨 系统熔断！价格瞬间异常波动 {change:.2%}。请手动复位。")
+            time.sleep(5); continue
 
-    # 显示最近5根K线
-    st.subheader("📈 最近5根5分钟K线")
-    st.dataframe(df5[['timestamp', 'close', 'volume', 'rsi', 'vwap']].tail(5), use_container_width=True)
+        # 2. 获取多周期数据 (5m 执行, 15m 结构)
+        b5 = exchange.fetch_ohlcv(SYMBOL, "5m", 150)
+        b15 = exchange.fetch_ohlcv(SYMBOL, "15m", 150)
+        df5 = pd.DataFrame(b5, columns=["t","o","h","l","c","v"])
+        df15 = pd.DataFrame(b15, columns=["t","o","h","l","c","v"])
 
-# 自动刷新
-st_autorefresh = st.empty()  # 实际需要用 st_autorefresh 组件
-# 由于 streamlit-autorefresh 需要安装，我们直接使用 time.sleep 不行，因为 streamlit 是脚本式执行。
-# 正确做法是使用 st_autorefresh 组件
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=ST_REFRESH * 1000, key="auto_refresh")
+        # 3. 核心计算
+        regime, atr = detect_regime(df15) # 15m 判定结构
+        score_5 = tf_score(df5)          # 5m 判定入场动能
+        exhaust = exhaustion_prob(df5)   # 5m 判定衰竭
+
+        # 4. 10级 Pro 动态 TP 逻辑
+        strength_factor = abs(score_5) / 100
+        tp_multiplier = 1.2 + (strength_factor * 2.5) # 强趋势下 TP 扩张
+        if exhaust > 0.66: tp_multiplier *= 0.7       # 衰竭时强制收缩 TP
+
+        with placeholder.container():
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("ETH 实时价", f"${current_price}")
+            c2.metric("15m 结构", regime)
+            c3.metric("5m 强度评分", f"{score_5} pt")
+            c4.metric("衰竭概率", f"{round(exhaust*100, 1)}%")
+
+            # 5. 执行计划决策
+            if abs(score_5) >= 50:
+                side = "LONG" if score_5 > 0 else "SHORT"
+                # 100x 风控：ATR 止损与 0.3% 硬止损取最小值
+                sl_dist = min(atr * 1.2, current_price * 0.003)
+                sl = current_price - sl_dist if side == "LONG" else current_price + sl_dist
+                tp = current_price + (current_price - sl) * tp_multiplier if side == "LONG" else current_price - (sl - current_price) * tp_multiplier
+                
+                # 衰竭高风险警示
+                if exhaust > 0.66:
+                    st.error(f"⚠️ 动能衰竭高风险：当前倾向于反转或横盘。TP 已下调。")
+                
+                st.write(f"### 🎯 Pro 作战计划 ({side})")
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.success(f"**入场位:** {current_price}")
+                sc2.error(f"**止损位:** {round(sl, 2)}")
+                sc3.info(f"**动态止盈:** {round(tp, 2)}")
+                sc4.metric("盈亏比", f"1:{round(tp_multiplier, 2)}")
+            else:
+                st.info("💎 扫描中... 5m 动能评分未达阈值，15m 结构信号不明确。")
+
+            # 可视化
+            fig = go.Figure(data=[go.Candlestick(x=pd.to_datetime(df5['t'], unit='ms'),
+                            open=df5['o'], high=df5['h'], low=df5['l'], close=df5['c'])])
+            fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+        st.sidebar.error(f"异常: {e}")
+    
+    time.sleep(REFRESH_INTERVAL)
