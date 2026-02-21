@@ -11,10 +11,10 @@ import os
 # =============================
 # 1. 核心生产配置
 # =============================
-SYMBOL = "ETH/USDT:USDT"       # Bybit 线性合约官方格式
-REFRESH_MS = 3000               # 刷新间隔 3 秒
-CIRCUIT_BREAKER_PCT = 0.005     # 0.5% 熔断阈值
-CONFIDENCE_THRESHOLD = 0.75     # 置信度阈值
+SYMBOL = "ETH/USDT"                # OKX 永续合约符号（USDT 本位）
+REFRESH_MS = 3000                   # 刷新间隔 3 秒
+CIRCUIT_BREAKER_PCT = 0.005         # 0.5% 熔断阈值
+CONFIDENCE_THRESHOLD = 0.75         # 置信度阈值
 
 st.set_page_config(layout="wide", page_title="ETH 100x AI Pro", page_icon="🤖")
 st_autorefresh(interval=REFRESH_MS, key="prod_monitor")
@@ -22,9 +22,10 @@ st_autorefresh(interval=REFRESH_MS, key="prod_monitor")
 @st.cache_resource
 def init_system():
     """初始化交易所和模型"""
-    exch = ccxt.bybit({
+    # 使用 OKX 永续合约 (swap)
+    exch = ccxt.okx({
         "enableRateLimit": True,
-        "options": {"defaultType": "linear"}
+        "options": {"defaultType": "swap"}      # swap 表示永续合约
     })
     model = None
     model_path = "eth_ai_model.pkl"
@@ -66,7 +67,7 @@ def get_safe_analysis_data():
             "low": "l", "close": "c", "volume": "v"
         }, inplace=True)
         
-        # 计算指标
+        # 计算指标（与训练脚本严格一致）
         df["rsi"] = ta.rsi(df["c"], length=14)
         df["ma20"] = ta.sma(df["c"], length=20)
         df["ma60"] = ta.sma(df["c"], length=60)
@@ -81,7 +82,7 @@ def get_safe_analysis_data():
         # 填充缺失值
         df = df.ffill().bfill()
         
-        # 特征列（与训练时严格一致）
+        # 特征列（与训练时完全一致）
         feature_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr', 'adx']
         # 取最新一行特征
         features = df[feature_cols].iloc[-1:].copy()
