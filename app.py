@@ -131,27 +131,40 @@ if 'stats' not in st.session_state:
     }
 
 # ================================
-# 4. 数据获取函数（多时间框架）
+# 4. 数据获取函数（多时间框架，处理None）
 # ================================
 def fetch_ohlcv(timeframe, limit=200):
     """获取指定周期的K线数据"""
     return exchange.fetch_ohlcv(SYMBOL, timeframe, limit=limit)
 
 def get_multi_timeframe_data():
-    """获取5m、15m、1h数据并返回DataFrame（列名为标准OHLCV）"""
+    """获取5m、15m、1h数据并返回DataFrame（列名为标准OHLCV），并将None替换为NaN"""
     ohlcv_5m = fetch_ohlcv("5m", 200)
+    if not ohlcv_5m:
+        st.error("无法获取 5m 数据，请检查网络或交易所状态。")
+        st.stop()
     df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
     
     ohlcv_15m = fetch_ohlcv("15m", 100)
+    if not ohlcv_15m:
+        st.error("无法获取 15m 数据，请检查网络或交易所状态。")
+        st.stop()
     df_15m = pd.DataFrame(ohlcv_15m, columns=["timestamp", "open", "high", "low", "close", "volume"])
     
     ohlcv_1h = fetch_ohlcv("1h", 100)
+    if not ohlcv_1h:
+        st.error("无法获取 1h 数据，请检查网络或交易所状态。")
+        st.stop()
     df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    
+    # 将可能的None替换为NaN，以便后续填充
+    for df in [df_5m, df_15m, df_1h]:
+        df.replace([None], np.nan, inplace=True)
     
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算函数（使用标准列名）
+# 5. 指标计算函数（使用标准列名，确保无None）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     """计算所有需要的指标，返回DataFrame和最新特征向量"""
@@ -170,8 +183,7 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["ma60"] = ta.sma(df_5m["close"], length=60)
     macd = ta.macd(df_5m["close"])
     df_5m["macd"] = macd["MACD_12_26_9"]
-    # 这里使用MACD线作为信号（原代码如此，如需信号线请替换为MACDs_12_26_9）
-    df_5m["macd_signal"] = macd["MACD_12_26_9"]
+    df_5m["macd_signal"] = macd["MACD_12_26_9"]  # 根据训练脚本调整
     df_5m["atr"] = ta.atr(df_5m["high"], df_5m["low"], df_5m["close"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["close"]
     df_5m["adx"] = ta.adx(df_5m["high"], df_5m["low"], df_5m["close"], length=14)["ADX_14"]
@@ -179,12 +191,11 @@ def compute_features(df_5m, df_15m, df_1h):
     # 动量核所需指标
     df_5m["ema9"] = ta.ema(df_5m["close"], length=9)
     df_5m["ema21"] = ta.ema(df_5m["close"], length=21)
-    # VWAP
     vwap = ta.vwap(df_5m["high"], df_5m["low"], df_5m["close"], df_5m["volume"])
     df_5m["VWAP"] = vwap
     df_5m["volume_ma20"] = ta.sma(df_5m["volume"], length=20)
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean()
-    df_5m["atr_surge"] = df_5m["atr"] > df_5m["atr_ma20"] * 1.2
+    df_5m["atr_surge"] = (df_5m["atr"] > df_5m["atr_ma20"] * 1.2).fillna(False)  # 处理NaN
     
     # ----- 15m 指标（用于趋势核）-----
     df_15m["ema200"] = ta.ema(df_15m["close"], length=200)
@@ -209,6 +220,9 @@ def compute_features(df_5m, df_15m, df_1h):
     df_15m = df_15m.ffill().bfill().infer_objects(copy=False)
     df_1h = df_1h.ffill().bfill().infer_objects(copy=False)
     
+    # 再次确保没有NaN（尤其是布尔列，我们已填充False）
+    df_5m["atr_surge"] = df_5m["atr_surge"].fillna(False)
+    
     # 最新一行特征（用于模型预测）
     feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
     latest_feat = df_5m[feat_cols].iloc[-1:].fillna(0)
@@ -227,36 +241,40 @@ def compute_trend_score(df_15m, df_1h):
     short_score = 0
 
     # EMA200 (每项15分) + 斜率验证
-    if c15['close'] > c15['ema200'] and c15['ema200_slope'] > 0:
-        long_score += 15
-    elif c15['close'] < c15['ema200'] and c15['ema200_slope'] < 0:
-        short_score += 15
+    if pd.notna(c15['close']) and pd.notna(c15['ema200']) and pd.notna(c15['ema200_slope']):
+        if c15['close'] > c15['ema200'] and c15['ema200_slope'] > 0:
+            long_score += 15
+        elif c15['close'] < c15['ema200'] and c15['ema200_slope'] < 0:
+            short_score += 15
 
-    if c1h['close'] > c1h['ema200'] and c1h['ema200_slope'] > 0:
-        long_score += 15
-    elif c1h['close'] < c1h['ema200'] and c1h['ema200_slope'] < 0:
-        short_score += 15
+    if pd.notna(c1h['close']) and pd.notna(c1h['ema200']) and pd.notna(c1h['ema200_slope']):
+        if c1h['close'] > c1h['ema200'] and c1h['ema200_slope'] > 0:
+            long_score += 15
+        elif c1h['close'] < c1h['ema200'] and c1h['ema200_slope'] < 0:
+            short_score += 15
 
     # VWAP (每项10分)
-    if c15['close'] > c15['VWAP']:
-        long_score += 10
-    else:
-        short_score += 10
+    if pd.notna(c15['close']) and pd.notna(c15['VWAP']):
+        if c15['close'] > c15['VWAP']:
+            long_score += 10
+        else:
+            short_score += 10
 
-    if c1h['close'] > c1h['VWAP']:
-        long_score += 10
-    else:
-        short_score += 10
+    if pd.notna(c1h['close']) and pd.notna(c1h['VWAP']):
+        if c1h['close'] > c1h['VWAP']:
+            long_score += 10
+        else:
+            short_score += 10
 
     # 价格结构高低点 (每项10分)
-    range_15 = c15['hh'] - c15['ll']
+    range_15 = c15['hh'] - c15['ll'] if pd.notna(c15['hh']) and pd.notna(c15['ll']) else 0
     if range_15 > 0:
         if (c15['close'] - c15['ll']) / range_15 > 0.5:
             long_score += 10
         else:
             short_score += 10
 
-    range_1h = c1h['hh'] - c1h['ll']
+    range_1h = c1h['hh'] - c1h['ll'] if pd.notna(c1h['hh']) and pd.notna(c1h['ll']) else 0
     if range_1h > 0:
         if (c1h['close'] - c1h['ll']) / range_1h > 0.5:
             long_score += 10
@@ -268,7 +286,7 @@ def compute_trend_score(df_15m, df_1h):
     raw_short = min(short_score, 100)
 
     # ADX 作为倍率因子（仅当两个周期都强趋势）
-    if c15['adx'] > 25 and c1h['adx'] > 25:
+    if pd.notna(c15['adx']) and pd.notna(c1h['adx']) and c15['adx'] > 25 and c1h['adx'] > 25:
         long_score = int(long_score * 1.15)
         short_score = int(short_score * 1.15)
 
@@ -286,25 +304,28 @@ def compute_momentum_score(df_5m):
     short_score = 0
 
     # EMA9 vs EMA21 (30分)
-    if c['ema9'] > c['ema21']:
-        long_score += 30
-    else:
-        short_score += 30
+    if pd.notna(c['ema9']) and pd.notna(c['ema21']):
+        if c['ema9'] > c['ema21']:
+            long_score += 30
+        else:
+            short_score += 30
 
     # 价格 vs VWAP (20分)
-    if c['close'] > c['VWAP']:
-        long_score += 20
-    else:
-        short_score += 20
+    if pd.notna(c['close']) and pd.notna(c['VWAP']):
+        if c['close'] > c['VWAP']:
+            long_score += 20
+        else:
+            short_score += 20
 
     # 成交量放大 (25分，多空都加)
-    if c['volume'] > c['volume_ma20'] * VOLUME_RATIO_MIN:
-        long_score += 25
-        short_score += 25
+    if pd.notna(c['volume']) and pd.notna(c['volume_ma20']) and c['volume_ma20'] > 0:
+        if c['volume'] > c['volume_ma20'] * VOLUME_RATIO_MIN:
+            long_score += 25
+            short_score += 25
 
     # ATR扩张定向增强（只增强当前动量方向）
-    if c['atr_surge']:
-        if c['ema9'] > c['ema21']:
+    if pd.notna(c['atr_surge']) and c['atr_surge']:
+        if pd.notna(c['ema9']) and pd.notna(c['ema21']) and c['ema9'] > c['ema21']:
             long_score += 25
         else:
             short_score += 25
@@ -325,6 +346,9 @@ def detect_momentum_decay(df_5m):
     if len(df_5m) < 4:
         return False
     macd_vals = df_5m['macd'].iloc[-4:].values
+    # 确保所有值都不是NaN
+    if any(pd.isna(v) for v in macd_vals):
+        return False
     return (macd_vals[3] < macd_vals[2] and
             macd_vals[2] < macd_vals[1] and
             macd_vals[1] < macd_vals[0])
@@ -332,10 +356,13 @@ def detect_momentum_decay(df_5m):
 def detect_breakout(df_5m):
     """检测是否处于爆发结构"""
     c = df_5m.iloc[-1]
-    vol_ratio = c['volume'] / c['volume_ma20'] if c['volume_ma20'] > 0 else 0
-    return (c['atr_surge'] and
-            vol_ratio > BREAKOUT_VOL_RATIO and
-            c['adx'] > BREAKOUT_ADX_MIN)
+    if pd.isna(c['volume']) or pd.isna(c['volume_ma20']) or c['volume_ma20'] <= 0:
+        vol_ratio = 0
+    else:
+        vol_ratio = c['volume'] / c['volume_ma20']
+    atr_surge = pd.notna(c['atr_surge']) and c['atr_surge']
+    adx_ok = pd.notna(c['adx']) and c['adx'] > BREAKOUT_ADX_MIN
+    return (atr_surge and vol_ratio > BREAKOUT_VOL_RATIO and adx_ok)
 
 # ================================
 # 7. 盈亏统计函数（检查持仓是否触发止损/止盈）
@@ -412,7 +439,6 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        # 使用 use_container_width=True 替代已弃用的 use_container_width 参数
         st.dataframe(log_df.head(20), use_container_width=True, height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
@@ -453,7 +479,7 @@ try:
             if exit_info:
                 pnl_percent, reason = exit_info
                 # 扣除手续费和滑点（假设双边手续费+滑点共0.2%）
-                net_pnl = pnl_percent - 0.002  # 简化处理，可根据实际调整
+                net_pnl = pnl_percent - 0.002
                 update_stats(net_pnl)
                 # 记录平仓日志
                 pos = st.session_state.position
@@ -496,8 +522,13 @@ try:
         c5 = df_5m.iloc[-1]
         c15 = df_15m.iloc[-1]
         c1h = df_1h.iloc[-1]
-        vol_ratio = c5['volume'] / c5['volume_ma20'] if c5['volume_ma20'] > 0 else 0
-        atr_pct = c5['atr_pct']
+        
+        # 安全计算 vol_ratio
+        if pd.notna(c5['volume']) and pd.notna(c5['volume_ma20']) and c5['volume_ma20'] > 0:
+            vol_ratio = c5['volume'] / c5['volume_ma20']
+        else:
+            vol_ratio = 0
+        atr_pct = c5['atr_pct'] if pd.notna(c5['atr_pct']) else 0
         
         # 趋势强度指数（使用原始分数，避免ADX放大虚增）
         trend_strength_raw = abs(raw_trend_long - raw_trend_short)
@@ -509,8 +540,8 @@ try:
         model_gap = abs(prob_l - prob_s)
         
         # 市场状态识别
-        adx_15 = c15['adx']
-        adx_1h = c1h['adx']
+        adx_15 = c15['adx'] if pd.notna(c15['adx']) else 0
+        adx_1h = c1h['adx'] if pd.notna(c1h['adx']) else 0
         if adx_15 < 20 and adx_1h < 20:
             market_state = "RANGE"
         elif trend_strength_raw > STRONG_TREND_THRESH:
@@ -597,11 +628,15 @@ try:
             
             # 趋势同步锁绑定方向
             if candidate_dir == "LONG":
-                if not (c15['close'] > c15['ema200'] and c1h['close'] > c1h['ema200']):
+                if not (pd.notna(c15['close']) and pd.notna(c15['ema200']) and
+                        pd.notna(c1h['close']) and pd.notna(c1h['ema200']) and
+                        c15['close'] > c15['ema200'] and c1h['close'] > c1h['ema200']):
                     filter_reasons.append("大周期未支持多头趋势 (15m或1h价格低于EMA200)")
                     candidate_dir = None
             elif candidate_dir == "SHORT":
-                if not (c15['close'] < c15['ema200'] and c1h['close'] < c1h['ema200']):
+                if not (pd.notna(c15['close']) and pd.notna(c15['ema200']) and
+                        pd.notna(c1h['close']) and pd.notna(c1h['ema200']) and
+                        c15['close'] < c15['ema200'] and c1h['close'] < c1h['ema200']):
                     filter_reasons.append("大周期未支持空头趋势 (15m或1h价格高于EMA200)")
                     candidate_dir = None
             
@@ -641,7 +676,7 @@ try:
             st.success(f"🎯 **高置信度交易信号：{side}** (信心分 {final_score:.1f})")
             
             # 止损止盈计算
-            atr_raw = df_5m['atr'].iloc[-1]
+            atr_raw = df_5m['atr'].iloc[-1] if pd.notna(df_5m['atr'].iloc[-1]) else current_price * 0.001
             max_sl = current_price * 0.003   # 绝对止损上限 0.3%
             atr_sl = atr_raw * 1.5
             min_sl = current_price * MIN_SL_PCT  # 下限 0.15%
@@ -666,7 +701,7 @@ try:
         else:
             st.info("🔎 当前无符合要求的信号")
         
-        # 显示K线图（5m），使用 use_container_width 替代已弃用的 use_container_width 参数
+        # 显示K线图（5m）
         fig = go.Figure(data=[go.Candlestick(
             x=df_5m.index,
             open=df_5m['open'], high=df_5m['high'], low=df_5m['low'], close=df_5m['close']
@@ -675,4 +710,7 @@ try:
         st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
+    import traceback
     st.sidebar.error(f"系统运行异常: {e}")
+    st.sidebar.code(traceback.format_exc())
+    st.stop()
