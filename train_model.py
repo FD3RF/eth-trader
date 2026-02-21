@@ -5,108 +5,118 @@ import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+import joblib
+import os
 
 # =============================
-# 1. 核心参数 (本地极速优化)
+# 1. 核心参数与 UI
 # =============================
-SYMBOL = 'ETH/USDT:USDT'  # 适配 Bybit 永续合约
-REFRESH_MS = 1000        # 1秒极速刷新
+SYMBOL = 'ETH/USDT:USDT'  # Bybit 合约格式
+REFRESH_MS = 2000        # 2秒刷新，兼顾性能与实时性
 CIRCUIT_BREAKER_PCT = 0.005 
 
-st.set_page_config(layout="wide", page_title="ETH 100x Pro (Bybit)", page_icon="📈")
-st_autorefresh(interval=REFRESH_MS, key="bybit_monitor")
+st.set_page_config(layout="wide", page_title="ETH 100x AI (Bybit)", page_icon="🤖")
+st_autorefresh(interval=REFRESH_MS, key="bybit_ai_update")
 
 # =============================
-# 2. 交易所初始化 (切换至 Bybit)
+# 2. 交易所与模型加载
 # =============================
 @st.cache_resource
-def get_exchange():
-    return ccxt.bybit({
+def init_system():
+    # 初始化交易所
+    exch = ccxt.bybit({
         'enableRateLimit': True,
-        'options': {'defaultType': 'linear'} # 线性合约
-        # 如果依然无法连接，可在此处添加本地代理：
-        # 'proxies': {'http': 'http://127.0.0.1:7890', 'https': 'http://127.0.0.1:7890'}
+        'options': {'defaultType': 'linear'}
     })
+    
+    # 加载 AI 模型
+    model = None
+    if os.path.exists('eth_ai_model.pkl'):
+        model = joblib.load('eth_ai_model.pkl')
+    return exch, model
 
-exchange = get_exchange()
+exchange, ai_model = init_system()
 
+# 状态管理
 if 'last_price' not in st.session_state: st.session_state.last_price = 0
 if 'system_halted' not in st.session_state: st.session_state.system_halted = False
 
 # =============================
-# 3. 核心算法 (同步 train_model.py 指标)
+# 3. 数据处理与 AI 预测
 # =============================
-def get_analysis():
-    # 获取 5m 数据进行实时预测
+def get_latest_analysis():
+    # 获取 5m 数据
     ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe='5m', limit=100)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
-    # 匹配 train_model.py 中的指标计算
+    # 计算特征 (必须与 train_model.py 保持高度一致)
     df['rsi'] = ta.rsi(df['close'], length=14)
     df['ma20'] = ta.sma(df['close'], length=20)
     df['ma60'] = ta.sma(df['close'], length=60)
     macd = ta.macd(df['close'])
     df['hist'] = macd['MACDh_12_26_9']
-    df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
+    df['adx'] = ta.adx(df['high'], df['low'], df['close'])['ADX_14']
     
-    return df
+    # 为 AI 准备最新的特征向量
+    features = df[['rsi', 'ma20', 'ma60', 'hist', 'adx']].tail(1)
+    
+    prediction = None
+    if ai_model:
+        # 假设模型输出 1 为看涨，0 为看平/跌
+        prediction = ai_model.predict(features)[0]
+        
+    return df, prediction
 
 # =============================
-# 4. 界面渲染
+# 4. 实时看板渲染
 # =============================
-st.title("🛡️ ETH 100x Bybit Pro 监控系统")
+st.title("🤖 ETH 100x AI 智能作战系统 (Bybit 版)")
 
 if st.sidebar.button("🔌 重置系统"):
     st.session_state.system_halted = False
     st.session_state.last_price = 0
 
 try:
-    # 实时价格与熔断检测
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
     
+    # 熔断监测
     if st.session_state.last_price != 0:
         change = abs(current_price - st.session_state.last_price) / st.session_state.last_price
         if change > CIRCUIT_BREAKER_PCT:
             st.session_state.system_halted = True
-    
     st.session_state.last_price = current_price
 
     if st.session_state.system_halted:
-        st.error(f"🚨 触发熔断保护！检测到波动异常。")
+        st.error(f"🚨 触发熔断保护！检测到异常瞬间波动。")
     else:
-        # 数据分析
-        df = get_analysis()
-        last = df.iloc[-1]
+        # 获取分析数据
+        df, pred = get_latest_analysis()
+        last_row = df.iloc[-1]
         
-        # 信号逻辑 (基于你训练脚本的特征)
-        score = 0
-        if last['close'] > last['ma20']: score += 25
-        if last['hist'] > 0: score += 25
-        if last['adx'] > 25: score += 25
-        if 45 < last['rsi'] < 65: score += 25
+        # 状态展示
+        c1, c2, c3 = st.columns(3)
+        c1.metric("ETH Bybit Price", f"${current_price}")
+        c2.metric("AI Model Status", "ACTIVE ✅" if ai_model else "INDICATOR ONLY ⚠️")
+        c3.metric("Trend Strength (ADX)", f"{round(last_row['adx'], 1)}")
 
-        # 布局展示
-        col1, col2, col3 = st.columns(3)
-        col1.metric("ETH Price (Bybit)", f"${current_price}")
-        col2.metric("Trend Score", f"{score} pt")
-        col3.metric("RSI (14)", f"{round(last['rsi'], 2)}")
-
-        # 信号预警
-        if score >= 75:
-            st.success("🎯 **建议方向：LONG (多)**")
-        elif score <= 25:
-            st.error("🎯 **建议方向：SHORT (空)**")
+        # 核心信号区
+        st.divider()
+        if pred == 1:
+            st.success("🎯 **AI 预测信号：看涨 (LONG)**")
+            st.balloons()
+        elif pred == 0:
+            st.error("🎯 **AI 预测信号：看跌 (SHORT)**")
         else:
-            st.info("📊 市场震荡中，等待高强度动能...")
+            st.info("📊 AI 正在观察市场结构，暂无高置信度预测...")
 
-        # K线图
+        # 可视化
         fig = go.Figure(data=[go.Candlestick(
             x=pd.to_datetime(df['timestamp'], unit='ms'),
             open=df['open'], high=df['high'], low=df['low'], close=df['close']
         )])
-        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
+        fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.error(f"⚠️ 连接异常: {e}")
+    st.error(f"连接或预测异常: {e}")
