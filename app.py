@@ -43,14 +43,14 @@ TREND_WEIGHT = 0.5
 MOMENTUM_WEIGHT = 0.3
 MODEL_WEIGHT = 0.2
 
-# 波动率过滤：ATR百分比 < 0.25% 时禁止交易
-MIN_ATR_PCT = 0.0025
+# 波动率过滤：ATR百分比 < 0.15% 时禁止交易（原为0.25%）
+MIN_ATR_PCT = 0.0015
 
 # 多空信心分最小差值，低于此值不交易
 MIN_SCORE_GAP = 10
 
-# 成交量放大倍数要求
-VOLUME_RATIO_MIN = 1.2
+# 成交量放大倍数要求（原为1.2，现放宽至1.0）
+VOLUME_RATIO_MIN = 1.0
 
 # 模型概率方向确认门槛（低于此值即使最终分够也不交易）
 MODEL_DIRECTION_MIN = 55  # 55%
@@ -374,14 +374,15 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
     return prob_l, prob_s
 
 def detect_momentum_decay(df_5m):
-    """检测动量是否衰减：MACD连续3根下降"""
-    if len(df_5m) < 4:
+    """检测动量是否衰减：MACD连续4根下降（原为3根）"""
+    if len(df_5m) < 5:
         return False
-    macd_vals = df_5m['macd'].iloc[-4:].values
+    macd_vals = df_5m['macd'].iloc[-5:].values
     # 确保所有值都不是NaN
     if any(pd.isna(v) for v in macd_vals):
         return False
-    return (macd_vals[3] < macd_vals[2] and
+    return (macd_vals[4] < macd_vals[3] and
+            macd_vals[3] < macd_vals[2] and
             macd_vals[2] < macd_vals[1] and
             macd_vals[1] < macd_vals[0])
 
