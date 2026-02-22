@@ -181,16 +181,17 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14)
     df_5m["ma20"] = ta.sma(df_5m["close"], length=20)
     df_5m["ma60"] = ta.sma(df_5m["close"], length=60)
-    macd = ta.macd(df_5m["close"])
-    df_5m["macd"] = macd["MACD_12_26_9"]
-    df_5m["macd_signal"] = macd["MACDs_12_26_9"]   # 使用真正的信号线
+    # 调整MACD参数为更灵敏的 (10,22,8)
+    macd = ta.macd(df_5m["close"], fast=10, slow=22, signal=8)
+    df_5m["macd"] = macd["MACD_10_22_8"]
+    df_5m["macd_signal"] = macd["MACDs_10_22_8"]
     df_5m["atr"] = ta.atr(df_5m["high"], df_5m["low"], df_5m["close"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["close"]
     df_5m["adx"] = ta.adx(df_5m["high"], df_5m["low"], df_5m["close"], length=14)["ADX_14"]
     
-    # 动量核所需指标
-    df_5m["ema9"] = ta.ema(df_5m["close"], length=9)
-    df_5m["ema21"] = ta.ema(df_5m["close"], length=21)
+    # 动量核所需指标（调整为更敏感的EMA5和EMA20）
+    df_5m["ema5"] = ta.ema(df_5m["close"], length=5)
+    df_5m["ema20"] = ta.ema(df_5m["close"], length=20)
     vwap = ta.vwap(df_5m["high"], df_5m["low"], df_5m["close"], df_5m["volume"])
     df_5m["VWAP"] = vwap
     df_5m["volume_ma20"] = ta.sma(df_5m["volume"], length=20)
@@ -303,9 +304,9 @@ def compute_momentum_score(df_5m):
     long_score = 0
     short_score = 0
 
-    # EMA9 vs EMA21 (30分)
-    if pd.notna(c['ema9']) and pd.notna(c['ema21']):
-        if c['ema9'] > c['ema21']:
+    # EMA5 vs EMA20 (30分)
+    if pd.notna(c['ema5']) and pd.notna(c['ema20']):
+        if c['ema5'] > c['ema20']:
             long_score += 30
         else:
             short_score += 30
@@ -325,7 +326,7 @@ def compute_momentum_score(df_5m):
 
     # ATR扩张定向增强（只增强当前动量方向）
     if pd.notna(c['atr_surge']) and c['atr_surge']:
-        if pd.notna(c['ema9']) and pd.notna(c['ema21']) and c['ema9'] > c['ema21']:
+        if pd.notna(c['ema5']) and pd.notna(c['ema20']) and c['ema5'] > c['ema20']:
             long_score += 25
         else:
             short_score += 25
@@ -659,13 +660,32 @@ try:
         elif not direction and st.session_state.last_signal_candle != current_candle_time:
             st.session_state.active_signal = None
         
-        # 顶部仪表盘
+        # --- UI 增强：信号强度条和方向图标 ---
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ETH 实时价", f"${current_price}")
         col2.metric("趋势核 (多/空)", f"{trend_long}/{trend_short}")
         col3.metric("动量核 (多/空)", f"{mom_long}/{mom_short}")
         col4.metric("模型 (多/空)", f"{prob_l:.0f}%/{prob_s:.0f}%")
-        col5.metric("最终信心", f"{final_long:.0f}/{final_short:.0f}")
+        # 最终信心分带方向图标和颜色
+        if final_long > final_short:
+            final_text = f"🟢 {final_long:.0f} ▲ / {final_short:.0f}"
+        elif final_short > final_long:
+            final_text = f"🔴 {final_long:.0f} / {final_short:.0f} ▼"
+        else:
+            final_text = f"⚪ {final_long:.0f} / {final_short:.0f} ●"
+        col5.markdown(f"**最终信心**<br><span style='font-size:1.2rem;'>{final_text}</span>", unsafe_allow_html=True)
+        
+        # 动态强度条
+        strength = abs(final_long - final_short)
+        direction = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
+        bar_color = "#4CAF50" if direction == "LONG" else "#F44336" if direction == "SHORT" else "#9E9E9E"
+        st.markdown(f"""
+        <div style="width:100%; background-color:#ddd; border-radius:5px; margin-top:10px; margin-bottom:10px;">
+            <div style="width:{strength}%; background-color:{bar_color}; border-radius:5px; padding:2px; text-align:center; color:white;">
+                {direction} {strength:.0f}%
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
         # 显示过滤状态
         if filter_reasons:
