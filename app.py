@@ -468,8 +468,8 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        # 替换 use_container_width 为 width 以消除弃用警告
-        st.dataframe(log_df.head(20), width=2048, height=350)
+        # 替换 use_container_width 为 width='stretch' 以消除弃用警告
+        st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
             st.rerun()
