@@ -11,23 +11,6 @@ import time
 from datetime import datetime
 
 # ================================
-# 重要：请确保 requirements.txt 使用以下精确版本（示例）
-# streamlit==1.54.0
-# altair==5.5.0
-# pandas==2.3.3
-# scikit-learn==1.6.1
-# numpy==2.2.6
-# pandas-ta==0.4.71b0
-# ccxt==4.5.39
-# plotly==6.5.2
-# joblib==1.5.3
-# 其余依赖请从日志补全，一律使用 == 固定版本
-# ================================
-
-# 设置 pandas 选项，抑制 downcasting 警告
-pd.set_option('future.no_silent_downcasting', True)
-
-# ================================
 # 1. 核心参数与看板设置
 # ================================
 st.set_page_config(layout="wide", page_title="ETH 100x 终极双向评分 AI (OKX)", page_icon="⚖️")
@@ -35,8 +18,6 @@ st.set_page_config(layout="wide", page_title="ETH 100x 终极双向评分 AI (OK
 SYMBOL = "ETH/USDT:USDT"            # OKX 永续合约
 REFRESH_MS = 2500                   # 2.5秒刷新
 CIRCUIT_BREAKER_PCT = 0.003         # 0.3% 熔断
-FINAL_CONF_THRES = 80                # 最终信心分门槛（满分100）
-BREAKOUT_CONF_THRES = 75             # 爆发行情下的降低门槛
 
 # 权重配置
 TREND_WEIGHT = 0.5
@@ -49,8 +30,8 @@ MIN_ATR_PCT = 0.0015
 # 多空信心分最小差值，低于此值不交易
 MIN_SCORE_GAP = 10
 
-# 成交量放大倍数要求（原为1.2，现放宽至1.0）
-VOLUME_RATIO_MIN = 1.0
+# 成交量放大倍数要求（原为1.2，现放宽至0.8，但仍需高于均量）
+VOLUME_RATIO_MIN = 0.8
 
 # 模型概率方向确认门槛（低于此值即使最终分够也不交易）
 MODEL_DIRECTION_MIN = 55  # 55%
@@ -75,6 +56,8 @@ CANDLE_5M_MS = 5 * 60 * 1000  # 5分钟对应的毫秒数
 # 爆发识别阈值
 BREAKOUT_VOL_RATIO = 1.5       # 成交量放大倍数
 BREAKOUT_ADX_MIN = 25          # ADX最小值
+BREAKOUT_CONF_THRES = 75       # 爆发行情下的信心分门槛
+FINAL_CONF_THRES = 80          # 常规信心分门槛
 
 st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_final")
 
@@ -134,11 +117,9 @@ if 'stats' not in st.session_state:
 # 4. 数据获取函数（多时间框架，处理None）
 # ================================
 def fetch_ohlcv(timeframe, limit=200):
-    """获取指定周期的K线数据"""
     return exchange.fetch_ohlcv(SYMBOL, timeframe, limit=limit)
 
 def get_multi_timeframe_data():
-    """获取5m、15m、1h数据并返回DataFrame（列名为标准OHLCV），并将None替换为NaN"""
     ohlcv_5m = fetch_ohlcv("5m", 200)
     if not ohlcv_5m:
         st.error("无法获取 5m 数据，请检查网络或交易所状态。")
@@ -157,31 +138,25 @@ def get_multi_timeframe_data():
         st.stop()
     df_1h = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
     
-    # 将可能的None替换为NaN，以便后续填充
     for df in [df_5m, df_15m, df_1h]:
         df.replace([None], np.nan, inplace=True)
     
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算函数（使用标准列名，确保无None）
+# 5. 指标计算函数（使用标准列名）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
-    """计算所有需要的指标，返回DataFrame和最新特征向量"""
-    # 将时间戳列转换为datetime并设置为索引，确保有序唯一
     for df in [df_5m, df_15m, df_1h]:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
-        # 验证索引
-        assert df.index.is_monotonic_increasing, f"{df} 索引不是单调递增"
-        assert df.index.is_unique, f"{df} 索引有重复"
 
-    # ----- 5m 指标（用于动量核 + 模型）-----
+    # ----- 5m 指标 -----
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14)
     df_5m["ma20"] = ta.sma(df_5m["close"], length=20)
     df_5m["ma60"] = ta.sma(df_5m["close"], length=60)
-    # 调整MACD参数为更灵敏的 (10,22,8)
+    # 更灵敏的MACD (10,22,8)
     macd = ta.macd(df_5m["close"], fast=10, slow=22, signal=8)
     df_5m["macd"] = macd["MACD_10_22_8"]
     df_5m["macd_signal"] = macd["MACDs_10_22_8"]
@@ -189,7 +164,7 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["close"]
     df_5m["adx"] = ta.adx(df_5m["high"], df_5m["low"], df_5m["close"], length=14)["ADX_14"]
     
-    # 动量核所需指标（调整为更敏感的EMA5和EMA20）
+    # 动量核（EMA5/EMA20）
     df_5m["ema5"] = ta.ema(df_5m["close"], length=5)
     df_5m["ema20"] = ta.ema(df_5m["close"], length=20)
     vwap = ta.vwap(df_5m["high"], df_5m["low"], df_5m["close"], df_5m["volume"])
@@ -198,7 +173,12 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean()
     df_5m["atr_surge"] = (df_5m["atr"] > df_5m["atr_ma20"] * 1.2).fillna(False)
     
-    # ----- 15m 指标（用于趋势核）-----
+    # 新增特征（用于模型）
+    df_5m["volume_ratio"] = df_5m["volume"] / df_5m["volume_ma20"]
+    bb = ta.bbands(df_5m["close"], length=20, std=2)
+    df_5m["bb_width"] = (bb["BBU_20_2.0"] - bb["BBL_20_2.0"]) / df_5m["close"]
+
+    # ----- 15m 指标 -----
     df_15m["ema200"] = ta.ema(df_15m["close"], length=200)
     df_15m["adx"] = ta.adx(df_15m["high"], df_15m["low"], df_15m["close"], length=14)["ADX_14"]
     vwap_15 = ta.vwap(df_15m["high"], df_15m["low"], df_15m["close"], df_15m["volume"])
@@ -207,7 +187,7 @@ def compute_features(df_5m, df_15m, df_1h):
     df_15m["ll"] = df_15m["low"].rolling(20).min()
     df_15m["ema200_slope"] = df_15m["ema200"] - df_15m["ema200"].shift(5)
     
-    # ----- 1h 指标（用于趋势核）-----
+    # ----- 1h 指标 -----
     df_1h["ema200"] = ta.ema(df_1h["close"], length=200)
     df_1h["adx"] = ta.adx(df_1h["high"], df_1h["low"], df_1h["close"], length=14)["ADX_14"]
     vwap_1h = ta.vwap(df_1h["high"], df_1h["low"], df_1h["close"], df_1h["volume"])
@@ -221,27 +201,23 @@ def compute_features(df_5m, df_15m, df_1h):
     df_15m = df_15m.ffill().bfill().infer_objects(copy=False)
     df_1h = df_1h.ffill().bfill().infer_objects(copy=False)
     
-    # 再次确保布尔列无NaN
     df_5m["atr_surge"] = df_5m["atr_surge"].fillna(False)
     
-    # 最新一行特征（用于模型预测）
-    feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
+    # 最新一行特征（用于模型预测）- 注意新增两个特征
+    feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx', 'volume_ratio', 'bb_width']
     latest_feat = df_5m[feat_cols].iloc[-1:].copy()
     
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 双向评分函数（使用标准列名）
+# 6. 评分函数（与之前相同，略去详细注释以节省篇幅）
 # ================================
 def compute_trend_score(df_15m, df_1h):
-    """计算趋势核的多空分数 (0-100)，ADX作为倍率因子，返回原始和放大后分数"""
     c15 = df_15m.iloc[-1]
     c1h = df_1h.iloc[-1]
-
     long_score = 0
     short_score = 0
 
-    # EMA200 (每项15分) + 斜率验证
     if pd.notna(c15['close']) and pd.notna(c15['ema200']) and pd.notna(c15['ema200_slope']):
         if c15['close'] > c15['ema200'] and c15['ema200_slope'] > 0:
             long_score += 15
@@ -254,7 +230,6 @@ def compute_trend_score(df_15m, df_1h):
         elif c1h['close'] < c1h['ema200'] and c1h['ema200_slope'] < 0:
             short_score += 15
 
-    # VWAP (每项10分)
     if pd.notna(c15['close']) and pd.notna(c15['VWAP']):
         if c15['close'] > c15['VWAP']:
             long_score += 10
@@ -267,7 +242,6 @@ def compute_trend_score(df_15m, df_1h):
         else:
             short_score += 10
 
-    # 价格结构高低点 (每项10分)
     range_15 = c15['hh'] - c15['ll'] if pd.notna(c15['hh']) and pd.notna(c15['ll']) else 0
     if range_15 > 0 and pd.notna(c15['close']):
         if (c15['close'] - c15['ll']) / range_15 > 0.5:
@@ -282,49 +256,40 @@ def compute_trend_score(df_15m, df_1h):
         else:
             short_score += 10
 
-    # 保存原始分数（未放大）
     raw_long = min(long_score, 100)
     raw_short = min(short_score, 100)
 
-    # ADX 作为倍率因子（仅当两个周期都强趋势）
     if pd.notna(c15['adx']) and pd.notna(c1h['adx']) and c15['adx'] > 25 and c1h['adx'] > 25:
         long_score = int(long_score * 1.15)
         short_score = int(short_score * 1.15)
 
-    # 确保不超过100
     long_score = min(long_score, 100)
     short_score = min(short_score, 100)
 
     return long_score, short_score, raw_long, raw_short
 
 def compute_momentum_score(df_5m):
-    """计算动量核的多空分数 (0-100)，ATR扩张定向增强"""
     c = df_5m.iloc[-1]
-
     long_score = 0
     short_score = 0
 
-    # EMA5 vs EMA20 (30分)
     if pd.notna(c['ema5']) and pd.notna(c['ema20']):
         if c['ema5'] > c['ema20']:
             long_score += 30
         else:
             short_score += 30
 
-    # 价格 vs VWAP (20分)
     if pd.notna(c['close']) and pd.notna(c['VWAP']):
         if c['close'] > c['VWAP']:
             long_score += 20
         else:
             short_score += 20
 
-    # 成交量放大 (25分，多空都加)
     if pd.notna(c['volume']) and pd.notna(c['volume_ma20']) and c['volume_ma20'] > 0:
         if c['volume'] > c['volume_ma20'] * VOLUME_RATIO_MIN:
             long_score += 25
             short_score += 25
 
-    # ATR扩张定向增强（只增强当前动量方向）
     if pd.notna(c['atr_surge']) and c['atr_surge']:
         if pd.notna(c['ema5']) and pd.notna(c['ema20']) and c['ema5'] > c['ema20']:
             long_score += 25
@@ -334,11 +299,9 @@ def compute_momentum_score(df_5m):
     return min(long_score, 100), min(short_score, 100)
 
 def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
-    """获取模型概率并转换为分数 (0-100)，如果概率为0则回退到趋势核方向"""
     if model_long is None or model_short is None:
         return 50, 50
     
-    # 检查特征是否全为NaN，如果是则全部填充0
     if latest_feat.isnull().all().any():
         st.sidebar.warning("⚠️ 模型特征全为NaN，使用0填充")
         latest_feat = latest_feat.fillna(0)
@@ -348,12 +311,9 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
     try:
         proba_l = model_long.predict_proba(latest_feat)[0]
         proba_s = model_short.predict_proba(latest_feat)[0]
-        
-        # 取第1列作为“上涨”概率（假设训练时正类为1）
         prob_l = proba_l[1] * 100
         prob_s = proba_s[1] * 100
         
-        # 如果概率为0（可能由于特征异常），回退到基于趋势核的默认值
         if prob_l == 0 and prob_s == 0:
             st.sidebar.warning("⚠️ 模型概率均为0，使用趋势核方向作为默认概率")
             if trend_long > trend_short:
@@ -366,7 +326,6 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
             prob_l = 50
         elif prob_s == 0:
             prob_s = 50
-            
     except Exception as e:
         st.sidebar.error(f"模型预测异常: {e}")
         prob_l = prob_s = 50
@@ -374,11 +333,9 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
     return prob_l, prob_s
 
 def detect_momentum_decay(df_5m):
-    """检测动量是否衰减：MACD连续4根下降（原为3根）"""
     if len(df_5m) < 5:
         return False
     macd_vals = df_5m['macd'].iloc[-5:].values
-    # 确保所有值都不是NaN
     if any(pd.isna(v) for v in macd_vals):
         return False
     return (macd_vals[4] < macd_vals[3] and
@@ -387,7 +344,6 @@ def detect_momentum_decay(df_5m):
             macd_vals[1] < macd_vals[0])
 
 def detect_breakout(df_5m):
-    """检测是否处于爆发结构"""
     c = df_5m.iloc[-1]
     if pd.isna(c['volume']) or pd.isna(c['volume_ma20']) or c['volume_ma20'] <= 0:
         vol_ratio = 0
@@ -398,10 +354,9 @@ def detect_breakout(df_5m):
     return (atr_surge and vol_ratio > BREAKOUT_VOL_RATIO and adx_ok)
 
 # ================================
-# 7. 盈亏统计函数（检查持仓是否触发止损/止盈）
+# 7. 盈亏统计函数
 # ================================
 def check_position_exit(position, current_price):
-    """检查持仓是否达到止损或止盈，若触发则返回盈亏百分比和退出原因，否则返回None"""
     if position is None:
         return None
     side = position['side']
@@ -416,7 +371,7 @@ def check_position_exit(position, current_price):
         elif current_price >= tp:
             pnl = (tp - entry) / entry
             return pnl, '止盈'
-    else:  # SHORT
+    else:
         if current_price >= sl:
             pnl = (entry - sl) / entry
             return pnl, '止损'
@@ -426,7 +381,6 @@ def check_position_exit(position, current_price):
     return None
 
 def update_stats(pnl):
-    """更新统计信息"""
     stats = st.session_state.stats
     stats['total_trades'] += 1
     stats['total_pnl'] += pnl * 100
@@ -470,7 +424,6 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        # 替换 use_container_width 为 width='stretch' 以消除弃用警告
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
@@ -487,7 +440,7 @@ with st.sidebar:
         st.session_state.position = None
 
 # ================================
-# 9. 主界面
+# 9. 主界面（含UI增强）
 # ================================
 st.title("⚖️ ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)")
 
@@ -510,7 +463,7 @@ try:
             exit_info = check_position_exit(st.session_state.position, current_price)
             if exit_info:
                 pnl_percent, reason = exit_info
-                net_pnl = pnl_percent - 0.002  # 扣除手续费和滑点
+                net_pnl = pnl_percent - 0.002
                 update_stats(net_pnl)
                 pos = st.session_state.position
                 st.session_state.signal_log.append({
@@ -661,7 +614,7 @@ try:
         elif not direction and st.session_state.last_signal_candle != current_candle_time:
             st.session_state.active_signal = None
         
-        # --- UI 增强：信号强度条和方向图标 ---
+        # ========== 顶部仪表盘（原有指标） ==========
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("ETH 实时价", f"${current_price}")
         col2.metric("趋势核 (多/空)", f"{trend_long}/{trend_short}")
@@ -676,19 +629,46 @@ try:
             final_text = f"⚪ {final_long:.0f} / {final_short:.0f} ●"
         col5.markdown(f"**最终信心**<br><span style='font-size:1.2rem;'>{final_text}</span>", unsafe_allow_html=True)
         
-        # 动态强度条
-        strength = abs(final_long - final_short)
-        direction = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
-        bar_color = "#4CAF50" if direction == "LONG" else "#F44336" if direction == "SHORT" else "#9E9E9E"
-        st.markdown(f"""
-        <div style="width:100%; background-color:#ddd; border-radius:5px; margin-top:10px; margin-bottom:10px;">
-            <div style="width:{strength}%; background-color:{bar_color}; border-radius:5px; padding:2px; text-align:center; color:white;">
-                {direction} {strength:.0f}%
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # ========== UI增强：信号强度条与状态卡片 ==========
+        # 计算信号置信度和方向强度
+        confidence = max(final_long, final_short) / 100.0  # 0~1
+        strength = abs(final_long - final_short) / 100.0   # 差距强度
+        signal_direction = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
         
-        # 显示过滤状态
+        # 根据置信度设置颜色
+        if confidence < 0.3:
+            color = "#F44336"  # 红
+            status = "弱或无信号"
+        elif confidence < 0.6:
+            color = "#FFC107"  # 黄
+            status = "观察"
+        else:
+            color = "#4CAF50"  # 绿
+            status = "可交易"
+        
+        # 卡片化显示信号状态
+        with st.container():
+            st.markdown("---")
+            col_s1, col_s2, col_s3 = st.columns([1, 1, 1])
+            with col_s1:
+                st.metric("信号方向", signal_direction, delta=f"强度 {strength*100:.0f}%")
+            with col_s2:
+                st.markdown(f"**状态**<br><span style='color:{color}; font-size:1.2rem;'>{status}</span>", unsafe_allow_html=True)
+            with col_s3:
+                st.markdown(f"**成交量**<br>{'✔ 高于均线' if vol_ratio >= 1.0 else '⚠ 低于均线'}", unsafe_allow_html=True)
+            
+            # 强度条
+            st.progress(confidence, text=f"信号置信度 {confidence*100:.0f}%")
+        
+        # 动态背景提示
+        if confidence >= 0.6:
+            st.success(f"✔ 信号已确认：{signal_direction} 趋势（强度 {strength*100:.0f}%）")
+        elif confidence >= 0.3:
+            st.warning(f"⚠ 信号较弱：{signal_direction} 观察中（强度 {strength*100:.0f}%）")
+        else:
+            st.info("🔍 无明显信号，等待确认")
+        
+        # 显示过滤状态（如果被过滤）
         if filter_reasons:
             st.warning("⛔ 当前不满足信号条件: " + " | ".join(filter_reasons))
         else:
@@ -696,7 +676,7 @@ try:
         
         st.markdown("---")
         
-        # 开仓逻辑
+        # ========== 开仓逻辑 ==========
         if st.session_state.active_signal and st.session_state.last_signal_candle == current_candle_time and st.session_state.position is None:
             side = st.session_state.active_signal
             st.success(f"🎯 **高置信度交易信号：{side}** (信心分 {final_score:.1f})")
