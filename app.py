@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import ccxt
 import pandas as pd
@@ -9,6 +10,7 @@ import joblib
 import os
 import time
 from datetime import datetime
+from collections import deque
 
 # ================================
 # 重要：请确保 requirements.txt 使用以下精确版本（示例）
@@ -76,10 +78,30 @@ CANDLE_5M_MS = 5 * 60 * 1000  # 5分钟对应的毫秒数
 BREAKOUT_VOL_RATIO = 1.5       # 成交量放大倍数
 BREAKOUT_ADX_MIN = 25          # ADX最小值
 
+# 日志最大条数（使用 deque 自动管理）
+MAX_LOG_ENTRIES = 200
+
+# 熔断自动恢复所需连续稳定次数
+CIRCUIT_BREAKER_RECOVERY_CHECKS = 10
+
 st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_final")
 
 # ================================
-# 2. 初始化交易所和模型
+# 2. 辅助函数：获取模型特征名称（支持多种库）
+# ================================
+def get_feature_names(model):
+    """获取模型的特征名称列表，支持 scikit-learn, XGBoost, LightGBM 等"""
+    if hasattr(model, "feature_names_in_"):
+        return list(model.feature_names_in_)
+    elif hasattr(model, "get_booster") and hasattr(model.get_booster(), "feature_names"):
+        return model.get_booster().feature_names
+    elif hasattr(model, "feature_name"):
+        return model.feature_name()
+    else:
+        return None
+
+# ================================
+# 3. 初始化交易所、模型、特征名称和标准化器
 # ================================
 @st.cache_resource
 def init_system():
@@ -87,6 +109,7 @@ def init_system():
         "enableRateLimit": True,
         "options": {"defaultType": "swap"}
     })
+
     # 加载双模型（兼容通用模型）
     m_l = joblib.load("eth_ai_model_long.pkl") if os.path.exists("eth_ai_model_long.pkl") else None
     m_s = joblib.load("eth_ai_model_short.pkl") if os.path.exists("eth_ai_model_short.pkl") else None
@@ -97,20 +120,37 @@ def init_system():
             st.sidebar.info("💡 使用通用模型镜像多空")
         else:
             st.sidebar.error("❌ 未找到任何模型文件（eth_ai_model.pkl），请上传模型至应用根目录。")
-            st.stop()   # 无模型时直接停止运行
-    return exch, m_l, m_s
+            st.stop()
 
-exchange, model_long, model_short = init_system()
+    # 加载特征名称列表（模型训练时保存，作为后备）
+    feature_names = None
+    if os.path.exists("feature_names.pkl"):
+        feature_names = joblib.load("feature_names.pkl")
+    else:
+        st.sidebar.warning("⚠️ 未找到特征名称文件 feature_names.pkl，将尝试从模型获取特征名称。")
+
+    # 加载标准化器
+    scaler = None
+    if os.path.exists("eth_scaler.pkl"):
+        scaler = joblib.load("eth_scaler.pkl")
+    else:
+        st.sidebar.warning("⚠️ 未找到标准化器 eth_scaler.pkl，模型预测可能不准确。")
+
+    return exch, m_l, m_s, feature_names, scaler
+
+exchange, model_long, model_short, feature_names, scaler = init_system()
 
 # ================================
-# 3. 状态管理
+# 4. 状态管理（使用 deque 管理日志）
 # ================================
 if 'last_price' not in st.session_state:
     st.session_state.last_price = 0
 if 'system_halted' not in st.session_state:
     st.session_state.system_halted = False
+if 'price_changes' not in st.session_state:
+    st.session_state.price_changes = []  # 用于熔断自动恢复
 if 'signal_log' not in st.session_state:
-    st.session_state.signal_log = []  # 历史信号记录（包含盈亏）
+    st.session_state.signal_log = deque(maxlen=MAX_LOG_ENTRIES)  # 历史信号记录（包含盈亏）
 if 'last_signal_time' not in st.session_state:
     st.session_state.last_signal_time = 0
 if 'active_signal' not in st.session_state:
@@ -131,27 +171,28 @@ if 'stats' not in st.session_state:
     }
 
 # ================================
-# 4. 数据获取函数（多时间框架，处理None）
+# 5. 数据获取函数（添加缓存）
 # ================================
-def fetch_ohlcv(timeframe, limit=200):
-    """获取指定周期的K线数据"""
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_ohlcv_cached(timeframe, limit=200):
+    """获取指定周期的K线数据（缓存版本）"""
     return exchange.fetch_ohlcv(SYMBOL, timeframe, limit=limit)
 
 def get_multi_timeframe_data():
     """获取5m、15m、1h数据并返回DataFrame（列名为标准OHLCV），并将None替换为NaN"""
-    ohlcv_5m = fetch_ohlcv("5m", 200)
+    ohlcv_5m = fetch_ohlcv_cached("5m", 200)
     if not ohlcv_5m:
         st.error("无法获取 5m 数据，请检查网络或交易所状态。")
         st.stop()
     df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
     
-    ohlcv_15m = fetch_ohlcv("15m", 100)
+    ohlcv_15m = fetch_ohlcv_cached("15m", 100)
     if not ohlcv_15m:
         st.error("无法获取 15m 数据，请检查网络或交易所状态。")
         st.stop()
     df_15m = pd.DataFrame(ohlcv_15m, columns=["timestamp", "open", "high", "low", "close", "volume"])
     
-    ohlcv_1h = fetch_ohlcv("1h", 100)
+    ohlcv_1h = fetch_ohlcv_cached("1h", 100)
     if not ohlcv_1h:
         st.error("无法获取 1h 数据，请检查网络或交易所状态。")
         st.stop()
@@ -164,30 +205,38 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算函数（使用标准列名，确保无None）
+# 6. 指标计算函数（使用标准列名，无未来函数，合理填充默认值）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     """计算所有需要的指标，返回DataFrame和最新特征向量"""
+    # 确保5m数据足够
+    if len(df_5m) < 60:
+        st.warning("5m K线数据不足60根，部分指标可能无法计算。")
+        # 仍继续，后续会填充
+
     # 将时间戳列转换为datetime并设置为索引，确保有序唯一
     for df in [df_5m, df_15m, df_1h]:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
-        # 验证索引
-        assert df.index.is_monotonic_increasing, f"{df} 索引不是单调递增"
-        assert df.index.is_unique, f"{df} 索引有重复"
+        # 替代断言：处理非单调或重复索引
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+        if df.index.duplicated().any():
+            df = df[~df.index.duplicated(keep='last')]
 
     # ----- 5m 指标（用于动量核 + 模型）-----
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14)
     df_5m["ma20"] = ta.sma(df_5m["close"], length=20)
     df_5m["ma60"] = ta.sma(df_5m["close"], length=60)
-    # 调整MACD参数为更灵敏的 (10,22,8)
+    # 使用位置索引获取MACD列，避免列名变化
     macd = ta.macd(df_5m["close"], fast=10, slow=22, signal=8)
-    df_5m["macd"] = macd["MACD_10_22_8"]
-    df_5m["macd_signal"] = macd["MACDs_10_22_8"]
+    df_5m["macd"] = macd.iloc[:, 0] if macd.shape[1] >= 1 else 0
+    df_5m["macd_signal"] = macd.iloc[:, 1] if macd.shape[1] >= 2 else 0
     df_5m["atr"] = ta.atr(df_5m["high"], df_5m["low"], df_5m["close"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["close"]
-    df_5m["adx"] = ta.adx(df_5m["high"], df_5m["low"], df_5m["close"], length=14)["ADX_14"]
+    adx_df = ta.adx(df_5m["high"], df_5m["low"], df_5m["close"], length=14)
+    df_5m["adx"] = adx_df.iloc[:, 2] if adx_df.shape[1] >= 3 else 20  # 默认20
     
     # 动量核所需指标（调整为更敏感的EMA5和EMA20）
     df_5m["ema5"] = ta.ema(df_5m["close"], length=5)
@@ -200,7 +249,8 @@ def compute_features(df_5m, df_15m, df_1h):
     
     # ----- 15m 指标（用于趋势核）-----
     df_15m["ema200"] = ta.ema(df_15m["close"], length=200)
-    df_15m["adx"] = ta.adx(df_15m["high"], df_15m["low"], df_15m["close"], length=14)["ADX_14"]
+    adx_15_df = ta.adx(df_15m["high"], df_15m["low"], df_15m["close"], length=14)
+    df_15m["adx"] = adx_15_df.iloc[:, 2] if adx_15_df.shape[1] >= 3 else 20
     vwap_15 = ta.vwap(df_15m["high"], df_15m["low"], df_15m["close"], df_15m["volume"])
     df_15m["VWAP"] = vwap_15
     df_15m["hh"] = df_15m["high"].rolling(20).max()
@@ -209,32 +259,93 @@ def compute_features(df_5m, df_15m, df_1h):
     
     # ----- 1h 指标（用于趋势核）-----
     df_1h["ema200"] = ta.ema(df_1h["close"], length=200)
-    df_1h["adx"] = ta.adx(df_1h["high"], df_1h["low"], df_1h["close"], length=14)["ADX_14"]
+    adx_1h_df = ta.adx(df_1h["high"], df_1h["low"], df_1h["close"], length=14)
+    df_1h["adx"] = adx_1h_df.iloc[:, 2] if adx_1h_df.shape[1] >= 3 else 20
     vwap_1h = ta.vwap(df_1h["high"], df_1h["low"], df_1h["close"], df_1h["volume"])
     df_1h["VWAP"] = vwap_1h
     df_1h["hh"] = df_1h["high"].rolling(20).max()
     df_1h["ll"] = df_1h["low"].rolling(20).min()
     df_1h["ema200_slope"] = df_1h["ema200"] - df_1h["ema200"].shift(3)
     
-    # 填充NaN
-    df_5m = df_5m.ffill().bfill().infer_objects(copy=False)
-    df_15m = df_15m.ffill().bfill().infer_objects(copy=False)
-    df_1h = df_1h.ffill().bfill().infer_objects(copy=False)
+    # 填充NaN：仅向前填充，剩余NaN用合理的默认值填充
+    # 安全获取最新收盘价（可能为空）
+    default_close_5m = df_5m['close'].iloc[-1] if len(df_5m) > 0 else 0
+    default_close_15m = df_15m['close'].iloc[-1] if len(df_15m) > 0 else 0
+    default_close_1h = df_1h['close'].iloc[-1] if len(df_1h) > 0 else 0
+
+    default_values_5m = {
+        'rsi': 50.0,
+        'adx': 20.0,
+        'macd': 0.0,
+        'macd_signal': 0.0,
+        'atr_pct': 0.0,
+        'ma20': default_close_5m,
+        'ma60': default_close_5m,
+        'ema5': default_close_5m,
+        'ema20': default_close_5m,
+        'VWAP': default_close_5m,
+        'volume_ma20': 0,
+        'atr_ma20': 0,
+        'atr': 0,
+    }
+    default_values_15m = {
+        'adx': 20.0,
+        'VWAP': default_close_15m,
+        'hh': default_close_15m,
+        'll': default_close_15m,
+        'ema200': default_close_15m,
+        'ema200_slope': 0,
+    }
+    default_values_1h = {
+        'adx': 20.0,
+        'VWAP': default_close_1h,
+        'hh': default_close_1h,
+        'll': default_close_1h,
+        'ema200': default_close_1h,
+        'ema200_slope': 0,
+    }
+
+    # 先向前填充
+    df_5m = df_5m.ffill()
+    df_15m = df_15m.ffill()
+    df_1h = df_1h.ffill()
     
-    # 再次确保布尔列无NaN
+    # 然后对剩余 NaN 用默认值填充
+    df_5m = df_5m.fillna(value=default_values_5m).infer_objects(copy=False)
+    df_15m = df_15m.fillna(value=default_values_15m).infer_objects(copy=False)
+    df_1h = df_1h.fillna(value=default_values_1h).infer_objects(copy=False)
+    
+    # 布尔列特殊处理
     df_5m["atr_surge"] = df_5m["atr_surge"].fillna(False)
     
     # 最新一行特征（用于模型预测）
-    feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
-    latest_feat = df_5m[feat_cols].iloc[-1:].copy()
+    # 首先尝试从模型获取特征名称
+    model_feature_names = get_feature_names(model_long)
+    if model_feature_names is not None:
+        # 确保所有特征列存在，缺失则填充0（但前面已填充，一般不会缺失）
+        missing = set(model_feature_names) - set(df_5m.columns)
+        for col in missing:
+            df_5m[col] = 0
+        latest_feat = df_5m[model_feature_names].iloc[-1:].copy()
+    elif feature_names is not None:
+        # 使用提供的特征名称
+        missing = set(feature_names) - set(df_5m.columns)
+        for col in missing:
+            df_5m[col] = 0
+        latest_feat = df_5m[feature_names].iloc[-1:].copy()
+    else:
+        # 默认使用7个核心特征
+        feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
+        latest_feat = df_5m[feat_cols].iloc[-1:].copy()
     
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 双向评分函数（使用标准列名）
+# 7. 双向评分函数
 # ================================
 def compute_trend_score(df_15m, df_1h):
     """计算趋势核的多空分数 (0-100)，ADX作为倍率因子，返回原始和放大后分数"""
+    # 注意：传入的 df_15m 和 df_1h 是经过 asof 对齐后的单行 DataFrame
     c15 = df_15m.iloc[-1]
     c1h = df_1h.iloc[-1]
 
@@ -298,7 +409,7 @@ def compute_trend_score(df_15m, df_1h):
     return long_score, short_score, raw_long, raw_short
 
 def compute_momentum_score(df_5m):
-    """计算动量核的多空分数 (0-100)，ATR扩张定向增强"""
+    """计算动量核的多空分数 (0-100)，ATR扩张定向增强（修正：只给当前方向加分）"""
     c = df_5m.iloc[-1]
 
     long_score = 0
@@ -318,11 +429,14 @@ def compute_momentum_score(df_5m):
         else:
             short_score += 20
 
-    # 成交量放大 (25分，多空都加)
+    # 成交量放大 (25分，只给当前方向加分)
     if pd.notna(c['volume']) and pd.notna(c['volume_ma20']) and c['volume_ma20'] > 0:
-        if c['volume'] > c['volume_ma20'] * VOLUME_RATIO_MIN:
-            long_score += 25
-            short_score += 25
+        vol_ratio = c['volume'] / c['volume_ma20']
+        if vol_ratio > VOLUME_RATIO_MIN:
+            if c['close'] > c['VWAP']:
+                long_score += 25
+            else:
+                short_score += 25
 
     # ATR扩张定向增强（只增强当前动量方向）
     if pd.notna(c['atr_surge']) and c['atr_surge']:
@@ -334,43 +448,47 @@ def compute_momentum_score(df_5m):
     return min(long_score, 100), min(short_score, 100)
 
 def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
-    """获取模型概率并转换为分数 (0-100)，如果概率为0则回退到趋势核方向"""
+    """获取模型概率并转换为分数 (0-100)，如果概率异常则回退到趋势核方向"""
     if model_long is None or model_short is None:
         return 50, 50
-    
-    # 检查特征是否全为NaN，如果是则全部填充0
-    if latest_feat.isnull().all().any():
-        st.sidebar.warning("⚠️ 模型特征全为NaN，使用0填充")
-        latest_feat = latest_feat.fillna(0)
-    else:
-        latest_feat = latest_feat.fillna(0)
-    
+
+    # 使用模型自身的特征名称进行对齐（如果有）
+    feat_for_model = latest_feat.copy()
+    model_feature_names = get_feature_names(model_long)
+    if model_feature_names is not None:
+        feat_for_model = feat_for_model.reindex(columns=model_feature_names, fill_value=0)
+
+    # 使用标准化器（如果有）
     try:
-        proba_l = model_long.predict_proba(latest_feat)[0]
-        proba_s = model_short.predict_proba(latest_feat)[0]
-        
-        # 取第1列作为“上涨”概率（假设训练时正类为1）
+        if scaler is not None:
+            feat_scaled = scaler.transform(feat_for_model)
+        else:
+            feat_scaled = feat_for_model.values
+
+        proba_l = model_long.predict_proba(feat_scaled)[0]
+        proba_s = model_short.predict_proba(feat_scaled)[0]
+
         prob_l = proba_l[1] * 100
         prob_s = proba_s[1] * 100
-        
+
         # 如果概率为0（可能由于特征异常），回退到基于趋势核的默认值
         if prob_l == 0 and prob_s == 0:
             st.sidebar.warning("⚠️ 模型概率均为0，使用趋势核方向作为默认概率")
-            if trend_long > trend_short:
-                prob_l, prob_s = 60, 40
-            elif trend_short > trend_long:
-                prob_l, prob_s = 40, 60
+            total_trend = trend_long + trend_short
+            if total_trend > 0:
+                prob_l = (trend_long / total_trend) * 100
+                prob_s = (trend_short / total_trend) * 100
             else:
-                prob_l, prob_s = 50, 50
+                prob_l = prob_s = 50
         elif prob_l == 0:
             prob_l = 50
         elif prob_s == 0:
             prob_s = 50
-            
+
     except Exception as e:
         st.sidebar.error(f"模型预测异常: {e}")
         prob_l = prob_s = 50
-        
+
     return prob_l, prob_s
 
 def detect_momentum_decay(df_5m):
@@ -397,7 +515,7 @@ def detect_breakout(df_5m):
     return (atr_surge and vol_ratio > BREAKOUT_VOL_RATIO and adx_ok)
 
 # ================================
-# 7. 盈亏统计函数（检查持仓是否触发止损/止盈）
+# 8. 盈亏统计函数（检查持仓是否触发止损/止盈）
 # ================================
 def check_position_exit(position, current_price):
     """检查持仓是否达到止损或止盈，若触发则返回盈亏百分比和退出原因，否则返回None"""
@@ -440,15 +558,24 @@ def update_stats(pnl):
     stats['last_update'] = datetime.now()
 
 # ================================
-# 8. 侧边栏（含统计面板）
+# 9. 侧边栏（含统计面板）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
-    try:
-        funding = exchange.fetch_funding_rate(SYMBOL)
-        f_rate = funding['fundingRate'] * 100
-        st.metric("OKX 资金费率", f"{f_rate:.4f}%", delta="看多成本高" if f_rate > 0.03 else "")
-    except:
+    
+    # 资金费率使用缓存，避免每次刷新都请求
+    @st.cache_data(ttl=10, show_spinner=False)
+    def get_funding_rate():
+        try:
+            funding = exchange.fetch_funding_rate(SYMBOL)
+            return funding['fundingRate'] * 100
+        except Exception as e:
+            return None
+
+    funding_rate = get_funding_rate()
+    if funding_rate is not None:
+        st.metric("OKX 资金费率", f"{funding_rate:.4f}%", delta="看多成本高" if funding_rate > 0.03 else "")
+    else:
         st.write("费率加载中...")
     
     st.markdown("---")
@@ -468,25 +595,28 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
-        log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        # 替换 use_container_width 为 width='stretch' 以消除弃用警告
+        # 将 deque 转为列表并倒序显示
+        log_list = list(st.session_state.signal_log)[::-1]
+        log_df = pd.DataFrame(log_list)
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
-            st.session_state.signal_log = []
+            st.session_state.signal_log.clear()
             st.rerun()
     else:
         st.info("等待高置信度信号...")
     
-    if st.button("🔌 重置熔断"):
+    if st.button("🔌 重置熔断（注意：冷却状态也会重置）"):
         st.session_state.system_halted = False
         st.session_state.last_price = 0
         st.session_state.last_signal_time = 0
         st.session_state.active_signal = None
         st.session_state.last_signal_candle = None
         st.session_state.position = None
+        st.session_state.price_changes = []
+        st.success("熔断已重置，冷却已清除")
 
 # ================================
-# 9. 主界面
+# 10. 主界面
 # ================================
 st.title("⚖️ ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)")
 
@@ -494,11 +624,21 @@ try:
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
     
-    # 熔断检测
+    # 熔断检测与自动恢复
     if st.session_state.last_price != 0:
         change = abs(current_price - st.session_state.last_price) / st.session_state.last_price
+        st.session_state.price_changes.append(change)
+        # 只保留最近10次变化
+        st.session_state.price_changes = st.session_state.price_changes[-CIRCUIT_BREAKER_RECOVERY_CHECKS:]
+        
         if change > CIRCUIT_BREAKER_PCT:
             st.session_state.system_halted = True
+        elif st.session_state.system_halted:
+            # 检查最近10次变化是否都小于阈值
+            if len(st.session_state.price_changes) >= CIRCUIT_BREAKER_RECOVERY_CHECKS and \
+               all(c < CIRCUIT_BREAKER_PCT for c in st.session_state.price_changes):
+                st.session_state.system_halted = False
+                st.session_state.price_changes = []
     st.session_state.last_price = current_price
 
     if st.session_state.system_halted:
@@ -526,8 +666,18 @@ try:
         df_5m, df_15m, df_1h = get_multi_timeframe_data()
         df_5m, df_15m, df_1h, latest_feat = compute_features(df_5m, df_15m, df_1h)
         
-        # 计算各项评分
-        trend_long, trend_short, raw_trend_long, raw_trend_short = compute_trend_score(df_15m, df_1h)
+        # 关键修正：使用 asof 对齐 15m/1h 数据到当前 5m 时间戳
+        current_5m_time = df_5m.index[-1]
+        # 获取不晚于当前5m时间的最近15m/1h数据
+        c15_aligned = df_15m.asof(current_5m_time)
+        c1h_aligned = df_1h.asof(current_5m_time)
+        # 创建两个临时的单行 DataFrame 用于 compute_trend_score
+        temp_15m = pd.DataFrame([c15_aligned], index=[current_5m_time])
+        temp_1h = pd.DataFrame([c1h_aligned], index=[current_5m_time])
+        # 计算趋势分数时，使用对齐后的数据
+        trend_long, trend_short, raw_trend_long, raw_trend_short = compute_trend_score(temp_15m, temp_1h)
+        
+        # 其他函数仍使用原始 df_5m、df_15m、df_1h（如动量、检测等）
         mom_long, mom_short = compute_momentum_score(df_5m)
         prob_l, prob_s = compute_model_prob(df_5m, latest_feat, trend_long, trend_short)
         
@@ -547,10 +697,10 @@ try:
                        mom_short_norm * MOMENTUM_WEIGHT +
                        prob_s_norm * MODEL_WEIGHT) * 100
         
-        # 获取最新值用于条件检查
+        # 获取最新值用于条件检查（使用对齐后的 15m/1h 数据）
         c5 = df_5m.iloc[-1]
-        c15 = df_15m.iloc[-1]
-        c1h = df_1h.iloc[-1]
+        c15 = c15_aligned
+        c1h = c1h_aligned
         
         # 安全计算 vol_ratio
         if pd.notna(c5['volume']) and pd.notna(c5['volume_ma20']) and c5['volume_ma20'] > 0:
@@ -634,7 +784,7 @@ try:
                 filter_reasons.append(f"模型概率差过小 ({model_gap:.1f} < {MODEL_GAP_MIN})")
                 candidate_dir = None
             
-            # 趋势同步锁
+            # 趋势同步锁（使用对齐后的 c15/c1h）
             if candidate_dir == "LONG":
                 if not (pd.notna(c15['close']) and pd.notna(c15['ema200']) and
                         pd.notna(c1h['close']) and pd.notna(c1h['ema200']) and
@@ -677,12 +827,12 @@ try:
         
         # 动态强度条
         strength = abs(final_long - final_short)
-        direction = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
-        bar_color = "#4CAF50" if direction == "LONG" else "#F44336" if direction == "SHORT" else "#9E9E9E"
+        direction_display = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
+        bar_color = "#4CAF50" if direction_display == "LONG" else "#F44336" if direction_display == "SHORT" else "#9E9E9E"
         st.markdown(f"""
         <div style="width:100%; background-color:#ddd; border-radius:5px; margin-top:10px; margin-bottom:10px;">
             <div style="width:{strength}%; background-color:{bar_color}; border-radius:5px; padding:2px; text-align:center; color:white;">
-                {direction} {strength:.0f}%
+                {direction_display} {strength:.0f}%
             </div>
         </div>
         """, unsafe_allow_html=True)
