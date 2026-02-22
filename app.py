@@ -183,7 +183,8 @@ def compute_features(df_5m, df_15m, df_1h):
     df_5m["ma60"] = ta.sma(df_5m["close"], length=60)
     macd = ta.macd(df_5m["close"])
     df_5m["macd"] = macd["MACD_12_26_9"]
-    df_5m["macd_signal"] = macd["MACD_12_26_9"]  # 根据训练脚本调整
+    # 关键修复：使用真正的信号线，而不是MACD线
+    df_5m["macd_signal"] = macd["MACDs_12_26_9"]   # 注意这里是 MACDs_12_26_9
     df_5m["atr"] = ta.atr(df_5m["high"], df_5m["low"], df_5m["close"], length=14)
     df_5m["atr_pct"] = df_5m["atr"] / df_5m["close"]
     df_5m["adx"] = ta.adx(df_5m["high"], df_5m["low"], df_5m["close"], length=14)["ADX_14"]
@@ -345,11 +346,21 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
         latest_feat = latest_feat.fillna(0)
     
     # 调试：显示最新特征值
-    st.sidebar.write("最新特征值：", latest_feat.iloc[0].to_dict())
+    st.sidebar.write("📊 最新特征值：", latest_feat.iloc[0].to_dict())
     
     try:
-        prob_l = model_long.predict_proba(latest_feat)[0][1] * 100
-        prob_s = model_short.predict_proba(latest_feat)[0][1] * 100
+        proba_l = model_long.predict_proba(latest_feat)[0]
+        proba_s = model_short.predict_proba(latest_feat)[0]
+        
+        # 调试：显示原始概率数组
+        st.sidebar.write(f"🔮 模型L预测概率数组: {proba_l}")
+        st.sidebar.write(f"🔮 模型S预测概率数组: {proba_s}")
+        
+        # 取第1列作为“上涨”概率（假设训练时正类为1）
+        prob_l = proba_l[1] * 100
+        prob_s = proba_s[1] * 100
+        
+        st.sidebar.write(f"📈 上涨概率 (L): {prob_l:.2f}%, 上涨概率 (S): {prob_s:.2f}%")
         
         # 如果概率为0（可能由于特征异常），回退到基于趋势核的默认值
         if prob_l == 0 and prob_s == 0:
