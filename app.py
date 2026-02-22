@@ -344,9 +344,6 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
     else:
         latest_feat = latest_feat.fillna(0)
     
-    # 调试：显示最新特征值（可注释掉以简化界面）
-    # st.sidebar.write("📊 最新特征值：", latest_feat.iloc[0].to_dict())
-    
     try:
         proba_l = model_long.predict_proba(latest_feat)[0]
         proba_s = model_short.predict_proba(latest_feat)[0]
@@ -354,8 +351,6 @@ def compute_model_prob(df_5m, latest_feat, trend_long, trend_short):
         # 取第1列作为“上涨”概率（假设训练时正类为1）
         prob_l = proba_l[1] * 100
         prob_s = proba_s[1] * 100
-        
-        # st.sidebar.write(f"📈 上涨概率 (L): {prob_l:.2f}%, 上涨概率 (S): {prob_s:.2f}%")
         
         # 如果概率为0（可能由于特征异常），回退到基于趋势核的默认值
         if prob_l == 0 and prob_s == 0:
@@ -473,7 +468,8 @@ with st.sidebar:
     st.subheader("📝 历史信号")
     if st.session_state.signal_log:
         log_df = pd.DataFrame(st.session_state.signal_log).iloc[::-1]
-        st.dataframe(log_df.head(20), use_container_width=True, height=350)
+        # 替换 use_container_width 为 width 以消除弃用警告
+        st.dataframe(log_df.head(20), width=2048, height=350)
         if st.button("清除日志"):
             st.session_state.signal_log = []
             st.rerun()
