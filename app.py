@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)
-版本：5.1 最终完美版
+版本：5.1 最终完美版 (语法修正+优化)
 包含：
 - 修复点 1-7（去重、冷却变量、类别映射、费率保护、预测去重、空值兜底、并发异常）
 - 强化学习自适应权重（持久化、归一化，并正确影响最终分数）
@@ -75,6 +75,7 @@ st_autorefresh(interval=REFRESH_MS, key="bidirectional_ai_final")
 # 2. 辅助函数
 # ================================
 def get_feature_names(model):
+    """安全获取模型的特征名称列表"""
     if hasattr(model, "feature_names_in_"):
         return list(model.feature_names_in_)
     elif hasattr(model, "get_booster") and hasattr(model.get_booster(), "feature_names"):
@@ -225,7 +226,7 @@ def get_multi_timeframe_data():
 # 6. 指标计算（与训练完全对齐）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
-    # 时间索引处理（独立处理每个df，修复点1）
+    # 时间索引处理（独立处理每个df）
     for df in [df_5m, df_15m, df_1h]:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
@@ -239,8 +240,8 @@ def compute_features(df_5m, df_15m, df_1h):
 
     # ----- 5m 指标 -----
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14).fillna(50)
-    df_5m["ma20"] = ta.sma(df_5m["close"], length=20).fillna(method='ffill').fillna(df_5m["close"])
-    df_5m["ma60"] = ta.sma(df_5m["close"], length=60).fillna(method='ffill').fillna(df_5m["close"])
+    df_5m["ma20"] = ta.sma(df_5m["close"], length=20).ffill().fillna(df_5m["close"])
+    df_5m["ma60"] = ta.sma(df_5m["close"], length=60).ffill().fillna(df_5m["close"])
 
     macd = ta.macd(df_5m["close"], fast=10, slow=22, signal=8)
     if macd is not None:
@@ -259,38 +260,38 @@ def compute_features(df_5m, df_15m, df_1h):
     else:
         df_5m["adx"] = 20
 
-    df_5m["ema5"] = ta.ema(df_5m["close"], length=5).fillna(method='ffill').fillna(df_5m["close"])
-    df_5m["ema20"] = ta.ema(df_5m["close"], length=20).fillna(method='ffill').fillna(df_5m["close"])
+    df_5m["ema5"] = ta.ema(df_5m["close"], length=5).ffill().fillna(df_5m["close"])
+    df_5m["ema20"] = ta.ema(df_5m["close"], length=20).ffill().fillna(df_5m["close"])
     vwap = ta.vwap(df_5m["high"], df_5m["low"], df_5m["close"], df_5m["volume"])
-    df_5m["VWAP"] = vwap.fillna(method='ffill').fillna(df_5m["close"])
+    df_5m["VWAP"] = vwap.ffill().fillna(df_5m["close"])
     df_5m["volume_ma20"] = ta.sma(df_5m["volume"], length=20).fillna(0)
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean().fillna(0)
     df_5m["atr_surge"] = (df_5m["atr"] > df_5m["atr_ma20"] * 1.2).fillna(False)
 
     # ----- 15m 指标 -----
-    df_15m["ema200"] = ta.ema(df_15m["close"], length=200).fillna(method='ffill').fillna(df_15m["close"])
+    df_15m["ema200"] = ta.ema(df_15m["close"], length=200).ffill().fillna(df_15m["close"])
     adx_15_df = ta.adx(df_15m["high"], df_15m["low"], df_15m["close"], length=14)
     if adx_15_df is not None:
         df_15m["adx"] = adx_15_df['ADX_14'].fillna(20)
     else:
         df_15m["adx"] = 20
     vwap_15 = ta.vwap(df_15m["high"], df_15m["low"], df_15m["close"], df_15m["volume"])
-    df_15m["VWAP"] = vwap_15.fillna(method='ffill').fillna(df_15m["close"])
-    df_15m["hh"] = df_15m["high"].rolling(20).max().fillna(method='ffill').fillna(df_15m["high"])
-    df_15m["ll"] = df_15m["low"].rolling(20).min().fillna(method='ffill').fillna(df_15m["low"])
+    df_15m["VWAP"] = vwap_15.ffill().fillna(df_15m["close"])
+    df_15m["hh"] = df_15m["high"].rolling(20).max().ffill().fillna(df_15m["high"])
+    df_15m["ll"] = df_15m["low"].rolling(20).min().ffill().fillna(df_15m["low"])
     df_15m["ema200_slope"] = (df_15m["ema200"] - df_15m["ema200"].shift(5)).fillna(0)
 
     # ----- 1h 指标 -----
-    df_1h["ema200"] = ta.ema(df_1h["close"], length=200).fillna(method='ffill').fillna(df_1h["close"])
+    df_1h["ema200"] = ta.ema(df_1h["close"], length=200).ffill().fillna(df_1h["close"])
     adx_1h_df = ta.adx(df_1h["high"], df_1h["low"], df_1h["close"], length=14)
     if adx_1h_df is not None:
         df_1h["adx"] = adx_1h_df['ADX_14'].fillna(20)
     else:
         df_1h["adx"] = 20
     vwap_1h = ta.vwap(df_1h["high"], df_1h["low"], df_1h["close"], df_1h["volume"])
-    df_1h["VWAP"] = vwap_1h.fillna(method='ffill').fillna(df_1h["close"])
-    df_1h["hh"] = df_1h["high"].rolling(20).max().fillna(method='ffill').fillna(df_1h["high"])
-    df_1h["ll"] = df_1h["low"].rolling(20).min().fillna(method='ffill').fillna(df_1h["low"])
+    df_1h["VWAP"] = vwap_1h.ffill().fillna(df_1h["close"])
+    df_1h["hh"] = df_1h["high"].rolling(20).max().ffill().fillna(df_1h["high"])
+    df_1h["ll"] = df_1h["low"].rolling(20).min().ffill().fillna(df_1h["low"])
     df_1h["ema200_slope"] = (df_1h["ema200"] - df_1h["ema200"].shift(3)).fillna(0)
 
     # 提取最新特征
@@ -909,9 +910,9 @@ try:
             st.success(f"🎯 **高置信度交易信号：{side}** (信心分 {final_score:.1f})")
             atr_raw = df_5m['atr'].iloc[-1] if pd.notna(df_5m['atr'].iloc[-1]) else current_price * 0.001
             max_sl = current_price * 0.003
-            atr_sl = atr_raw * 1.5
             min_sl = current_price * MIN_SL_PCT
-            sl_dist = max(min_sl, min(atr_sl, max_sl))
+            atr_sl = atr_raw * 1.5
+            sl_dist = np.clip(atr_sl, min_sl, max_sl)  # 止损距离在 min_sl 和 max_sl 之间
             sl = current_price - sl_dist if side == "LONG" else current_price + sl_dist
             tp = current_price + sl_dist * RR if side == "LONG" else current_price - sl_dist * RR
 
