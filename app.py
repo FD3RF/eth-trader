@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 智能做单策略终端 v5.0
-特性：
-- 杠杆倍数动态可调（1-100倍）
-- 入场引擎：多维度评分 + 动态过滤
-- 出场引擎：固定止损/止盈 + ATR/EMA/评分反转
-- 仓位管理：固定风险% + 动态缩放
-- 风控系统：连亏熔断、日亏损限额、资金费过滤
-- UI 美化：策略卡片、分项评分、实时信号日志
-- 修复所有已知错误与弃用警告
+ETH 100x 智能做单策略终端 v6.0
+UI 大优化：
+- 页面紧凑，卡片化风格（圆角、阴影、hover效果）
+- 顶部四列大卡片：实时价、标记价、资金费率、杠杆滑块
+- 策略核心四列卡片：趋势、动量、模型、信心
+- 超大信号卡（横跨全宽），多空颜色醒目
+- 侧边栏折叠次要信息，减少滚动
+- 保留全部原有业务逻辑
 """
 
 import streamlit as st
@@ -29,7 +28,118 @@ from scipy import stats
 # ================================
 # 1. 全局配置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v5.0", page_icon="📈")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v6.0", page_icon="📈")
+
+# 自定义CSS（卡片风格、颜色、布局）
+st.markdown("""
+<style>
+    /* 全局字体与背景 */
+    .stApp {
+        background-color: #0e1117;
+        color: #fafafa;
+    }
+    /* 卡片通用样式 */
+    .card {
+        background: #1e1e1e;
+        border-radius: 20px;
+        padding: 20px 18px;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+        transition: transform 0.2s, box-shadow 0.2s;
+        border: 1px solid #333;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 12px 28px rgba(0,255,157,0.15);
+    }
+    .card-label {
+        font-size: 0.85rem;
+        color: #aaa;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 6px;
+    }
+    .card-value {
+        font-size: 2.2rem;
+        font-weight: 700;
+        line-height: 1.2;
+        text-align: right;
+    }
+    .card-value-small {
+        font-size: 1.4rem;
+        font-weight: 600;
+    }
+    /* 多空颜色 */
+    .bull { color: #00ff9d; }
+    .bear { color: #ff3b5c; }
+    .neutral { color: #9aa0a6; }
+
+    /* 超大信号卡 */
+    .signal-card {
+        background: linear-gradient(145deg, #252525 0%, #1a1a1a 100%);
+        border-radius: 24px;
+        padding: 20px 30px;
+        margin: 20px 0 10px 0;
+        border-left: 10px solid;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.6);
+    }
+    .signal-card.bull { border-left-color: #00ff9d; }
+    .signal-card.bear { border-left-color: #ff3b5c; }
+    .signal-card.neutral { border-left-color: #9aa0a6; }
+
+    .signal-label {
+        font-size: 1.2rem;
+        color: #ccc;
+        font-weight: 500;
+    }
+    .signal-value {
+        font-size: 3.2rem;
+        font-weight: 800;
+    }
+
+    /* 杠杆滑块卡片内调整 */
+    .leverage-card {
+        background: #252525;
+        padding: 16px 18px;
+    }
+    .stSlider > div > div > div {
+        background: #00ff9d !important;
+    }
+
+    /* 侧边栏折叠 */
+    .css-1d391kg { padding-top: 1rem; }
+
+    /* K线图容器 */
+    .chart-container {
+        border-radius: 20px;
+        overflow: hidden;
+        border: 1px solid #333;
+        margin-top: 10px;
+    }
+
+    /* 最后更新时间小标签 */
+    .update-time {
+        text-align: right;
+        color: #666;
+        font-size: 0.75rem;
+        margin-top: 4px;
+        font-family: monospace;
+    }
+
+    /* 紧凑布局 */
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+        max-width: 1300px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 SYMBOL = "ETH/USDT:USDT"
 REFRESH_MS = 2500
@@ -86,7 +196,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v50")
+st_autorefresh(interval=REFRESH_MS, key="quant_v60")
 
 # ================================
 # 2. 初始化系统与状态
@@ -140,7 +250,7 @@ def init_session_state():
             'losses': 0,
             'current_consecutive_losses': 0,
             'max_consecutive_losses': 0,
-            'last_reset_day': today,        # 关键修复：预初始化
+            'last_reset_day': today,
             'daily_pnl': 0.0,
             'daily_trades': 0,
         },
@@ -166,7 +276,7 @@ def init_session_state():
         'use_ema_reverse': USE_EMA_REVERSE,
         'use_score_reverse': USE_SCORE_REVERSE,
         'use_dynamic_position': False,
-        'leverage': 100,                     # 新增：可调节杠杆
+        'leverage': 100,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -224,7 +334,7 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算（修复fillna弃用）
+# 5. 指标计算
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     df_5m = df_5m.copy()
@@ -450,16 +560,13 @@ class EntryEngine:
         self.config = config
 
     def generate_signal(self, df_5m, df_15m, df_1h, latest_feat, model, scaler, last_signal_candle=None, current_candle_time=None):
-        # 计算评分
         trend_long, trend_short, raw_trend_long, raw_trend_short = compute_trend_score(df_15m, df_1h)
         mom_long, mom_short = compute_momentum_score(df_5m)
         prob_long, prob_short = compute_model_prob(model, scaler, latest_feat, trend_long, trend_short)
 
-        # 加权总分
         final_long = (trend_long * self.config['trend_weight'] + mom_long * self.config['momentum_weight'] + prob_long * self.config['model_weight']) / 100
         final_short = (trend_short * self.config['trend_weight'] + mom_short * self.config['momentum_weight'] + prob_short * self.config['model_weight']) / 100
 
-        # 获取当前指标
         c5 = df_5m.iloc[-1]
         c15 = df_15m.iloc[-1] if len(df_15m) > 0 else None
         c1h = df_1h.iloc[-1] if len(df_1h) > 0 else None
@@ -467,7 +574,6 @@ class EntryEngine:
         filter_reasons = []
         trigger_details = []
 
-        # 波动率过滤
         atr_pct = c5.get('atr_pct', 0)
         if pd.isna(atr_pct):
             atr_pct = 0
@@ -476,36 +582,30 @@ class EntryEngine:
         if atr_pct > self.config['max_atr_pct']:
             filter_reasons.append(f"波动率过高 ({atr_pct:.3%})")
 
-        # 成交量过滤
         vol_ratio = c5['volume'] / c5['volume_ma20'] if pd.notna(c5.get('volume')) and pd.notna(c5.get('volume_ma20')) and c5['volume_ma20'] > 0 else 0
         if vol_ratio < self.config['volume_ratio_min']:
             filter_reasons.append(f"成交量不足 ({vol_ratio:.2f})")
         else:
             trigger_details.append(f"成交量 {vol_ratio:.2f}")
 
-        # 趋势强度
         trend_strength_raw = abs(raw_trend_long - raw_trend_short)
         if trend_strength_raw < self.config['min_trend_strength']:
             filter_reasons.append(f"趋势强度过弱 ({trend_strength_raw} < {self.config['min_trend_strength']})")
         else:
             trigger_details.append(f"趋势强度 {trend_strength_raw}")
 
-        # 多空分差
         score_gap = abs(final_long - final_short)
         if score_gap < self.config['min_score_gap']:
             filter_reasons.append(f"多空分差过小 ({score_gap:.1f} < {self.config['min_score_gap']})")
 
-        # 市场状态（ADX）
         adx_15 = c15.get('adx', 0) if c15 is not None and pd.notna(c15.get('adx')) else 0
         adx_1h = c1h.get('adx', 0) if c1h is not None and pd.notna(c1h.get('adx')) else 0
         if adx_15 < 20 and adx_1h < 20:
             filter_reasons.append("市场处于震荡期 (双ADX<20)")
 
-        # 动量衰减
         if detect_momentum_decay(df_5m):
             filter_reasons.append("动量衰减")
 
-        # 冷却检查
         cooling = False
         if last_signal_candle is not None and current_candle_time is not None:
             if last_signal_candle in df_5m.index:
@@ -516,17 +616,14 @@ class EntryEngine:
         if cooling:
             filter_reasons.append("冷却中")
 
-        # 资金费过滤
         if abs(st.session_state.latest_funding_rate) > 0.0005:
             filter_reasons.append("资金费过高")
 
-        # 构建理由字符串
         reason = " | ".join(trigger_details) if trigger_details else "无触发条件"
 
         if filter_reasons:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
-        # 最终方向判断
         if final_long >= self.config['conf_thres'] and final_long > final_short:
             return 'LONG', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
         elif final_short >= self.config['conf_thres'] and final_short > final_long:
@@ -541,29 +638,24 @@ class ExitEngine:
         self.tp_pct = tp_pct
 
     def check_exit(self, position, current_candle, current_price, df_5m, final_long, final_short):
-        # 1. 固定止损/止盈（基于K线极值）
         exit_price, reason = self._check_fixed_by_candle(position, current_candle)
         if reason:
             return exit_price, reason
 
-        # 2. 固定止损/止盈（基于盘口）
         exit_price, reason = self._check_fixed_by_ticker(position, current_price)
         if reason:
             return exit_price, reason
 
-        # 3. ATR动态止损
         if st.session_state.use_atr_stop:
             exit_price, reason = self._check_atr_stop(position, df_5m)
             if reason:
                 return exit_price, reason
 
-        # 4. EMA反转
         if st.session_state.use_ema_reverse:
             exit_price, reason = self._check_ema_reverse(position, df_5m)
             if reason:
                 return exit_price, reason
 
-        # 5. 评分反转
         if st.session_state.use_score_reverse:
             exit_price, reason = self._check_score_reverse(position, final_long, final_short)
             if reason:
@@ -733,7 +825,7 @@ def apply_liquidation():
     if pos is None:
         return
 
-    leverage = st.session_state.leverage  # 使用动态杠杆
+    leverage = st.session_state.leverage
     notional = pos['entry'] * CONTRACT_SIZE * pos['size']
     margin = notional / leverage
     loss = -margin
@@ -964,7 +1056,7 @@ def monte_carlo_test(pnl_list, initial_equity, num_simulations=1000):
     return result
 
 # ================================
-# 10. 侧边栏（新增杠杆滑块）
+# 10. 侧边栏（折叠次要信息）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -985,109 +1077,95 @@ with st.sidebar:
         st.error(f"费率获取失败: {error_msg}")
         st.session_state.latest_funding_rate = 0.0
 
-    st.markdown("---")
-    st.subheader("📈 交易统计")
-    stats = st.session_state.stats
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("总交易次数", stats['total_trades'])
-        win_rate = (stats['wins'] / max(stats['total_trades'], 1)) * 100
-        st.metric("胜率", f"{win_rate:.1f}%")
-        st.metric("最大连亏", stats['max_consecutive_losses'])
-    with col2:
-        st.metric("盈利次数", stats['wins'])
-        st.metric("亏损次数", stats['losses'])
-        total_pnl_amount = st.session_state.current_equity - st.session_state.initial_equity
-        st.metric("总盈亏", f"{total_pnl_amount:.2f} USDT")
+    with st.expander("📈 交易统计", expanded=False):
+        stats = st.session_state.stats
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("总交易次数", stats['total_trades'])
+            win_rate = (stats['wins'] / max(stats['total_trades'], 1)) * 100
+            st.metric("胜率", f"{win_rate:.1f}%")
+            st.metric("最大连亏", stats['max_consecutive_losses'])
+        with col2:
+            st.metric("盈利次数", stats['wins'])
+            st.metric("亏损次数", stats['losses'])
+            total_pnl_amount = st.session_state.current_equity - st.session_state.initial_equity
+            st.metric("总盈亏", f"{total_pnl_amount:.2f} USDT")
 
-    st.markdown("---")
-    st.subheader("📊 资金分析")
-    if len(st.session_state.equity_history) >= 2:
-        total_return = (st.session_state.current_equity - st.session_state.initial_equity) / st.session_state.initial_equity
-        st.metric("总收益率", f"{total_return*100:.2f}%")
+    with st.expander("📊 资金分析", expanded=False):
+        if len(st.session_state.equity_history) >= 2:
+            total_return = (st.session_state.current_equity - st.session_state.initial_equity) / st.session_state.initial_equity
+            st.metric("总收益率", f"{total_return*100:.2f}%")
 
-        times, equities = zip(*st.session_state.equity_history)
-        equity_series = pd.Series(equities, index=times)
-        rolling_max = equity_series.expanding().max()
-        drawdown = (equity_series - rolling_max) / rolling_max
-        max_drawdown = drawdown.min()
-        st.metric("最大回撤", f"{max_drawdown*100:.2f}%")
+            times, equities = zip(*st.session_state.equity_history)
+            equity_series = pd.Series(equities, index=times)
+            rolling_max = equity_series.expanding().max()
+            drawdown = (equity_series - rolling_max) / rolling_max
+            max_drawdown = drawdown.min()
+            st.metric("最大回撤", f"{max_drawdown*100:.2f}%")
 
-        if len(st.session_state.daily_equity) >= 2:
-            dates, eqs = zip(*st.session_state.daily_equity)
-            daily_ret = pd.Series(eqs).pct_change().dropna()
-            sharpe = daily_ret.mean() / daily_ret.std() * np.sqrt(252) if daily_ret.std() != 0 else 0
-            st.metric("夏普比率(年化)", f"{sharpe:.2f}")
+            if len(st.session_state.daily_equity) >= 2:
+                dates, eqs = zip(*st.session_state.daily_equity)
+                daily_ret = pd.Series(eqs).pct_change().dropna()
+                sharpe = daily_ret.mean() / daily_ret.std() * np.sqrt(252) if daily_ret.std() != 0 else 0
+                st.metric("夏普比率(年化)", f"{sharpe:.2f}")
 
-        if stats['losses'] > 0:
-            total_win = sum([p for p in st.session_state.pnl_list if p > 0])
-            total_loss = -sum([p for p in st.session_state.pnl_list if p < 0])
-            profit_factor = total_win / total_loss if total_loss != 0 else np.inf
-            st.metric("盈亏比", f"{profit_factor:.2f}")
+            if stats['losses'] > 0:
+                total_win = sum([p for p in st.session_state.pnl_list if p > 0])
+                total_loss = -sum([p for p in st.session_state.pnl_list if p < 0])
+                profit_factor = total_win / total_loss if total_loss != 0 else np.inf
+                st.metric("盈亏比", f"{profit_factor:.2f}")
 
-        trades = [log for log in st.session_state.signal_log if log.get('事件') == '平仓']
-        if len(trades) >= 2:
-            times = [datetime.strptime(log['时间'], "%Y-%m-%d %H:%M:%S") for log in trades]
-            days = (max(times) - min(times)).days + 1
-            trades_per_month = len(times) / days * 30 if days > 0 else 0
-            st.metric("月均交易次数", f"{trades_per_month:.1f}")
+            trades = [log for log in st.session_state.signal_log if log.get('事件') == '平仓']
+            if len(trades) >= 2:
+                times = [datetime.strptime(log['时间'], "%Y-%m-%d %H:%M:%S") for log in trades]
+                days = (max(times) - min(times)).days + 1
+                trades_per_month = len(times) / days * 30 if days > 0 else 0
+                st.metric("月均交易次数", f"{trades_per_month:.1f}")
 
-    st.markdown("---")
-    st.subheader("🎲 风险诊断")
+    with st.expander("🎲 风险诊断", expanded=False):
+        if len(st.session_state.pnl_list) >= 5:
+            metrics = compute_pnl_distribution_metrics(st.session_state.pnl_list)
+            cola, colb = st.columns(2)
+            with cola:
+                st.metric("VaR 95%", f"{metrics.get('VaR_95', 0):.2f}")
+            with colb:
+                st.metric("CVaR 95%", f"{metrics.get('CVaR_95', 0):.2f}")
+            st.metric("平均盈亏", f"{metrics.get('平均盈亏', 0):.2f}")
+            st.metric("盈亏中位数", f"{metrics.get('盈亏中位数', 0):.2f}")
 
-    if len(st.session_state.pnl_list) >= 5:
-        metrics = compute_pnl_distribution_metrics(st.session_state.pnl_list)
-        cola, colb = st.columns(2)
-        with cola:
-            st.metric("VaR 95%", f"{metrics.get('VaR_95', 0):.2f}")
-        with colb:
-            st.metric("CVaR 95%", f"{metrics.get('CVaR_95', 0):.2f}")
-        st.metric("平均盈亏", f"{metrics.get('平均盈亏', 0):.2f}")
-        st.metric("盈亏中位数", f"{metrics.get('盈亏中位数', 0):.2f}")
+            fig_dist = plot_pnl_distribution(st.session_state.pnl_list)
+            if fig_dist:
+                st.plotly_chart(fig_dist, use_container_width=True)
 
-        fig_dist = plot_pnl_distribution(st.session_state.pnl_list)
-        if fig_dist:
-            st.plotly_chart(fig_dist, use_container_width=True)
+            trade_logs = [log for log in st.session_state.signal_log if log.get('事件') == '平仓']
+            pnl_with_time = []
+            for log in trade_logs:
+                try:
+                    t = datetime.strptime(log['时间'], "%Y-%m-%d %H:%M:%S")
+                    pnl = float(log['净盈亏'])
+                    pnl_with_time.append((t, pnl))
+                except:
+                    continue
+            if len(pnl_with_time) >= 5:
+                fig_hourly = plot_hourly_pnl(pnl_with_time)
+                if fig_hourly:
+                    st.plotly_chart(fig_hourly, use_container_width=True)
 
-        trade_logs = [log for log in st.session_state.signal_log if log.get('事件') == '平仓']
-        pnl_with_time = []
-        for log in trade_logs:
-            try:
-                t = datetime.strptime(log['时间'], "%Y-%m-%d %H:%M:%S")
-                pnl = float(log['净盈亏'])
-                pnl_with_time.append((t, pnl))
-            except:
-                continue
-        if len(pnl_with_time) >= 5:
-            fig_hourly = plot_hourly_pnl(pnl_with_time)
-            if fig_hourly:
-                st.plotly_chart(fig_hourly, use_container_width=True)
+    with st.expander("⚙️ 滑点压力测试", expanded=False):
+        new_entry_slip = st.slider("入场滑点 (%)", 0.0, 0.1, st.session_state.entry_slippage*100, 0.01) / 100
+        new_exit_slip = st.slider("出场滑点 (%)", 0.0, 0.1, st.session_state.exit_slippage*100, 0.01) / 100
+        if new_entry_slip != st.session_state.entry_slippage or new_exit_slip != st.session_state.exit_slippage:
+            st.session_state.entry_slippage = new_entry_slip
+            st.session_state.exit_slippage = new_exit_slip
+            st.info("滑点已更新")
 
-    st.markdown("---")
-    st.subheader("⚙️ 杠杆调节")
-    # 新增杠杆滑块
-    new_leverage = st.slider("杠杆倍数", min_value=1, max_value=100, value=st.session_state.leverage, step=1)
-    if new_leverage != st.session_state.leverage:
-        st.session_state.leverage = new_leverage
-        st.info(f"杠杆已调整为 {new_leverage} 倍")
-
-    st.markdown("---")
-    st.subheader("⚙️ 滑点压力测试")
-    new_entry_slip = st.slider("入场滑点 (%)", 0.0, 0.1, st.session_state.entry_slippage*100, 0.01) / 100
-    new_exit_slip = st.slider("出场滑点 (%)", 0.0, 0.1, st.session_state.exit_slippage*100, 0.01) / 100
-    if new_entry_slip != st.session_state.entry_slippage or new_exit_slip != st.session_state.exit_slippage:
-        st.session_state.entry_slippage = new_entry_slip
-        st.session_state.exit_slippage = new_exit_slip
-        st.info("滑点已更新，新交易将使用新滑点。")
-
-    st.markdown("---")
-    st.subheader("🛡️ 风控设置")
-    st.session_state.consecutive_loss_limit = st.number_input("连亏熔断阈值", min_value=1, max_value=10, value=st.session_state.consecutive_loss_limit)
-    st.session_state.daily_loss_limit = st.number_input("日亏损限额 (USDT)", min_value=0, max_value=10000, value=st.session_state.daily_loss_limit, step=50)
-    st.session_state.use_atr_stop = st.checkbox("启用 ATR 动态止损", value=st.session_state.use_atr_stop)
-    st.session_state.use_ema_reverse = st.checkbox("启用 EMA 反转出场", value=st.session_state.use_ema_reverse)
-    st.session_state.use_score_reverse = st.checkbox("启用评分反转出场", value=st.session_state.use_score_reverse)
-    st.session_state.use_dynamic_position = st.checkbox("启用动态仓位缩放", value=st.session_state.use_dynamic_position)
+    with st.expander("🛡️ 风控设置", expanded=False):
+        st.session_state.consecutive_loss_limit = st.number_input("连亏熔断阈值", min_value=1, max_value=10, value=st.session_state.consecutive_loss_limit)
+        st.session_state.daily_loss_limit = st.number_input("日亏损限额 (USDT)", min_value=0, max_value=10000, value=st.session_state.daily_loss_limit, step=50)
+        st.session_state.use_atr_stop = st.checkbox("启用 ATR 动态止损", value=st.session_state.use_atr_stop)
+        st.session_state.use_ema_reverse = st.checkbox("启用 EMA 反转出场", value=st.session_state.use_ema_reverse)
+        st.session_state.use_score_reverse = st.checkbox("启用评分反转出场", value=st.session_state.use_score_reverse)
+        st.session_state.use_dynamic_position = st.checkbox("启用动态仓位缩放", value=st.session_state.use_dynamic_position)
 
     st.metric("当前连亏", stats['current_consecutive_losses'])
     st.metric("今日盈亏", f"{st.session_state.today_pnl:.2f} USDT")
@@ -1108,9 +1186,9 @@ with st.sidebar:
 
     if st.button("运行 Monte Carlo 模拟 (1000次)"):
         if len(st.session_state.pnl_list) < 10:
-            st.warning("交易笔数不足10笔，无法进行有意义的模拟")
+            st.warning("交易笔数不足10笔")
         else:
-            with st.spinner("运行 Monte Carlo 模拟..."):
+            with st.spinner("运行中..."):
                 result = monte_carlo_test(st.session_state.pnl_list, st.session_state.initial_equity)
                 if result:
                     st.json(result)
@@ -1120,7 +1198,6 @@ with st.sidebar:
     if st.session_state.signal_log:
         log_list = list(st.session_state.signal_log)[::-1]
         log_df = pd.DataFrame(log_list)
-        # 替换 use_container_width 为 width='stretch'
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log.clear()
@@ -1130,9 +1207,9 @@ with st.sidebar:
         st.info("等待交易...")
 
 # ================================
-# 11. 主循环（策略可视化）
+# 11. 主循环（卡片化 UI）
 # ================================
-st.title("📈 ETH 100x 智能做单策略终端 v5.0")
+st.title("📈 ETH 100x 智能做单策略终端 v6.0")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1147,7 +1224,6 @@ try:
     apply_funding_if_needed()
     check_liquidation(mark_price)
 
-    # 初始化模块
     entry_config = {
         'trend_weight': TREND_WEIGHT,
         'momentum_weight': MOMENTUM_WEIGHT,
@@ -1163,7 +1239,6 @@ try:
     exit_engine = ExitEngine(STOP_LOSS_PCT, TAKE_PROFIT_PCT)
     risk_engine = RiskEngine(st.session_state.consecutive_loss_limit, st.session_state.daily_loss_limit)
 
-    # 风控检查
     if not st.session_state.system_halted:
         halted, reason = risk_engine.is_halted(st.session_state.stats['current_consecutive_losses'], st.session_state.today_pnl)
         if halted:
@@ -1174,9 +1249,7 @@ try:
     new_candle = (st.session_state.last_5m_candle_time is None or
                   current_5m_candle_time > st.session_state.last_5m_candle_time)
 
-    # 持仓退出检查
     if st.session_state.position:
-        # 计算最新评分用于反转出场
         c15_aligned = df_15m.asof(current_5m_candle_time)
         c1h_aligned = df_1h.asof(current_5m_candle_time)
         temp_15m = pd.DataFrame([c15_aligned], index=[current_5m_candle_time])
@@ -1192,13 +1265,14 @@ try:
         if reason:
             record_trade(exit_price, reason)
 
-    # 新K线信号生成
     direction = None
     final_score = 0
     filter_reasons = []
     signal_reason = ""
-    scores_display = (0,0,0,0,0,0,0,0)  # 扩展为8个值
-    t_long, t_short, m_long, m_short = 0, 0, 0, 0  # 默认值
+    scores_display = (0,0,0,0,0,0,0,0)
+    t_long, t_short, m_long, m_short = 0, 0, 0, 0
+    prob_long, prob_short = 50, 50
+    final_long, final_short = 0, 0
 
     if new_candle and not st.session_state.system_halted:
         st.session_state.last_5m_candle_time = current_5m_candle_time
@@ -1208,12 +1282,10 @@ try:
             last_signal_candle=st.session_state.last_signal_candle,
             current_candle_time=current_5m_candle_time
         )
-        # scores 包含8个值
         final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short = scores
         final_score = final_long if direction == 'LONG' else final_short
         t_long, t_short, m_long, m_short = trend_long, trend_short, mom_long, mom_short
 
-        # 记录信号事件
         if direction:
             st.session_state.signal_log.append({
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1234,7 +1306,6 @@ try:
                     "过滤": " | ".join(filter_reasons)
                 })
 
-        # 更新 active_signal
         if direction and st.session_state.last_signal_candle != current_5m_candle_time:
             st.session_state.active_signal = direction
             st.session_state.last_signal_candle = current_5m_candle_time
@@ -1249,7 +1320,7 @@ try:
         })
         scores_display = scores
     else:
-        # 如果不是新K线，重新计算当前评分用于UI显示
+        # 非新K线时，重新计算当前评分用于显示
         c15_aligned = df_15m.asof(df_5m.index[-1])
         c1h_aligned = df_1h.asof(df_5m.index[-1])
         temp_15m = pd.DataFrame([c15_aligned], index=[df_5m.index[-1]])
@@ -1261,52 +1332,112 @@ try:
         final_short = (t_short * TREND_WEIGHT + m_short * MOMENTUM_WEIGHT + p_short * MODEL_WEIGHT) / 100
         prob_long, prob_short = p_long, p_short
 
-    # ========== 策略可视化卡片 ==========
-    with st.container():
-        st.markdown("### 🧠 当前策略状态")
-        col_a, col_b, col_c, col_d = st.columns(4)
-        if st.session_state.active_signal:
-            col_a.success(f"**方向**: {st.session_state.active_signal}")
-            col_b.metric("置信度", f"{final_score:.1f}%")
-            col_c.info(f"**理由**: {signal_reason}")
-            col_d.info(f"**过滤**: {'通过' if not filter_reasons else '未通过'}")
-        else:
-            col_a.info("**方向**: 无信号")
-            col_b.metric("置信度", "-")
-            col_c.info("**理由**: -")
-            col_d.info(f"**过滤**: {'通过' if not filter_reasons else '未通过: ' + ' | '.join(filter_reasons)}")
+    # ========== 卡片布局开始 ==========
 
-        # 显示分项评分
-        st.markdown(f"**趋势**: {t_long:.0f}/{t_short:.0f} | **动量**: {m_long:.0f}/{m_short:.0f} | **模型**: {prob_long:.0f}%/{prob_short:.0f}% | **当前杠杆**: {st.session_state.leverage} 倍")
-
-    # ========== 指标行 ==========
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("ETH 实时价", f"${current_price}")
-    col2.metric("标记价格", f"${mark_price:.2f}")
-    col3.metric("趋势核 (多/空)", f"{t_long:.0f}/{t_short:.0f}")
-    col4.metric("动量核 (多/空)", f"{m_long:.0f}/{m_short:.0f}")
-    col5.metric("模型 (多/空)", f"{prob_long:.0f}%/{prob_short:.0f}%")
-
-    if final_long > final_short:
-        final_text = f"🟢 {final_long:.0f} ▲ / {final_short:.0f}"
-    elif final_short > final_long:
-        final_text = f"🔴 {final_long:.0f} / {final_short:.0f} ▼"
-    else:
-        final_text = f"⚪ {final_long:.0f} / {final_short:.0f} ●"
-    st.markdown(f"**最终信心**<br><span style='font-size:1.2rem;'>{final_text}</span>", unsafe_allow_html=True)
-
-    strength = abs(final_long - final_short)
-    direction_display = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
-    bar_color = "#4CAF50" if direction_display == "LONG" else "#F44336" if direction_display == "SHORT" else "#9E9E9E"
-    st.markdown(f"""
-    <div style="width:100%; background-color:#ddd; border-radius:5px; margin-top:10px; margin-bottom:10px;">
-        <div style="width:{strength}%; background-color:{bar_color}; border-radius:5px; padding:2px; text-align:center; color:white;">
-            {direction_display} {strength:.0f}%
+    # 第一行：价格、标记价、资金费率、杠杆滑块（四列）
+    col1, col2, col3, col4 = st.columns([1,1,1,1.5])
+    with col1:
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">ETH 实时价</div>
+            <div class="card-value bull">${current_price:.2f}</div>
         </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">标记价格</div>
+            <div class="card-value neutral">${mark_price:.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col3:
+        funding_color = "bull" if st.session_state.latest_funding_rate > 0 else "bear"
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">资金费率</div>
+            <div class="card-value {funding_color}">{st.session_state.latest_funding_rate*100:.4f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        st.markdown('<div class="card leverage-card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-label">杠杆倍数</div>', unsafe_allow_html=True)
+        new_leverage = st.slider("##", min_value=1, max_value=100, value=st.session_state.leverage, step=1, label_visibility="collapsed")
+        if new_leverage != st.session_state.leverage:
+            st.session_state.leverage = new_leverage
+        risk_color = "#ff3b5c" if new_leverage > 50 else "#00ff9d" if new_leverage > 20 else "#aaa"
+        st.markdown(f'<div style="font-size: 1.8rem; font-weight:700; color:{risk_color};">{new_leverage}x</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # 第二行：趋势、动量、模型、信心（四列）
+    col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+
+    with col_t1:
+        trend_dir = "bull" if t_long > t_short else "bear" if t_short > t_long else "neutral"
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">趋势核 (多/空)</div>
+            <div class="card-value {trend_dir}">{t_long:.0f}/{t_short:.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_t2:
+        mom_dir = "bull" if m_long > m_short else "bear" if m_short > m_long else "neutral"
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">动量核 (多/空)</div>
+            <div class="card-value {mom_dir}">{m_long:.0f}/{m_short:.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_t3:
+        model_dir = "bull" if prob_long > prob_short else "bear"
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">AI 模型 (多/空)</div>
+            <div class="card-value {model_dir}">{prob_long:.0f}%/{prob_short:.0f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_t4:
+        final_dir = "bull" if final_long > final_short else "bear" if final_short > final_long else "neutral"
+        st.markdown(f"""
+        <div class="card">
+            <div class="card-label">最终信心</div>
+            <div class="card-value {final_dir}">{max(final_long, final_short):.0f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 第三行：超大信号卡（横跨）
+    if st.session_state.active_signal:
+        direction = st.session_state.active_signal
+        conf = final_score
+        arrow = "▲" if direction == "LONG" else "▼"
+        signal_class = "bull" if direction == "LONG" else "bear"
+        signal_text = f"{direction} {conf:.0f}% {arrow}"
+    else:
+        signal_class = "neutral"
+        signal_text = "无信号"
+
+    st.markdown(f"""
+    <div class="signal-card {signal_class}">
+        <span class="signal-label">当前方向</span>
+        <span class="signal-value {signal_class}">{signal_text}</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # ========== 开仓 ==========
+    # 可选：显示过滤理由
+    if filter_reasons:
+        st.warning("⛔ 当前不满足信号条件: " + " | ".join(filter_reasons))
+    else:
+        if st.session_state.system_halted:
+            st.error("⛔ 系统已熔断，暂停交易")
+        else:
+            st.success("✅ 所有基础过滤条件通过，等待高置信度信号...")
+
+    # 开仓逻辑（新K线且有信号时）
     if new_candle and st.session_state.active_signal and st.session_state.position is None and not st.session_state.system_halted:
         side = st.session_state.active_signal
         st.success(f"🎯 **执行交易信号：{side}** (信心分 {final_score:.1f})")
@@ -1345,8 +1476,8 @@ try:
     if len(st.session_state.equity_history) > 1:
         times, equities = zip(*st.session_state.equity_history)
         fig_equity = go.Figure()
-        fig_equity.add_trace(go.Scatter(x=list(times), y=list(equities), mode='lines', name='权益'))
-        fig_equity.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10))
+        fig_equity.add_trace(go.Scatter(x=list(times), y=list(equities), mode='lines', name='权益', line=dict(color='#00ff9d')))
+        fig_equity.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), paper_bgcolor='#0e1117', plot_bgcolor='#0e1117', font=dict(color='#fafafa'))
         st.plotly_chart(fig_equity, use_container_width=True)
 
     # K线图
@@ -1358,12 +1489,24 @@ try:
         high=df_5m['high'],
         low=df_5m['low'],
         close=df_5m['close'],
-        name='5m'
+        name='5m',
+        increasing_line_color='#00ff9d',
+        decreasing_line_color='#ff3b5c'
     ))
-    fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema5'], line=dict(width=1), name='EMA5'))
-    fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema20'], line=dict(width=1), name='EMA20'))
-    fig.update_layout(height=500, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+    fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema5'], line=dict(width=1, color='#ffaa00'), name='EMA5'))
+    fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema20'], line=dict(width=1, color='#3399ff'), name='EMA20'))
+    fig.update_layout(
+        height=500,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor='#0e1117',
+        plot_bgcolor='#0e1117',
+        font=dict(color='#fafafa')
+    )
     st.plotly_chart(fig, use_container_width=True)
+
+    # 最后更新时间
+    st.markdown(f'<div class="update-time">最后更新: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>', unsafe_allow_html=True)
 
 except Exception as e:
     st.error(f"系统异常: {e}")
