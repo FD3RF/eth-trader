@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 智能做单策略终端 v7.3（双策略版）
-特性：
-- 趋势市（ADX≥25）：使用原多因子评分系统（趋势+动量+AI模型）
-- 震荡市（ADX<25）：启用均值回归策略（RSI超买超卖 + 价格偏离）
-- 自动识别市场状态，动态切换策略
-- 保留原风控、UI、卡片化布局
+ETH 100x 智能做单策略终端 v7.5（最终稳定版）
+修复：
+- 浮点数比较使用 math.isclose，避免阈值临界值误判
+- 实时模式开仓严格限制同一K线一次
+- 信号更新逻辑优化，避免状态不一致
+- 增加详细日志，便于排查
 """
 
 import streamlit as st
@@ -22,120 +22,44 @@ from datetime import datetime, timedelta, timezone
 from collections import deque
 import random
 from scipy import stats
+import math  # 新增用于浮点比较
 
 # ================================
-# 1. 全局配置（激进参数 + 双策略）
+# 1. 全局配置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.3", page_icon="📈", initial_sidebar_state="collapsed")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.5", page_icon="📈", initial_sidebar_state="collapsed")
 
-# 自定义CSS（卡片风格、颜色、布局）
+# 自定义CSS（保持不变）
 st.markdown("""
 <style>
-    /* 全局字体与背景 */
-    .stApp {
-        background-color: #0e1117;
-        color: #fafafa;
-    }
-    /* 卡片通用样式 */
+    .stApp { background-color: #0e1117; color: #fafafa; }
     .card {
-        background: #1e1e1e;
-        border-radius: 20px;
-        padding: 20px 18px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.5);
-        transition: transform 0.2s, box-shadow 0.2s;
-        border: 1px solid #333;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
+        background: #1e1e1e; border-radius: 20px; padding: 20px 18px;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.5); transition: transform 0.2s, box-shadow 0.2s;
+        border: 1px solid #333; height: 100%; display: flex; flex-direction: column; justify-content: center;
     }
-    .card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 12px 28px rgba(0,255,157,0.15);
-    }
-    .card-label {
-        font-size: 0.85rem;
-        color: #aaa;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        margin-bottom: 6px;
-    }
-    .card-value {
-        font-size: 2.2rem;
-        font-weight: 700;
-        line-height: 1.2;
-        text-align: right;
-    }
-    .card-value-small {
-        font-size: 1.4rem;
-        font-weight: 600;
-    }
-    /* 多空颜色 */
+    .card:hover { transform: translateY(-5px); box-shadow: 0 12px 28px rgba(0,255,157,0.15); }
+    .card-label { font-size: 0.85rem; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .card-value { font-size: 2.2rem; font-weight: 700; line-height: 1.2; text-align: right; }
     .bull { color: #00ff9d; }
     .bear { color: #ff3b5c; }
     .neutral { color: #9aa0a6; }
-
-    /* 超大信号卡 */
     .signal-card {
         background: linear-gradient(145deg, #252525 0%, #1a1a1a 100%);
-        border-radius: 24px;
-        padding: 20px 30px;
-        margin: 20px 0 10px 0;
-        border-left: 10px solid;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+        border-radius: 24px; padding: 20px 30px; margin: 20px 0 10px 0;
+        border-left: 10px solid; display: flex; justify-content: space-between; align-items: center;
         box-shadow: 0 8px 20px rgba(0,0,0,0.6);
     }
     .signal-card.bull { border-left-color: #00ff9d; }
     .signal-card.bear { border-left-color: #ff3b5c; }
     .signal-card.neutral { border-left-color: #9aa0a6; }
-
-    .signal-label {
-        font-size: 1.2rem;
-        color: #ccc;
-        font-weight: 500;
-    }
-    .signal-value {
-        font-size: 3.2rem;
-        font-weight: 800;
-    }
-
-    /* 杠杆滑块卡片内调整 */
-    .leverage-card {
-        background: #252525;
-        padding: 16px 18px;
-    }
-    .stSlider > div > div > div {
-        background: #00ff9d !important;
-    }
-
-    /* 侧边栏折叠 */
+    .signal-label { font-size: 1.2rem; color: #ccc; font-weight: 500; }
+    .signal-value { font-size: 3.2rem; font-weight: 800; }
+    .leverage-card { background: #252525; padding: 16px 18px; }
+    .stSlider > div > div > div { background: #00ff9d !important; }
     .css-1d391kg { padding-top: 1rem; }
-
-    /* K线图容器 */
-    .chart-container {
-        border-radius: 20px;
-        overflow: hidden;
-        border: 1px solid #333;
-        margin-top: 10px;
-    }
-
-    /* 最后更新时间小标签 */
-    .update-time {
-        text-align: right;
-        color: #666;
-        font-size: 0.75rem;
-        margin-top: 4px;
-        font-family: monospace;
-    }
-
-    /* 紧凑布局 */
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-        max-width: 1300px;
-    }
+    .update-time { text-align: right; color: #666; font-size: 0.75rem; margin-top: 4px; font-family: monospace; }
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; max-width: 1300px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -179,10 +103,10 @@ MOMENTUM_WEIGHT = 0.2
 MODEL_WEIGHT = 0.7
 
 # 震荡市参数（均值回归）
-MEAN_REVERSION_RSI_OVERSOLD = 30      # RSI低于此值做多
-MEAN_REVERSION_RSI_OVERBOUGHT = 70     # RSI高于此值做空
-MEAN_REVERSION_DEVIATION = 0.02        # 价格偏离EMA20超过2%作为确认
-MEAN_REVERSION_VOLUME_MIN = 0.8        # 成交量要求（放宽）
+MEAN_REVERSION_RSI_OVERSOLD = 30
+MEAN_REVERSION_RSI_OVERBOUGHT = 70
+MEAN_REVERSION_DEVIATION = 0.02
+MEAN_REVERSION_VOLUME_MIN = 0.8
 
 # ADX阈值（用于区分趋势/震荡）
 ADX_TREND_THRESHOLD = 25
@@ -203,7 +127,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v73")
+st_autorefresh(interval=REFRESH_MS, key="quant_v75")
 
 # ================================
 # 2. 初始化系统与状态
@@ -283,9 +207,10 @@ def init_session_state():
         'use_ema_reverse': USE_EMA_REVERSE,
         'use_score_reverse': USE_SCORE_REVERSE,
         'use_dynamic_position': False,
-        'leverage': 30,                     # 默认30倍杠杆
-        # 市场状态
-        'market_state': 'trend',             # 'trend' 或 'range'
+        'leverage': 30,
+        'market_state': 'trend',
+        'real_time_entry': False,
+        'last_trade_candle': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -313,17 +238,12 @@ def get_mark_price(df_5m):
     return ema.iloc[-1] if not pd.isna(ema.iloc[-1]) else df_5m['close'].iloc[-1]
 
 def get_market_state(df_15m, df_1h):
-    """根据ADX判断市场状态：趋势或震荡"""
     c15 = df_15m.iloc[-1] if len(df_15m) > 0 else None
     c1h = df_1h.iloc[-1] if len(df_1h) > 0 else None
     adx_15 = c15.get('adx', 0) if c15 is not None and pd.notna(c15.get('adx')) else 0
     adx_1h = c1h.get('adx', 0) if c1h is not None and pd.notna(c1h.get('adx')) else 0
-    # 取两者最大值判断
     adx = max(adx_15, adx_1h)
-    if adx >= ADX_TREND_THRESHOLD:
-        return 'trend'
-    else:
-        return 'range'
+    return 'trend' if adx >= ADX_TREND_THRESHOLD else 'range'
 
 # ================================
 # 4. 数据获取
@@ -356,7 +276,7 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算（同v7.2）
+# 5. 指标计算
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     df_5m = df_5m.copy()
@@ -424,7 +344,6 @@ def compute_features(df_5m, df_15m, df_1h):
     df_1h["ll"] = df_1h["low"].rolling(20).min().ffill().fillna(df_1h["low"])
     df_1h["ema200_slope"] = (df_1h["ema200"] - df_1h["ema200"].shift(3)).fillna(0)
 
-    # 提取最新特征（用于AI模型）
     model_feature_names = get_feature_names(model)
     if model_feature_names is not None:
         latest_feat = df_5m[model_feature_names].iloc[-1:].copy()
@@ -438,7 +357,7 @@ def compute_features(df_5m, df_15m, df_1h):
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 趋势市评分函数（同v7.2）
+# 6. 评分函数
 # ================================
 def compute_trend_score(df_15m, df_1h):
     c15 = df_15m.iloc[-1]
@@ -574,11 +493,9 @@ def detect_momentum_decay(df_5m):
             macd_vals[1] < macd_vals[0])
 
 # ================================
-# 7. 双策略引擎
+# 7. 双策略引擎（使用math.isclose）
 # ================================
-
 class TrendEntryEngine:
-    """趋势市入场引擎（原多因子评分）"""
     def __init__(self, config):
         self.config = config
 
@@ -597,7 +514,6 @@ class TrendEntryEngine:
         filter_reasons = []
         trigger_details = []
 
-        # 趋势市过滤（放宽版）
         atr_pct = c5.get('atr_pct', 0)
         if pd.isna(atr_pct):
             atr_pct = 0
@@ -648,16 +564,18 @@ class TrendEntryEngine:
         if filter_reasons:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
-        if final_long * 100 >= self.config['conf_thres'] and final_long > final_short:
+        # 使用 math.isclose 避免浮点误差
+        long_conf = final_long * 100
+        short_conf = final_short * 100
+        if (math.isclose(long_conf, self.config['conf_thres'], rel_tol=1e-9) or long_conf >= self.config['conf_thres']) and final_long > final_short:
             return 'LONG', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
-        elif final_short * 100 >= self.config['conf_thres'] and final_short > final_long:
+        elif (math.isclose(short_conf, self.config['conf_thres'], rel_tol=1e-9) or short_conf >= self.config['conf_thres']) and final_short > final_long:
             return 'SHORT', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
         else:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
 
 class RangeEntryEngine:
-    """震荡市入场引擎（均值回归）"""
     def __init__(self, config):
         self.config = config
 
@@ -666,14 +584,12 @@ class RangeEntryEngine:
         filter_reasons = []
         trigger_details = []
 
-        # 基础过滤：成交量
         vol_ratio = c5['volume'] / c5['volume_ma20'] if pd.notna(c5.get('volume')) and pd.notna(c5.get('volume_ma20')) and c5['volume_ma20'] > 0 else 0
         if vol_ratio < self.config['volume_min']:
             filter_reasons.append(f"成交量不足 ({vol_ratio:.2f})")
         else:
             trigger_details.append(f"成交量 {vol_ratio:.2f}")
 
-        # 波动率过滤（可放宽）
         atr_pct = c5.get('atr_pct', 0)
         if pd.isna(atr_pct):
             atr_pct = 0
@@ -682,7 +598,6 @@ class RangeEntryEngine:
         if atr_pct > 0.05:
             filter_reasons.append(f"波动率过高 ({atr_pct:.3%})")
 
-        # 均值回归信号
         rsi = c5.get('rsi', 50)
         price = c5['close']
         ema20 = c5['ema20']
@@ -692,27 +607,24 @@ class RangeEntryEngine:
         score = 0
         reason = ""
 
-        # 超卖做多
         if rsi < self.config['rsi_oversold'] and deviation < -self.config['deviation']:
             signal = 'LONG'
-            score = (self.config['rsi_oversold'] - rsi) / self.config['rsi_oversold'] * 50 + 50  # 0-100 信心
+            score = (self.config['rsi_oversold'] - rsi) / self.config['rsi_oversold'] * 50 + 50
             reason = f"RSI超卖 ({rsi:.1f}) 价格偏离 {deviation:.2%}"
             trigger_details.append(reason)
-        # 超买做空
         elif rsi > self.config['rsi_overbought'] and deviation > self.config['deviation']:
             signal = 'SHORT'
             score = (rsi - self.config['rsi_overbought']) / (100 - self.config['rsi_overbought']) * 50 + 50
             reason = f"RSI超买 ({rsi:.1f}) 价格偏离 {deviation:.2%}"
             trigger_details.append(reason)
 
-        # 冷却检查
         cooling = False
         if last_signal_candle is not None and current_candle_time is not None:
             if last_signal_candle in df_5m.index:
                 idx_last = df_5m.index.get_loc(last_signal_candle)
                 idx_current = df_5m.index.get_loc(current_candle_time)
                 candles_since = idx_current - idx_last
-                cooling = candles_since < 1  # 震荡市冷却1根K线
+                cooling = candles_since < 1
         if cooling:
             filter_reasons.append("冷却中")
 
@@ -726,7 +638,6 @@ class RangeEntryEngine:
 
 
 class ExitEngine:
-    """出场引擎（同v7.2）"""
     def __init__(self, sl_pct, tp_pct):
         self.sl_pct = sl_pct
         self.tp_pct = tp_pct
@@ -859,7 +770,7 @@ class RiskEngine:
         return False, ""
 
 # ================================
-# 8. 开平仓函数（同v7.2）
+# 8. 开平仓函数
 # ================================
 def open_position(entry_price, side, final_score):
     entry_slip = st.session_state.entry_slippage
@@ -1055,7 +966,7 @@ def record_daily_equity_force():
             st.session_state.daily_equity.append((today, st.session_state.current_equity))
 
 # ================================
-# 9. 统计与风险分析（同v7.2）
+# 9. 统计与风险分析
 # ================================
 def compute_pnl_distribution_metrics(pnl_list):
     if len(pnl_list) < 5:
@@ -1150,7 +1061,7 @@ def monte_carlo_test(pnl_list, initial_equity, num_simulations=1000):
     return result
 
 # ================================
-# 10. 侧边栏（同v7.2，可添加双策略参数）
+# 10. 侧边栏
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -1245,6 +1156,11 @@ with st.sidebar:
                 if fig_hourly:
                     st.plotly_chart(fig_hourly, use_container_width=True)
 
+    with st.expander("⚙️ 高级设置", expanded=False):
+        st.session_state.real_time_entry = st.checkbox("实时开仓模式（不等待K线收盘）", value=st.session_state.real_time_entry)
+        if st.session_state.real_time_entry:
+            st.warning("实时模式会增加交易频率和假信号风险，请谨慎使用！")
+
     with st.expander("⚙️ 滑点压力测试", expanded=False):
         new_entry_slip = st.slider("入场滑点 (%)", 0.0, 0.1, st.session_state.entry_slippage*100, 0.01) / 100
         new_exit_slip = st.slider("出场滑点 (%)", 0.0, 0.1, st.session_state.exit_slippage*100, 0.01) / 100
@@ -1301,9 +1217,9 @@ with st.sidebar:
         st.info("等待交易...")
 
 # ================================
-# 11. 主循环（双策略切换）
+# 11. 主循环
 # ================================
-st.title("📈 ETH 100x 智能做单策略终端 v7.3 (双策略版)")
+st.title("📈 ETH 100x 智能做单策略终端 v7.5 (最终稳定版)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1314,7 +1230,6 @@ try:
     df_5m, df_15m, df_1h, latest_feat = compute_features(df_5m, df_15m, df_1h)
     mark_price = get_mark_price(df_5m)
 
-    # 判断市场状态
     market_state = get_market_state(df_15m, df_1h)
     st.session_state.market_state = market_state
 
@@ -1322,7 +1237,6 @@ try:
     apply_funding_if_needed()
     check_liquidation(mark_price)
 
-    # 初始化策略引擎
     trend_config = {
         'trend_weight': TREND_WEIGHT,
         'momentum_weight': MOMENTUM_WEIGHT,
@@ -1356,7 +1270,6 @@ try:
                   current_5m_candle_time > st.session_state.last_5m_candle_time)
 
     if st.session_state.position:
-        # 计算最新评分用于反转出场
         c15_aligned = df_15m.asof(current_5m_candle_time)
         c1h_aligned = df_1h.asof(current_5m_candle_time)
         temp_15m = pd.DataFrame([c15_aligned], index=[current_5m_candle_time])
@@ -1372,19 +1285,26 @@ try:
         if reason:
             record_trade(exit_price, reason)
 
+    # 初始化显示变量
     direction = None
     final_score = 0
     filter_reasons = []
     signal_reason = ""
-    scores_display = (0,0,0,0,0,0,0,0)
     t_long, t_short, m_long, m_short = 0, 0, 0, 0
     prob_long, prob_short = 50, 50
     final_long, final_short = 0, 0
 
-    if new_candle and not st.session_state.system_halted:
-        st.session_state.last_5m_candle_time = current_5m_candle_time
+    # 信号评估（根据模式）
+    evaluate_signal = False
+    if st.session_state.real_time_entry:
+        evaluate_signal = True  # 实时模式：每次循环都评估
+    else:
+        evaluate_signal = new_candle  # 标准模式：仅新K线评估
 
-        # 根据市场状态选择策略引擎
+    if evaluate_signal and not st.session_state.system_halted:
+        if new_candle:
+            st.session_state.last_5m_candle_time = current_5m_candle_time
+
         if market_state == 'trend':
             direction, filter_reasons, scores, signal_reason = trend_engine.generate_signal(
                 df_5m, df_15m, df_1h, latest_feat, model, scaler,
@@ -1403,46 +1323,39 @@ try:
             )
             if scores is not None:
                 final_score, _, _, _, _, _, _, _ = scores
-                # 震荡市不计算趋势动量模型评分，保留旧值
-                t_long, t_short, m_long, m_short = 0, 0, 0, 0
+                # 震荡市不更新趋势动量模型，保留显示值
+                # 但为了UI，我们可以从df_5m获取当前值
+                t_long, t_short = 0, 0
+                m_long, m_short = 0, 0
                 prob_long, prob_short = 50, 50
 
-        # 记录信号事件
+        # 更新 active_signal
         if direction:
-            st.session_state.signal_log.append({
-                "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "事件": "信号",
-                "方向": direction,
-                "置信度": f"{final_score*100:.1f}",
-                "理由": f"{market_state}市 | {signal_reason}",
-                "过滤": "无" if not filter_reasons else " | ".join(filter_reasons)
-            })
+            # 仅在实时模式或新K线时更新信号
+            if st.session_state.real_time_entry:
+                st.session_state.active_signal = direction
+                st.session_state.last_signal_candle = current_5m_candle_time
+            elif new_candle:
+                st.session_state.active_signal = direction
+                st.session_state.last_signal_candle = current_5m_candle_time
         else:
-            if filter_reasons:
-                st.session_state.signal_log.append({
-                    "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "事件": "信号",
-                    "方向": "无",
-                    "置信度": "-",
-                    "理由": f"{market_state}市 | 过滤未通过",
-                    "过滤": " | ".join(filter_reasons)
-                })
+            # 无信号时，如果是新K线则清除信号
+            if new_candle and not st.session_state.real_time_entry:
+                st.session_state.active_signal = None
 
-        if direction and st.session_state.last_signal_candle != current_5m_candle_time:
-            st.session_state.active_signal = direction
-            st.session_state.last_signal_candle = current_5m_candle_time
-        elif not direction and st.session_state.last_signal_candle != current_5m_candle_time:
-            st.session_state.active_signal = None
+        # 记录日志
+        log_entry = {
+            "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "事件": "信号",
+            "方向": direction if direction else "无",
+            "置信度": f"{final_score*100:.1f}%" if direction else "-",
+            "理由": f"{market_state}市 | {signal_reason}" if signal_reason else market_state,
+            "过滤": "无" if not filter_reasons else " | ".join(filter_reasons)
+        }
+        st.session_state.signal_log.append(log_entry)
 
-        st.session_state.prediction_history.append({
-            'time': current_5m_candle_time,
-            'final_long': final_long,
-            'final_short': final_short,
-            'price': current_price
-        })
-        scores_display = scores
     else:
-        # 非新K线时，重新计算当前评分用于显示（仅趋势指标）
+        # 非评估时刻，重新计算当前评分用于显示（仅趋势指标）
         c15_aligned = df_15m.asof(df_5m.index[-1])
         c1h_aligned = df_1h.asof(df_5m.index[-1])
         temp_15m = pd.DataFrame([c15_aligned], index=[df_5m.index[-1]])
@@ -1456,7 +1369,6 @@ try:
 
     # ========== 卡片布局开始 ==========
 
-    # 第一行：价格、标记价、资金费率、杠杆滑块（四列）
     col1, col2, col3, col4 = st.columns([1,1,1,1.5])
     with col1:
         st.markdown(f"""
@@ -1493,11 +1405,10 @@ try:
         st.markdown(f'<div style="font-size: 1.8rem; font-weight:700; color:{risk_color};">{new_leverage}x</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 市场状态显示
     state_color = "#00ff9d" if market_state == "trend" else "#ffaa00"
-    st.markdown(f"<div style='text-align:right; color:{state_color}; font-size:1rem; margin-bottom:10px;'>当前市场: {market_state.upper()}市</div>", unsafe_allow_html=True)
+    mode_text = "实时模式" if st.session_state.real_time_entry else "标准模式"
+    st.markdown(f"<div style='text-align:right; color:{state_color}; font-size:1rem; margin-bottom:10px;'>当前市场: {market_state.upper()}市 | {mode_text}</div>", unsafe_allow_html=True)
 
-    # 第二行：趋势、动量、模型、信心（四列）
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
 
     with col_t1:
@@ -1529,7 +1440,6 @@ try:
 
     with col_t4:
         final_dir = "bull" if final_long > final_short else "bear" if final_short > final_long else "neutral"
-        # 修复：乘以100显示百分比
         st.markdown(f"""
         <div class="card">
             <div class="card-label">最终信心</div>
@@ -1537,10 +1447,9 @@ try:
         </div>
         """, unsafe_allow_html=True)
 
-    # 第三行：超大信号卡（横跨）
     if st.session_state.active_signal:
         direction = st.session_state.active_signal
-        conf = final_score * 100  # 转换为百分比
+        conf = final_score * 100 if direction else 0
         arrow = "▲" if direction == "LONG" else "▼"
         signal_class = "bull" if direction == "LONG" else "bear"
         signal_text = f"{direction} {conf:.0f}% {arrow}"
@@ -1555,28 +1464,49 @@ try:
     </div>
     """, unsafe_allow_html=True)
 
-    # 可选：显示过滤理由
     if filter_reasons:
         st.warning("⛔ 当前不满足信号条件: " + " | ".join(filter_reasons))
     else:
         if st.session_state.system_halted:
             st.error("⛔ 系统已熔断，暂停交易")
         else:
-            st.success("✅ 所有基础过滤条件通过，等待高置信度信号...")
+            if st.session_state.real_time_entry:
+                st.success("✅ 实时模式：持续评估信号...")
+            else:
+                st.success("✅ 所有基础过滤条件通过，等待高置信度信号...")
 
-    # 开仓逻辑（新K线且有信号时）
-    if new_candle and st.session_state.active_signal and st.session_state.position is None and not st.session_state.system_halted:
-        side = st.session_state.active_signal
-        conf_display = final_score * 100
-        st.success(f"🎯 **执行交易信号：{side}** (信心分 {conf_display:.1f}%)")
-        actual_entry, sl, tp, size = open_position(current_price, side, final_score)
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.write(f"**入场价:** {actual_entry:.2f}")
-        sc2.write(f"**止损价:** {sl:.2f}")
-        sc3.write(f"**止盈价:** {tp:.2f}")
-        sc4.write(f"**仓位:** {size:.2f} 张")
+    # 开仓逻辑
+    can_trade = (st.session_state.active_signal is not None and 
+                 st.session_state.position is None and 
+                 not st.session_state.system_halted)
 
-    # 持仓信息展示
+    if can_trade:
+        if st.session_state.real_time_entry:
+            # 实时模式：同一K线只开一次仓
+            if st.session_state.last_trade_candle != current_5m_candle_time:
+                side = st.session_state.active_signal
+                conf_display = final_score * 100
+                st.success(f"🎯 **实时交易信号：{side}** (信心分 {conf_display:.1f}%)")
+                actual_entry, sl, tp, size = open_position(current_price, side, final_score)
+                st.session_state.last_trade_candle = current_5m_candle_time
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.write(f"**入场价:** {actual_entry:.2f}")
+                sc2.write(f"**止损价:** {sl:.2f}")
+                sc3.write(f"**止盈价:** {tp:.2f}")
+                sc4.write(f"**仓位:** {size:.2f} 张")
+        else:
+            # 标准模式：仅在新K线时开仓
+            if new_candle:
+                side = st.session_state.active_signal
+                conf_display = final_score * 100
+                st.success(f"🎯 **执行交易信号：{side}** (信心分 {conf_display:.1f}%)")
+                actual_entry, sl, tp, size = open_position(current_price, side, final_score)
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.write(f"**入场价:** {actual_entry:.2f}")
+                sc2.write(f"**止损价:** {sl:.2f}")
+                sc3.write(f"**止盈价:** {tp:.2f}")
+                sc4.write(f"**仓位:** {size:.2f} 张")
+
     if st.session_state.position:
         pos = st.session_state.position
         if pos['side'] == 'LONG':
@@ -1598,7 +1528,6 @@ try:
         )
         st.metric("预估权益", f"{display_equity:.2f} USDT")
 
-    # 资金曲线图
     st.markdown("---")
     st.subheader("💰 资金曲线 (仅平仓后权益)")
     if len(st.session_state.equity_history) > 1:
@@ -1608,7 +1537,6 @@ try:
         fig_equity.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), paper_bgcolor='#0e1117', plot_bgcolor='#0e1117', font=dict(color='#fafafa'))
         st.plotly_chart(fig_equity, use_container_width=True)
 
-    # K线图
     st.subheader("📈 K线图 (5分钟)")
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -1633,7 +1561,6 @@ try:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 最后更新时间
     st.markdown(f'<div class="update-time">最后更新: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</div>', unsafe_allow_html=True)
 
 except Exception as e:
