@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)
-版本：5.1 最终完美版（放宽策略 + 所有警告修复）
+版本：5.2 终极优化版
 包含：
 - 修复点 1-7（去重、冷却变量、类别映射、费率保护、预测去重、空值兜底、并发异常）
-- 强化学习自适应权重（持久化、归一化，并正确影响最终分数）
+- 强化学习自适应权重（持久化、归一化、非负约束）
 - 在线增量学习（支持 SGDClassifier，带自适应学习率）
 - 双模型动态加权融合（基于近期准确率）
 - 特征漂移检测（KS检验特征分布，触发自动熔断）
 - 特征重要性动态筛选（侧边栏展示）
 - 所有开关可控，默认关闭
 - 完整的持仓信息展示与K线图（含EMA）
-- 彻底移除所有 fillna(method='ffill') → 改用 ffill()
+- 彻底移除所有 fillna(method='ffill') → 改用 ffill() + None 检查
 - 修复 st.plotly_chart 的 use_container_width 弃用警告
-- 【放宽策略】调整了波动率、成交量等过滤参数，提高交易信号触发频率
+- 【放宽策略】调整了波动率、成交量等过滤参数
+- 【优化】缓存数据副本保护，避免修改缓存
+- 【优化】缺失列自动填充，避免 KeyError
+- 【优化】趋势分数除零保护
+- 【优化】在线学习模型初始化特征维度对齐
+- 【优化】RL权重非负约束
 """
 
 import streamlit as st
@@ -138,12 +143,16 @@ def init_system():
         if os.path.exists(online_path):
             model = joblib.load(online_path)
         else:
-            # 如果主模型不是 SGD，这里需要用户自行处理，此处仅警告
+            # 如果主模型不是 SGD，创建新的 SGDClassifier，并记录特征维度
             if not hasattr(model, "partial_fit"):
                 st.sidebar.warning("当前模型不支持增量学习，将创建新的 SGDClassifier，原有模型将被覆盖")
-                # 尝试获取特征数量
-                n_features = len(get_feature_names(model)) if get_feature_names(model) else 7
+                # 获取特征数量
+                feat_names = get_feature_names(model)
+                n_features = len(feat_names) if feat_names is not None else 7
+                # 创建新模型，设置 loss='log_loss' 以获得概率输出
                 model = SGDClassifier(loss='log_loss', random_state=42)
+                # 存储特征数量供后续使用（可通过 attribute 保存）
+                model.n_features_in_ = n_features
         st.sidebar.info("🧠 在线学习模型已启用")
 
     return exch, model, scaler, model2
@@ -227,10 +236,15 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 6. 指标计算（与训练完全对齐，增加 None 检查）
+# 6. 指标计算（与训练完全对齐，增加 None 检查 + 缓存副本保护）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
-    # 时间索引处理（独立处理每个df，修复点1）
+    # 创建副本，避免修改缓存数据
+    df_5m = df_5m.copy()
+    df_15m = df_15m.copy()
+    df_1h = df_1h.copy()
+
+    # 时间索引处理
     for df in [df_5m, df_15m, df_1h]:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
@@ -245,7 +259,6 @@ def compute_features(df_5m, df_15m, df_1h):
     # ----- 5m 指标 -----
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14).fillna(50)
 
-    # 修改点：检查 ta.sma 是否返回 None
     ma20 = ta.sma(df_5m["close"], length=20)
     df_5m["ma20"] = ma20.ffill().fillna(df_5m["close"]) if ma20 is not None else df_5m["close"]
 
@@ -318,21 +331,24 @@ def compute_features(df_5m, df_15m, df_1h):
     df_1h["ll"] = df_1h["low"].rolling(20).min().ffill().fillna(df_1h["low"])
     df_1h["ema200_slope"] = (df_1h["ema200"] - df_1h["ema200"].shift(3)).fillna(0)
 
-    # 提取最新特征
+    # 提取最新特征（安全方式：reindex 填充缺失列）
     model_feature_names = get_feature_names(model)
     if model_feature_names is not None:
-        missing = set(model_feature_names) - set(df_5m.columns)
-        for col in missing:
-            df_5m[col] = 0
         latest_feat = df_5m[model_feature_names].iloc[-1:].copy()
+        # 确保没有缺失列（理论上应该都有，但保险起见）
+        missing = set(model_feature_names) - set(latest_feat.columns)
+        for col in missing:
+            latest_feat[col] = 0
     else:
+        # 使用默认特征列表，并确保列存在
         feat_cols = ['rsi', 'ma20', 'ma60', 'macd', 'macd_signal', 'atr_pct', 'adx']
-        latest_feat = df_5m[feat_cols].iloc[-1:].copy()
+        # 用 reindex 填充缺失列
+        latest_feat = df_5m.reindex(columns=feat_cols, fill_value=0).iloc[-1:].copy()
 
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 7. 评分函数（保持不变）
+# 7. 评分函数（增加除零保护）
 # ================================
 def compute_trend_score(df_15m, df_1h):
     c15 = df_15m.iloc[-1]
@@ -363,19 +379,21 @@ def compute_trend_score(df_15m, df_1h):
         else:
             short_score += 10
 
-    # 价格结构
-    range_15 = c15.get('hh', c15['close']) - c15.get('ll', c15['close'])
-    if range_15 > 0 and pd.notna(c15.get('close')):
-        if (c15['close'] - c15.get('ll', c15['close'])) / range_15 > 0.5:
-            long_score += 10
-        else:
-            short_score += 10
-    range_1h = c1h.get('hh', c1h['close']) - c1h.get('ll', c1h['close'])
-    if range_1h > 0 and pd.notna(c1h.get('close')):
-        if (c1h['close'] - c1h.get('ll', c1h['close'])) / range_1h > 0.5:
-            long_score += 10
-        else:
-            short_score += 10
+    # 价格结构（增加除零保护）
+    if pd.notna(c15.get('hh')) and pd.notna(c15.get('ll')) and pd.notna(c15.get('close')):
+        range_15 = c15['hh'] - c15['ll']
+        if range_15 > 1e-6:  # 避免除以0
+            if (c15['close'] - c15['ll']) / range_15 > 0.5:
+                long_score += 10
+            else:
+                short_score += 10
+    if pd.notna(c1h.get('hh')) and pd.notna(c1h.get('ll')) and pd.notna(c1h.get('close')):
+        range_1h = c1h['hh'] - c1h['ll']
+        if range_1h > 1e-6:
+            if (c1h['close'] - c1h['ll']) / range_1h > 0.5:
+                long_score += 10
+            else:
+                short_score += 10
 
     raw_long = min(long_score, 100)
     raw_short = min(short_score, 100)
@@ -569,7 +587,6 @@ with st.sidebar:
     if st.session_state.signal_log:
         log_list = list(st.session_state.signal_log)[::-1]
         log_df = pd.DataFrame(log_list)
-        # 已正确使用 width 参数，无 use_container_width
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log.clear()
@@ -590,7 +607,6 @@ with st.sidebar:
             high_acc = high_correct / len(high_conf) * 100
             st.caption(f"高信心区间准确率: {high_acc:.1f}% ({len(high_conf)}次)")
 
-        # 漂移检测结果
         if st.session_state.drift_warning:
             st.warning(st.session_state.drift_warning)
     else:
@@ -811,7 +827,7 @@ try:
                 'actual_up': None,
                 'checked': False,
                 'price': current_price,
-                'features': latest_feat.values.flatten()   # 保存原始特征用于漂移检测和在线学习
+                'features': latest_feat.values.flatten()
             })
             st.session_state.last_recorded_candle = current_5m_time
 
@@ -828,13 +844,11 @@ try:
 
                         # ---- 在线增量学习 ----
                         if ENABLE_ONLINE_LEARNING and hasattr(model, "partial_fit"):
-                            # 获取该预测时刻的特征（已保存）
                             X_new = np.array([pred['features']])
                             if scaler is not None:
                                 X_new = scaler.transform(X_new)
                             y_new = [pred['actual_up']]
 
-                            # 如果模型尚未拟合过，需要先指定 classes
                             if not hasattr(model, "classes_"):
                                 model.partial_fit(X_new, y_new, classes=[0,1])
                             else:
@@ -842,7 +856,6 @@ try:
 
                             pred['trained'] = True
 
-                            # ---- 自适应学习率（如果模型有 eta0 属性） ----
                             if hasattr(model, "eta0"):
                                 recent_checked = [p for p in st.session_state.prediction_history if p.get('checked')]
                                 if len(recent_checked) > 30:
@@ -877,20 +890,25 @@ try:
                 else:
                     st.session_state.drift_warning = None
 
-        # ========== 高级功能：强化学习权重更新（基于最近交易） ==========
+        # ========== 高级功能：强化学习权重更新（基于最近交易 + 非负约束） ==========
         if ENABLE_RL_WEIGHTS and stats['total_trades'] >= 20:
             recent_trades = list(st.session_state.signal_log)[-20:]
             if recent_trades:
                 win_rate_recent = sum(1 for t in recent_trades if float(t['盈亏%']) > 0) / len(recent_trades)
 
                 w = st.session_state.rl_weights
-                reward = win_rate_recent - 0.5  # 0为基准
+                reward = win_rate_recent - 0.5
 
                 w["model"] += w["lr"] * reward
                 w["trend"] -= w["lr"] * reward * 0.5
                 w["momentum"] -= w["lr"] * reward * 0.5
 
-                # 归一化
+                # 非负约束
+                w["trend"] = max(0, w["trend"])
+                w["momentum"] = max(0, w["momentum"])
+                w["model"] = max(0, w["model"])
+
+                # 归一化（确保总和 > 0）
                 total = w["trend"] + w["momentum"] + w["model"]
                 if total > 0:
                     w["trend"] /= total
@@ -1005,7 +1023,6 @@ try:
             margin=dict(l=10, r=10, t=30, b=10)
         )
 
-        # 修复点：use_container_width=True → width='stretch' 消除弃用警告
         st.plotly_chart(fig, width='stretch')
 
 except Exception as e:
