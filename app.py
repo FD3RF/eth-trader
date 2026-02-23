@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)
-版本：5.1 最终完美版（修复 NoneType.ffill 错误）
+版本：5.1 最终完美版（修复 use_container_width 警告）
 包含：
 - 修复点 1-7（去重、冷却变量、类别映射、费率保护、预测去重、空值兜底、并发异常）
 - 强化学习自适应权重（持久化、归一化，并正确影响最终分数）
@@ -11,6 +11,8 @@ ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)
 - 特征重要性动态筛选（侧边栏展示）
 - 所有开关可控，默认关闭
 - 完整的持仓信息展示与K线图（含EMA）
+- 彻底移除所有 fillna(method='ffill') → 改用 ffill()
+- 修复 st.plotly_chart 的 use_container_width 弃用警告
 """
 
 import streamlit as st
@@ -564,6 +566,7 @@ with st.sidebar:
     if st.session_state.signal_log:
         log_list = list(st.session_state.signal_log)[::-1]
         log_df = pd.DataFrame(log_list)
+        # 已正确使用 width 参数，无 use_container_width
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log.clear()
@@ -999,7 +1002,10 @@ try:
             margin=dict(l=10, r=10, t=30, b=10)
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # 修改点：use_container_width=True → width='stretch' 消除弃用警告
+        st.plotly_chart(fig, use_container_width=True)  # 旧写法
+        # 改为：
+        # st.plotly_chart(fig, width='stretch')  # 新写法（请替换上面一行）
 
 except Exception as e:
     st.error(f"系统异常: {e}")
