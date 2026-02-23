@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 智能做单策略终端 v6.0
-UI 大优化：
-- 页面紧凑，卡片化风格（圆角、阴影、hover效果）
-- 顶部四列大卡片：实时价、标记价、资金费率、杠杆滑块
-- 策略核心四列卡片：趋势、动量、模型、信心
-- 超大信号卡（横跨全宽），多空颜色醒目
-- 侧边栏折叠次要信息，减少滚动
-- 保留全部原有业务逻辑
+ETH 100x 智能做单策略终端 v7.0
+UI 终极优化：
+- 超级大方向卡片（动态背景，超大字体）
+- 进度条信心卡片
+- 整体垂直空间压缩15%
+- 侧边栏默认收起
 """
 
 import streamlit as st
@@ -28,9 +26,9 @@ from scipy import stats
 # ================================
 # 1. 全局配置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v6.0", page_icon="📈")
+st.set_page_config(layout="wide", page_title="ETH 100x v7.0", page_icon="📈", initial_sidebar_state="collapsed")
 
-# 自定义CSS（卡片风格、颜色、布局）
+# 自定义CSS（卡片风格、紧凑、侧边栏宽度）
 st.markdown("""
 <style>
     /* 全局字体与背景 */
@@ -38,12 +36,14 @@ st.markdown("""
         background-color: #0e1117;
         color: #fafafa;
     }
-    /* 卡片通用样式 */
+    /* 侧边栏固定宽度 */
+    .css-1d391kg { width: 280px; }
+    /* 卡片通用样式 - 更紧凑 */
     .card {
         background: #1e1e1e;
-        border-radius: 20px;
-        padding: 20px 18px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+        border-radius: 18px;
+        padding: 12px 15px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
         transition: transform 0.2s, box-shadow 0.2s;
         border: 1px solid #333;
         height: 100%;
@@ -52,91 +52,87 @@ st.markdown("""
         justify-content: center;
     }
     .card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 12px 28px rgba(0,255,157,0.15);
+        transform: translateY(-3px);
+        box-shadow: 0 8px 20px rgba(0,255,157,0.15);
     }
     .card-label {
-        font-size: 0.85rem;
+        font-size: 0.75rem;
         color: #aaa;
         text-transform: uppercase;
         letter-spacing: 0.5px;
-        margin-bottom: 6px;
+        margin-bottom: 4px;
     }
     .card-value {
-        font-size: 2.2rem;
+        font-size: 1.8rem;
         font-weight: 700;
         line-height: 1.2;
         text-align: right;
-    }
-    .card-value-small {
-        font-size: 1.4rem;
-        font-weight: 600;
     }
     /* 多空颜色 */
     .bull { color: #00ff9d; }
     .bear { color: #ff3b5c; }
     .neutral { color: #9aa0a6; }
 
-    /* 超大信号卡 */
-    .signal-card {
-        background: linear-gradient(145deg, #252525 0%, #1a1a1a 100%);
-        border-radius: 24px;
-        padding: 20px 30px;
-        margin: 20px 0 10px 0;
-        border-left: 10px solid;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.6);
-    }
-    .signal-card.bull { border-left-color: #00ff9d; }
-    .signal-card.bear { border-left-color: #ff3b5c; }
-    .signal-card.neutral { border-left-color: #9aa0a6; }
-
-    .signal-label {
-        font-size: 1.2rem;
-        color: #ccc;
-        font-weight: 500;
-    }
-    .signal-value {
-        font-size: 3.2rem;
-        font-weight: 800;
-    }
-
     /* 杠杆滑块卡片内调整 */
     .leverage-card {
         background: #252525;
-        padding: 16px 18px;
+        padding: 10px 12px;
     }
     .stSlider > div > div > div {
         background: #00ff9d !important;
     }
 
-    /* 侧边栏折叠 */
-    .css-1d391kg { padding-top: 1rem; }
-
     /* K线图容器 */
     .chart-container {
-        border-radius: 20px;
+        border-radius: 18px;
         overflow: hidden;
         border: 1px solid #333;
-        margin-top: 10px;
+        margin-top: 8px;
     }
 
     /* 最后更新时间小标签 */
     .update-time {
         text-align: right;
         color: #666;
-        font-size: 0.75rem;
-        margin-top: 4px;
+        font-size: 0.7rem;
+        margin-top: 2px;
         font-family: monospace;
     }
 
-    /* 紧凑布局 */
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-        max-width: 1300px;
+    /* 超级大卡片 */
+    .super-card {
+        border-radius: 30px;
+        padding: 20px 35px;
+        margin: 15px 0 10px 0;
+        text-align: center;
+        box-shadow: 0 12px 30px rgba(0,0,0,0.7);
+        transition: transform 0.2s;
+    }
+    .super-card:hover {
+        transform: scale(1.01);
+    }
+    .super-card .main-text {
+        font-size: 4.5rem;
+        font-weight: 800;
+        line-height: 1.2;
+    }
+    .super-card .sub-text {
+        font-size: 1.1rem;
+        opacity: 0.9;
+        margin-top: 5px;
+    }
+
+    /* 进度条卡片 */
+    .progress-container {
+        background: #333;
+        border-radius: 10px;
+        height: 14px;
+        width: 100%;
+        margin-top: 8px;
+    }
+    .progress-bar {
+        height: 14px;
+        border-radius: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -196,7 +192,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v60")
+st_autorefresh(interval=REFRESH_MS, key="quant_v70")
 
 # ================================
 # 2. 初始化系统与状态
@@ -1056,7 +1052,7 @@ def monte_carlo_test(pnl_list, initial_equity, num_simulations=1000):
     return result
 
 # ================================
-# 10. 侧边栏（折叠次要信息）
+# 10. 侧边栏（折叠次要信息，宽度固定）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -1207,9 +1203,9 @@ with st.sidebar:
         st.info("等待交易...")
 
 # ================================
-# 11. 主循环（卡片化 UI）
+# 11. 主循环（卡片化 UI v7.0）
 # ================================
-st.title("📈 ETH 100x 智能做单策略终端 v6.0")
+st.title("📈 ETH 100x 智能做单策略终端 v7.0")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1332,9 +1328,9 @@ try:
         final_short = (t_short * TREND_WEIGHT + m_short * MOMENTUM_WEIGHT + p_short * MODEL_WEIGHT) / 100
         prob_long, prob_short = p_long, p_short
 
-    # ========== 卡片布局开始 ==========
+    # ========== 卡片布局 v7.0 ==========
 
-    # 第一行：价格、标记价、资金费率、杠杆滑块（四列）
+    # 第一行：价格、标记价、资金费率、杠杆滑块（四列，更紧凑）
     col1, col2, col3, col4 = st.columns([1,1,1,1.5])
     with col1:
         st.markdown(f"""
@@ -1371,7 +1367,7 @@ try:
         st.markdown(f'<div style="font-size: 1.8rem; font-weight:700; color:{risk_color};">{new_leverage}x</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 第二行：趋势、动量、模型、信心（四列）
+    # 第二行：趋势、动量、AI模型、信心进度条（四列）
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
 
     with col_t1:
@@ -1401,40 +1397,67 @@ try:
         </div>
         """, unsafe_allow_html=True)
 
+    # 第四列：信心进度条卡片
     with col_t4:
-        final_dir = "bull" if final_long > final_short else "bear" if final_short > final_long else "neutral"
+        confidence = max(final_long, final_short)
+        arrow = "↑" if final_long > final_short else "↓" if final_short > final_long else ""
+        # 确定进度条颜色
+        if confidence < 20:
+            bar_color = "#888"
+        elif confidence < 60:
+            bar_color = "#ffaa00"
+        else:
+            bar_color = "#00ff9d"
+        # 数字颜色
+        num_color = bar_color
+
         st.markdown(f"""
         <div class="card">
-            <div class="card-label">最终信心</div>
-            <div class="card-value {final_dir}">{max(final_long, final_short):.0f}%</div>
+            <div class="card-label">信心</div>
+            <div style="display: flex; align-items: baseline; justify-content: space-between;">
+                <span style="font-size: 2rem; font-weight:700; color:{num_color};">{confidence:.0f}%</span>
+                <span style="font-size: 1.8rem; color:{num_color};">{arrow}</span>
+            </div>
+            <div style="background: #333; border-radius: 10px; height: 12px; width: 100%; margin-top: 8px;">
+                <div style="background: {bar_color}; width: {confidence}%; height: 12px; border-radius: 10px;"></div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-    # 第三行：超大信号卡（横跨）
+    # ========== 超级大方向卡片 ==========
     if st.session_state.active_signal:
         direction = st.session_state.active_signal
         conf = final_score
-        arrow = "▲" if direction == "LONG" else "▼"
-        signal_class = "bull" if direction == "LONG" else "bear"
-        signal_text = f"{direction} {conf:.0f}% {arrow}"
+        if direction == "LONG":
+            bg_color = "#00ff9d"
+            text_color = "#000000"
+            arrow = "↑"
+        else:
+            bg_color = "#ff3b5c"
+            text_color = "#ffffff"
+            arrow = "↓"
+        main_text = f"{direction} {conf:.0f}% {arrow}"
     else:
-        signal_class = "neutral"
-        signal_text = "无信号"
+        bg_color = "#2d2d2d"
+        text_color = "#ffffff"
+        main_text = "无信号"
+
+    filter_status = "所有过滤条件通过" if not filter_reasons else "过滤未通过: " + " | ".join(filter_reasons)
 
     st.markdown(f"""
-    <div class="signal-card {signal_class}">
-        <span class="signal-label">当前方向</span>
-        <span class="signal-value {signal_class}">{signal_text}</span>
+    <div class="super-card" style="background: {bg_color};">
+        <div class="main-text" style="color: {text_color};">{main_text}</div>
+        <div class="sub-text" style="color: {text_color};">{filter_status}</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # 可选：显示过滤理由
-    if filter_reasons:
+    # 可选：显示过滤理由（如果未通过）
+    if filter_reasons and not st.session_state.active_signal:
         st.warning("⛔ 当前不满足信号条件: " + " | ".join(filter_reasons))
+    elif st.session_state.system_halted:
+        st.error("⛔ 系统已熔断，暂停交易")
     else:
-        if st.session_state.system_halted:
-            st.error("⛔ 系统已熔断，暂停交易")
-        else:
+        if not filter_reasons and not st.session_state.active_signal:
             st.success("✅ 所有基础过滤条件通过，等待高置信度信号...")
 
     # 开仓逻辑（新K线且有信号时）
@@ -1477,7 +1500,7 @@ try:
         times, equities = zip(*st.session_state.equity_history)
         fig_equity = go.Figure()
         fig_equity.add_trace(go.Scatter(x=list(times), y=list(equities), mode='lines', name='权益', line=dict(color='#00ff9d')))
-        fig_equity.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), paper_bgcolor='#0e1117', plot_bgcolor='#0e1117', font=dict(color='#fafafa'))
+        fig_equity.update_layout(height=280, margin=dict(l=10, r=10, t=20, b=10), paper_bgcolor='#0e1117', plot_bgcolor='#0e1117', font=dict(color='#fafafa'))
         st.plotly_chart(fig_equity, use_container_width=True)
 
     # K线图
@@ -1496,9 +1519,9 @@ try:
     fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema5'], line=dict(width=1, color='#ffaa00'), name='EMA5'))
     fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema20'], line=dict(width=1, color='#3399ff'), name='EMA20'))
     fig.update_layout(
-        height=500,
+        height=450,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=30, b=10),
+        margin=dict(l=10, r=10, t=20, b=10),
         paper_bgcolor='#0e1117',
         plot_bgcolor='#0e1117',
         font=dict(color='#fafafa')
