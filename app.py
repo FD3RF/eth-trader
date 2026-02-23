@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 做单策略终端 4.7
-修复：
-- t_long 未定义错误
-- fillna 弃用警告
-- use_container_width 弃用警告
-- last_reset_day KeyError
-增强：
-- 策略卡片显示详细触发条件
-- 风控参数动态调节
+ETH 100x 智能做单策略终端 v5.0
+特性：
+- 杠杆倍数动态可调（1-100倍）
+- 入场引擎：多维度评分 + 动态过滤
+- 出场引擎：固定止损/止盈 + ATR/EMA/评分反转
+- 仓位管理：固定风险% + 动态缩放
+- 风控系统：连亏熔断、日亏损限额、资金费过滤
+- UI 美化：策略卡片、分项评分、实时信号日志
+- 修复所有已知错误与弃用警告
 """
 
 import streamlit as st
@@ -29,7 +29,7 @@ from scipy import stats
 # ================================
 # 1. 全局配置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 4.7", page_icon="📊")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v5.0", page_icon="📈")
 
 SYMBOL = "ETH/USDT:USDT"
 REFRESH_MS = 2500
@@ -53,8 +53,7 @@ DEFAULT_ENTRY_SLIPPAGE = 0.0003
 DEFAULT_EXIT_SLIPPAGE = 0.0003
 TAKER_FEE = 0.0005
 
-# 杠杆与保证金
-LEVERAGE = 100
+# 维持保证金率
 MAINTENANCE_MARGIN_RATE = 0.004
 
 # 过滤参数
@@ -82,12 +81,12 @@ DEFAULT_CONSECUTIVE_LOSS_LIMIT = 3
 DEFAULT_DAILY_LOSS_LIMIT = 500
 DEFAULT_DAILY_RISK_PCT = 0.025
 
-# 出场策略开关
+# 出场策略开关（默认开启）
 USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v47")
+st_autorefresh(interval=REFRESH_MS, key="quant_v50")
 
 # ================================
 # 2. 初始化系统与状态
@@ -141,7 +140,9 @@ def init_session_state():
             'losses': 0,
             'current_consecutive_losses': 0,
             'max_consecutive_losses': 0,
-            'last_reset_day': today,        # 新增，用于每日重置
+            'last_reset_day': today,        # 关键修复：预初始化
+            'daily_pnl': 0.0,
+            'daily_trades': 0,
         },
         'prediction_history': deque(maxlen=200),
         'last_recorded_candle': None,
@@ -165,6 +166,7 @@ def init_session_state():
         'use_ema_reverse': USE_EMA_REVERSE,
         'use_score_reverse': USE_SCORE_REVERSE,
         'use_dynamic_position': False,
+        'leverage': 100,                     # 新增：可调节杠杆
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -671,7 +673,7 @@ class RiskEngine:
         return False, ""
 
 # ================================
-# 8. 开平仓函数
+# 8. 开平仓函数（使用动态杠杆）
 # ================================
 def open_position(entry_price, side, final_score):
     entry_slip = st.session_state.entry_slippage
@@ -731,8 +733,9 @@ def apply_liquidation():
     if pos is None:
         return
 
+    leverage = st.session_state.leverage  # 使用动态杠杆
     notional = pos['entry'] * CONTRACT_SIZE * pos['size']
-    margin = notional / LEVERAGE
+    margin = notional / leverage
     loss = -margin
     st.session_state.current_equity += loss
 
@@ -763,14 +766,15 @@ def check_liquidation(mark_price):
     pos = st.session_state.position
     entry = pos['entry']
     side = pos['side']
+    leverage = st.session_state.leverage
 
     if side == 'LONG':
-        liquidation_price = entry * (1 - (1/LEVERAGE) + MAINTENANCE_MARGIN_RATE)
+        liquidation_price = entry * (1 - (1/leverage) + MAINTENANCE_MARGIN_RATE)
         if mark_price <= liquidation_price:
             apply_liquidation()
             return True
     else:
-        liquidation_price = entry * (1 + (1/LEVERAGE) - MAINTENANCE_MARGIN_RATE)
+        liquidation_price = entry * (1 + (1/leverage) - MAINTENANCE_MARGIN_RATE)
         if mark_price >= liquidation_price:
             apply_liquidation()
             return True
@@ -960,7 +964,7 @@ def monte_carlo_test(pnl_list, initial_equity, num_simulations=1000):
     return result
 
 # ================================
-# 10. 侧边栏（替换use_container_width为width）
+# 10. 侧边栏（新增杠杆滑块）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -1043,7 +1047,7 @@ with st.sidebar:
 
         fig_dist = plot_pnl_distribution(st.session_state.pnl_list)
         if fig_dist:
-            st.plotly_chart(fig_dist, use_container_width=True)  # 注意：plotly_chart 仍使用 use_container_width，但该参数尚未弃用，可保留
+            st.plotly_chart(fig_dist, use_container_width=True)
 
         trade_logs = [log for log in st.session_state.signal_log if log.get('事件') == '平仓']
         pnl_with_time = []
@@ -1058,6 +1062,14 @@ with st.sidebar:
             fig_hourly = plot_hourly_pnl(pnl_with_time)
             if fig_hourly:
                 st.plotly_chart(fig_hourly, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("⚙️ 杠杆调节")
+    # 新增杠杆滑块
+    new_leverage = st.slider("杠杆倍数", min_value=1, max_value=100, value=st.session_state.leverage, step=1)
+    if new_leverage != st.session_state.leverage:
+        st.session_state.leverage = new_leverage
+        st.info(f"杠杆已调整为 {new_leverage} 倍")
 
     st.markdown("---")
     st.subheader("⚙️ 滑点压力测试")
@@ -1118,9 +1130,9 @@ with st.sidebar:
         st.info("等待交易...")
 
 # ================================
-# 11. 主循环（修复变量未定义）
+# 11. 主循环（策略可视化）
 # ================================
-st.title("⚖️ ETH 100x 做单策略终端 4.7")
+st.title("📈 ETH 100x 智能做单策略终端 v5.0")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1185,8 +1197,8 @@ try:
     final_score = 0
     filter_reasons = []
     signal_reason = ""
-    scores_display = (0,0,0,0,0,0,0,0)  # 扩展为8个值：final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short
-    t_long, t_short, m_long, m_short = 0, 0, 0, 0  # 默认值，避免未定义
+    scores_display = (0,0,0,0,0,0,0,0)  # 扩展为8个值
+    t_long, t_short, m_long, m_short = 0, 0, 0, 0  # 默认值
 
     if new_candle and not st.session_state.system_halted:
         st.session_state.last_5m_candle_time = current_5m_candle_time
@@ -1265,7 +1277,7 @@ try:
             col_d.info(f"**过滤**: {'通过' if not filter_reasons else '未通过: ' + ' | '.join(filter_reasons)}")
 
         # 显示分项评分
-        st.markdown(f"**趋势**: {t_long:.0f}/{t_short:.0f} | **动量**: {m_long:.0f}/{m_short:.0f} | **模型**: {prob_long:.0f}%/{prob_short:.0f}%")
+        st.markdown(f"**趋势**: {t_long:.0f}/{t_short:.0f} | **动量**: {m_long:.0f}/{m_short:.0f} | **模型**: {prob_long:.0f}%/{prob_short:.0f}% | **当前杠杆**: {st.session_state.leverage} 倍")
 
     # ========== 指标行 ==========
     col1, col2, col3, col4, col5 = st.columns(5)
