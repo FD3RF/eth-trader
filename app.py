@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ETH 100x 终极双向评分 AI 决策终端 (趋势+动量+模型)
-版本：5.1 最终完美版
+版本：5.1 最终完美版（修复 NoneType.ffill 错误）
 包含：
 - 修复点 1-7（去重、冷却变量、类别映射、费率保护、预测去重、空值兜底、并发异常）
 - 强化学习自适应权重（持久化、归一化，并正确影响最终分数）
@@ -222,7 +222,7 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 6. 指标计算（与训练完全对齐）
+# 6. 指标计算（与训练完全对齐，增加 None 检查）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     # 时间索引处理（独立处理每个df，修复点1）
@@ -239,9 +239,13 @@ def compute_features(df_5m, df_15m, df_1h):
 
     # ----- 5m 指标 -----
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14).fillna(50)
-    # 修改点：.fillna(method='ffill') -> .ffill()
-    df_5m["ma20"] = ta.sma(df_5m["close"], length=20).ffill().fillna(df_5m["close"])
-    df_5m["ma60"] = ta.sma(df_5m["close"], length=60).ffill().fillna(df_5m["close"])
+
+    # 修改点：检查 ta.sma 是否返回 None
+    ma20 = ta.sma(df_5m["close"], length=20)
+    df_5m["ma20"] = ma20.ffill().fillna(df_5m["close"]) if ma20 is not None else df_5m["close"]
+
+    ma60 = ta.sma(df_5m["close"], length=60)
+    df_5m["ma60"] = ma60.ffill().fillna(df_5m["close"]) if ma60 is not None else df_5m["close"]
 
     macd = ta.macd(df_5m["close"], fast=10, slow=22, signal=8)
     if macd is not None:
@@ -260,36 +264,51 @@ def compute_features(df_5m, df_15m, df_1h):
     else:
         df_5m["adx"] = 20
 
-    df_5m["ema5"] = ta.ema(df_5m["close"], length=5).ffill().fillna(df_5m["close"])
-    df_5m["ema20"] = ta.ema(df_5m["close"], length=20).ffill().fillna(df_5m["close"])
+    ema5 = ta.ema(df_5m["close"], length=5)
+    df_5m["ema5"] = ema5.ffill().fillna(df_5m["close"]) if ema5 is not None else df_5m["close"]
+
+    ema20 = ta.ema(df_5m["close"], length=20)
+    df_5m["ema20"] = ema20.ffill().fillna(df_5m["close"]) if ema20 is not None else df_5m["close"]
+
     vwap = ta.vwap(df_5m["high"], df_5m["low"], df_5m["close"], df_5m["volume"])
-    df_5m["VWAP"] = vwap.ffill().fillna(df_5m["close"])
-    df_5m["volume_ma20"] = ta.sma(df_5m["volume"], length=20).fillna(0)
+    df_5m["VWAP"] = vwap.ffill().fillna(df_5m["close"]) if vwap is not None else df_5m["close"]
+
+    vol_ma20 = ta.sma(df_5m["volume"], length=20)
+    df_5m["volume_ma20"] = vol_ma20.fillna(0) if vol_ma20 is not None else 0
+
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean().fillna(0)
     df_5m["atr_surge"] = (df_5m["atr"] > df_5m["atr_ma20"] * 1.2).fillna(False)
 
     # ----- 15m 指标 -----
-    df_15m["ema200"] = ta.ema(df_15m["close"], length=200).ffill().fillna(df_15m["close"])
+    ema200_15 = ta.ema(df_15m["close"], length=200)
+    df_15m["ema200"] = ema200_15.ffill().fillna(df_15m["close"]) if ema200_15 is not None else df_15m["close"]
+
     adx_15_df = ta.adx(df_15m["high"], df_15m["low"], df_15m["close"], length=14)
     if adx_15_df is not None:
         df_15m["adx"] = adx_15_df['ADX_14'].fillna(20)
     else:
         df_15m["adx"] = 20
+
     vwap_15 = ta.vwap(df_15m["high"], df_15m["low"], df_15m["close"], df_15m["volume"])
-    df_15m["VWAP"] = vwap_15.ffill().fillna(df_15m["close"])
+    df_15m["VWAP"] = vwap_15.ffill().fillna(df_15m["close"]) if vwap_15 is not None else df_15m["close"]
+
     df_15m["hh"] = df_15m["high"].rolling(20).max().ffill().fillna(df_15m["high"])
     df_15m["ll"] = df_15m["low"].rolling(20).min().ffill().fillna(df_15m["low"])
     df_15m["ema200_slope"] = (df_15m["ema200"] - df_15m["ema200"].shift(5)).fillna(0)
 
     # ----- 1h 指标 -----
-    df_1h["ema200"] = ta.ema(df_1h["close"], length=200).ffill().fillna(df_1h["close"])
+    ema200_1h = ta.ema(df_1h["close"], length=200)
+    df_1h["ema200"] = ema200_1h.ffill().fillna(df_1h["close"]) if ema200_1h is not None else df_1h["close"]
+
     adx_1h_df = ta.adx(df_1h["high"], df_1h["low"], df_1h["close"], length=14)
     if adx_1h_df is not None:
         df_1h["adx"] = adx_1h_df['ADX_14'].fillna(20)
     else:
         df_1h["adx"] = 20
+
     vwap_1h = ta.vwap(df_1h["high"], df_1h["low"], df_1h["close"], df_1h["volume"])
-    df_1h["VWAP"] = vwap_1h.ffill().fillna(df_1h["close"])
+    df_1h["VWAP"] = vwap_1h.ffill().fillna(df_1h["close"]) if vwap_1h is not None else df_1h["close"]
+
     df_1h["hh"] = df_1h["high"].rolling(20).max().ffill().fillna(df_1h["high"])
     df_1h["ll"] = df_1h["low"].rolling(20).min().ffill().fillna(df_1h["low"])
     df_1h["ema200_slope"] = (df_1h["ema200"] - df_1h["ema200"].shift(3)).fillna(0)
@@ -308,7 +327,7 @@ def compute_features(df_5m, df_15m, df_1h):
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 7. 评分函数
+# 7. 评分函数（保持不变）
 # ================================
 def compute_trend_score(df_15m, df_1h):
     c15 = df_15m.iloc[-1]
