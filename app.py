@@ -1002,10 +1002,8 @@ try:
             margin=dict(l=10, r=10, t=30, b=10)
         )
 
-        # 修改点：use_container_width=True → width='stretch' 消除弃用警告
-        st.plotly_chart(fig, use_container_width=True)  # 旧写法
-        # 改为：
-        # st.plotly_chart(fig, width='stretch')  # 新写法（请替换上面一行）
+        # 修复点：use_container_width=True → width='stretch' 消除弃用警告
+        st.plotly_chart(fig, width='stretch')
 
 except Exception as e:
     st.error(f"系统异常: {e}")
