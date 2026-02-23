@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 智能做单策略终端 v7.2（最终修复版）
-修复：
-- 最终信心显示乘以100
-- 信号阈值比较乘以100
-- 其他UI优化
+ETH 100x 智能做单策略终端 v7.3（双策略版）
+特性：
+- 趋势市（ADX≥25）：使用原多因子评分系统（趋势+动量+AI模型）
+- 震荡市（ADX<25）：启用均值回归策略（RSI超买超卖 + 价格偏离）
+- 自动识别市场状态，动态切换策略
+- 保留原风控、UI、卡片化布局
 """
 
 import streamlit as st
@@ -23,9 +24,9 @@ import random
 from scipy import stats
 
 # ================================
-# 1. 全局配置（激进参数）
+# 1. 全局配置（激进参数 + 双策略）
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.2", page_icon="📈", initial_sidebar_state="collapsed")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.3", page_icon="📈", initial_sidebar_state="collapsed")
 
 # 自定义CSS（卡片风格、颜色、布局）
 st.markdown("""
@@ -141,8 +142,8 @@ st.markdown("""
 SYMBOL = "ETH/USDT:USDT"
 REFRESH_MS = 2500
 
-# 激进入场阈值
-FINAL_CONF_THRES = 70           # 原75，降低到70增加信号
+# 激进入场阈值（趋势市用）
+FINAL_CONF_THRES = 70
 
 # 固定止损止盈
 STOP_LOSS_PCT = 0.01
@@ -163,19 +164,28 @@ TAKER_FEE = 0.0005
 # 维持保证金率
 MAINTENANCE_MARGIN_RATE = 0.004
 
-# 过滤参数（大幅放宽，几乎不设限）
-MIN_ATR_PCT = 0.0001            # 允许极低波动
-MAX_ATR_PCT = 0.1               # 允许极高波动
-VOLUME_RATIO_MIN = 0.8          # 成交量只需达到0.8倍均量
-MIN_TREND_STRENGTH = 0          # 取消趋势强度要求
-MIN_SCORE_GAP = 0                # 取消多空分差要求
-MODEL_DIRECTION_MIN = 0          # 取消模型方向最低要求
-COOLDOWN_CANDLES = 0             # 取消冷却期
+# 过滤参数（趋势市用，大幅放宽）
+MIN_ATR_PCT = 0.0001
+MAX_ATR_PCT = 0.1
+VOLUME_RATIO_MIN = 0.8
+MIN_TREND_STRENGTH = 0
+MIN_SCORE_GAP = 0
+MODEL_DIRECTION_MIN = 0
+COOLDOWN_CANDLES = 0
 
-# 权重（模型主导）
+# 权重（趋势市用，模型主导）
 TREND_WEIGHT = 0.1
 MOMENTUM_WEIGHT = 0.2
 MODEL_WEIGHT = 0.7
+
+# 震荡市参数（均值回归）
+MEAN_REVERSION_RSI_OVERSOLD = 30      # RSI低于此值做多
+MEAN_REVERSION_RSI_OVERBOUGHT = 70     # RSI高于此值做空
+MEAN_REVERSION_DEVIATION = 0.02        # 价格偏离EMA20超过2%作为确认
+MEAN_REVERSION_VOLUME_MIN = 0.8        # 成交量要求（放宽）
+
+# ADX阈值（用于区分趋势/震荡）
+ADX_TREND_THRESHOLD = 25
 
 # 资金费结算时间
 FUNDING_HOURS = [0, 8, 16]
@@ -193,7 +203,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v72")
+st_autorefresh(interval=REFRESH_MS, key="quant_v73")
 
 # ================================
 # 2. 初始化系统与状态
@@ -274,6 +284,8 @@ def init_session_state():
         'use_score_reverse': USE_SCORE_REVERSE,
         'use_dynamic_position': False,
         'leverage': 30,                     # 默认30倍杠杆
+        # 市场状态
+        'market_state': 'trend',             # 'trend' 或 'range'
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -299,6 +311,19 @@ def get_mark_price(df_5m):
         return df_5m['close'].iloc[-1]
     ema = ta.ema(df_5m['close'], length=MARK_PRICE_EMA_PERIOD)
     return ema.iloc[-1] if not pd.isna(ema.iloc[-1]) else df_5m['close'].iloc[-1]
+
+def get_market_state(df_15m, df_1h):
+    """根据ADX判断市场状态：趋势或震荡"""
+    c15 = df_15m.iloc[-1] if len(df_15m) > 0 else None
+    c1h = df_1h.iloc[-1] if len(df_1h) > 0 else None
+    adx_15 = c15.get('adx', 0) if c15 is not None and pd.notna(c15.get('adx')) else 0
+    adx_1h = c1h.get('adx', 0) if c1h is not None and pd.notna(c1h.get('adx')) else 0
+    # 取两者最大值判断
+    adx = max(adx_15, adx_1h)
+    if adx >= ADX_TREND_THRESHOLD:
+        return 'trend'
+    else:
+        return 'range'
 
 # ================================
 # 4. 数据获取
@@ -331,7 +356,7 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算
+# 5. 指标计算（同v7.2）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     df_5m = df_5m.copy()
@@ -399,7 +424,7 @@ def compute_features(df_5m, df_15m, df_1h):
     df_1h["ll"] = df_1h["low"].rolling(20).min().ffill().fillna(df_1h["low"])
     df_1h["ema200_slope"] = (df_1h["ema200"] - df_1h["ema200"].shift(3)).fillna(0)
 
-    # 提取最新特征
+    # 提取最新特征（用于AI模型）
     model_feature_names = get_feature_names(model)
     if model_feature_names is not None:
         latest_feat = df_5m[model_feature_names].iloc[-1:].copy()
@@ -413,7 +438,7 @@ def compute_features(df_5m, df_15m, df_1h):
     return df_5m, df_15m, df_1h, latest_feat
 
 # ================================
-# 6. 评分函数
+# 6. 趋势市评分函数（同v7.2）
 # ================================
 def compute_trend_score(df_15m, df_1h):
     c15 = df_15m.iloc[-1]
@@ -549,10 +574,11 @@ def detect_momentum_decay(df_5m):
             macd_vals[1] < macd_vals[0])
 
 # ================================
-# 7. 四大策略模块
+# 7. 双策略引擎
 # ================================
 
-class EntryEngine:
+class TrendEntryEngine:
+    """趋势市入场引擎（原多因子评分）"""
     def __init__(self, config):
         self.config = config
 
@@ -571,6 +597,7 @@ class EntryEngine:
         filter_reasons = []
         trigger_details = []
 
+        # 趋势市过滤（放宽版）
         atr_pct = c5.get('atr_pct', 0)
         if pd.isna(atr_pct):
             atr_pct = 0
@@ -621,7 +648,6 @@ class EntryEngine:
         if filter_reasons:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
-        # 修复：比较时乘以100，因为final_long是0-1小数
         if final_long * 100 >= self.config['conf_thres'] and final_long > final_short:
             return 'LONG', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
         elif final_short * 100 >= self.config['conf_thres'] and final_short > final_long:
@@ -630,7 +656,77 @@ class EntryEngine:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
 
+class RangeEntryEngine:
+    """震荡市入场引擎（均值回归）"""
+    def __init__(self, config):
+        self.config = config
+
+    def generate_signal(self, df_5m, df_15m, df_1h, latest_feat, model, scaler, last_signal_candle=None, current_candle_time=None):
+        c5 = df_5m.iloc[-1]
+        filter_reasons = []
+        trigger_details = []
+
+        # 基础过滤：成交量
+        vol_ratio = c5['volume'] / c5['volume_ma20'] if pd.notna(c5.get('volume')) and pd.notna(c5.get('volume_ma20')) and c5['volume_ma20'] > 0 else 0
+        if vol_ratio < self.config['volume_min']:
+            filter_reasons.append(f"成交量不足 ({vol_ratio:.2f})")
+        else:
+            trigger_details.append(f"成交量 {vol_ratio:.2f}")
+
+        # 波动率过滤（可放宽）
+        atr_pct = c5.get('atr_pct', 0)
+        if pd.isna(atr_pct):
+            atr_pct = 0
+        if atr_pct < 0.0005:
+            filter_reasons.append(f"波动率过低 ({atr_pct:.3%})")
+        if atr_pct > 0.05:
+            filter_reasons.append(f"波动率过高 ({atr_pct:.3%})")
+
+        # 均值回归信号
+        rsi = c5.get('rsi', 50)
+        price = c5['close']
+        ema20 = c5['ema20']
+        deviation = (price - ema20) / ema20 if ema20 != 0 else 0
+
+        signal = None
+        score = 0
+        reason = ""
+
+        # 超卖做多
+        if rsi < self.config['rsi_oversold'] and deviation < -self.config['deviation']:
+            signal = 'LONG'
+            score = (self.config['rsi_oversold'] - rsi) / self.config['rsi_oversold'] * 50 + 50  # 0-100 信心
+            reason = f"RSI超卖 ({rsi:.1f}) 价格偏离 {deviation:.2%}"
+            trigger_details.append(reason)
+        # 超买做空
+        elif rsi > self.config['rsi_overbought'] and deviation > self.config['deviation']:
+            signal = 'SHORT'
+            score = (rsi - self.config['rsi_overbought']) / (100 - self.config['rsi_overbought']) * 50 + 50
+            reason = f"RSI超买 ({rsi:.1f}) 价格偏离 {deviation:.2%}"
+            trigger_details.append(reason)
+
+        # 冷却检查
+        cooling = False
+        if last_signal_candle is not None and current_candle_time is not None:
+            if last_signal_candle in df_5m.index:
+                idx_last = df_5m.index.get_loc(last_signal_candle)
+                idx_current = df_5m.index.get_loc(current_candle_time)
+                candles_since = idx_current - idx_last
+                cooling = candles_since < 1  # 震荡市冷却1根K线
+        if cooling:
+            filter_reasons.append("冷却中")
+
+        if filter_reasons:
+            return None, filter_reasons, (0,0,0,0,0,0,0,0), " | ".join(trigger_details)
+
+        if signal:
+            return signal, filter_reasons, (score/100, 0, 0, 0, 0, 0, 0, 0), reason
+        else:
+            return None, filter_reasons, (0,0,0,0,0,0,0,0), "无信号"
+
+
 class ExitEngine:
+    """出场引擎（同v7.2）"""
     def __init__(self, sl_pct, tp_pct):
         self.sl_pct = sl_pct
         self.tp_pct = tp_pct
@@ -763,7 +859,7 @@ class RiskEngine:
         return False, ""
 
 # ================================
-# 8. 开平仓函数（使用动态杠杆）
+# 8. 开平仓函数（同v7.2）
 # ================================
 def open_position(entry_price, side, final_score):
     entry_slip = st.session_state.entry_slippage
@@ -959,7 +1055,7 @@ def record_daily_equity_force():
             st.session_state.daily_equity.append((today, st.session_state.current_equity))
 
 # ================================
-# 9. 统计与风险分析
+# 9. 统计与风险分析（同v7.2）
 # ================================
 def compute_pnl_distribution_metrics(pnl_list):
     if len(pnl_list) < 5:
@@ -1054,7 +1150,7 @@ def monte_carlo_test(pnl_list, initial_equity, num_simulations=1000):
     return result
 
 # ================================
-# 10. 侧边栏（折叠次要信息）
+# 10. 侧边栏（同v7.2，可添加双策略参数）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -1205,9 +1301,9 @@ with st.sidebar:
         st.info("等待交易...")
 
 # ================================
-# 11. 主循环（卡片化 UI）
+# 11. 主循环（双策略切换）
 # ================================
-st.title("📈 ETH 100x 智能做单策略终端 v7.2 (最终修复版)")
+st.title("📈 ETH 100x 智能做单策略终端 v7.3 (双策略版)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1218,11 +1314,16 @@ try:
     df_5m, df_15m, df_1h, latest_feat = compute_features(df_5m, df_15m, df_1h)
     mark_price = get_mark_price(df_5m)
 
+    # 判断市场状态
+    market_state = get_market_state(df_15m, df_1h)
+    st.session_state.market_state = market_state
+
     record_daily_equity_force()
     apply_funding_if_needed()
     check_liquidation(mark_price)
 
-    entry_config = {
+    # 初始化策略引擎
+    trend_config = {
         'trend_weight': TREND_WEIGHT,
         'momentum_weight': MOMENTUM_WEIGHT,
         'model_weight': MODEL_WEIGHT,
@@ -1233,7 +1334,14 @@ try:
         'min_trend_strength': MIN_TREND_STRENGTH,
         'min_score_gap': MIN_SCORE_GAP,
     }
-    entry_engine = EntryEngine(entry_config)
+    range_config = {
+        'rsi_oversold': MEAN_REVERSION_RSI_OVERSOLD,
+        'rsi_overbought': MEAN_REVERSION_RSI_OVERBOUGHT,
+        'deviation': MEAN_REVERSION_DEVIATION,
+        'volume_min': MEAN_REVERSION_VOLUME_MIN,
+    }
+    trend_engine = TrendEntryEngine(trend_config)
+    range_engine = RangeEntryEngine(range_config)
     exit_engine = ExitEngine(STOP_LOSS_PCT, TAKE_PROFIT_PCT)
     risk_engine = RiskEngine(st.session_state.consecutive_loss_limit, st.session_state.daily_loss_limit)
 
@@ -1248,6 +1356,7 @@ try:
                   current_5m_candle_time > st.session_state.last_5m_candle_time)
 
     if st.session_state.position:
+        # 计算最新评分用于反转出场
         c15_aligned = df_15m.asof(current_5m_candle_time)
         c1h_aligned = df_1h.asof(current_5m_candle_time)
         temp_15m = pd.DataFrame([c15_aligned], index=[current_5m_candle_time])
@@ -1275,22 +1384,37 @@ try:
     if new_candle and not st.session_state.system_halted:
         st.session_state.last_5m_candle_time = current_5m_candle_time
 
-        direction, filter_reasons, scores, signal_reason = entry_engine.generate_signal(
-            df_5m, df_15m, df_1h, latest_feat, model, scaler,
-            last_signal_candle=st.session_state.last_signal_candle,
-            current_candle_time=current_5m_candle_time
-        )
-        final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short = scores
-        final_score = final_long if direction == 'LONG' else final_short
-        t_long, t_short, m_long, m_short = trend_long, trend_short, mom_long, mom_short
+        # 根据市场状态选择策略引擎
+        if market_state == 'trend':
+            direction, filter_reasons, scores, signal_reason = trend_engine.generate_signal(
+                df_5m, df_15m, df_1h, latest_feat, model, scaler,
+                last_signal_candle=st.session_state.last_signal_candle,
+                current_candle_time=current_5m_candle_time
+            )
+            if scores is not None:
+                final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short = scores
+                t_long, t_short, m_long, m_short = trend_long, trend_short, mom_long, mom_short
+                final_score = final_long if direction == 'LONG' else final_short
+        else:  # range
+            direction, filter_reasons, scores, signal_reason = range_engine.generate_signal(
+                df_5m, df_15m, df_1h, latest_feat, model, scaler,
+                last_signal_candle=st.session_state.last_signal_candle,
+                current_candle_time=current_5m_candle_time
+            )
+            if scores is not None:
+                final_score, _, _, _, _, _, _, _ = scores
+                # 震荡市不计算趋势动量模型评分，保留旧值
+                t_long, t_short, m_long, m_short = 0, 0, 0, 0
+                prob_long, prob_short = 50, 50
 
+        # 记录信号事件
         if direction:
             st.session_state.signal_log.append({
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "事件": "信号",
                 "方向": direction,
                 "置信度": f"{final_score*100:.1f}",
-                "理由": signal_reason,
+                "理由": f"{market_state}市 | {signal_reason}",
                 "过滤": "无" if not filter_reasons else " | ".join(filter_reasons)
             })
         else:
@@ -1300,7 +1424,7 @@ try:
                     "事件": "信号",
                     "方向": "无",
                     "置信度": "-",
-                    "理由": "过滤未通过",
+                    "理由": f"{market_state}市 | 过滤未通过",
                     "过滤": " | ".join(filter_reasons)
                 })
 
@@ -1318,7 +1442,7 @@ try:
         })
         scores_display = scores
     else:
-        # 非新K线时，重新计算当前评分用于显示
+        # 非新K线时，重新计算当前评分用于显示（仅趋势指标）
         c15_aligned = df_15m.asof(df_5m.index[-1])
         c1h_aligned = df_1h.asof(df_5m.index[-1])
         temp_15m = pd.DataFrame([c15_aligned], index=[df_5m.index[-1]])
@@ -1368,6 +1492,10 @@ try:
         risk_color = "#ff3b5c" if new_leverage > 50 else "#00ff9d" if new_leverage > 20 else "#aaa"
         st.markdown(f'<div style="font-size: 1.8rem; font-weight:700; color:{risk_color};">{new_leverage}x</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+    # 市场状态显示
+    state_color = "#00ff9d" if market_state == "trend" else "#ffaa00"
+    st.markdown(f"<div style='text-align:right; color:{state_color}; font-size:1rem; margin-bottom:10px;'>当前市场: {market_state.upper()}市</div>", unsafe_allow_html=True)
 
     # 第二行：趋势、动量、模型、信心（四列）
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
