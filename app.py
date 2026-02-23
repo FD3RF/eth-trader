@@ -239,8 +239,9 @@ def compute_features(df_5m, df_15m, df_1h):
 
     # ----- 5m 指标 -----
     df_5m["rsi"] = ta.rsi(df_5m["close"], length=14).fillna(50)
-    df_5m["ma20"] = ta.sma(df_5m["close"], length=20).fillna(method='ffill').fillna(df_5m["close"])
-    df_5m["ma60"] = ta.sma(df_5m["close"], length=60).fillna(method='ffill').fillna(df_5m["close"])
+    # 修改点：.fillna(method='ffill') -> .ffill()
+    df_5m["ma20"] = ta.sma(df_5m["close"], length=20).ffill().fillna(df_5m["close"])
+    df_5m["ma60"] = ta.sma(df_5m["close"], length=60).ffill().fillna(df_5m["close"])
 
     macd = ta.macd(df_5m["close"], fast=10, slow=22, signal=8)
     if macd is not None:
@@ -259,38 +260,38 @@ def compute_features(df_5m, df_15m, df_1h):
     else:
         df_5m["adx"] = 20
 
-    df_5m["ema5"] = ta.ema(df_5m["close"], length=5).fillna(method='ffill').fillna(df_5m["close"])
-    df_5m["ema20"] = ta.ema(df_5m["close"], length=20).fillna(method='ffill').fillna(df_5m["close"])
+    df_5m["ema5"] = ta.ema(df_5m["close"], length=5).ffill().fillna(df_5m["close"])
+    df_5m["ema20"] = ta.ema(df_5m["close"], length=20).ffill().fillna(df_5m["close"])
     vwap = ta.vwap(df_5m["high"], df_5m["low"], df_5m["close"], df_5m["volume"])
-    df_5m["VWAP"] = vwap.fillna(method='ffill').fillna(df_5m["close"])
+    df_5m["VWAP"] = vwap.ffill().fillna(df_5m["close"])
     df_5m["volume_ma20"] = ta.sma(df_5m["volume"], length=20).fillna(0)
     df_5m["atr_ma20"] = df_5m["atr"].rolling(20).mean().fillna(0)
     df_5m["atr_surge"] = (df_5m["atr"] > df_5m["atr_ma20"] * 1.2).fillna(False)
 
     # ----- 15m 指标 -----
-    df_15m["ema200"] = ta.ema(df_15m["close"], length=200).fillna(method='ffill').fillna(df_15m["close"])
+    df_15m["ema200"] = ta.ema(df_15m["close"], length=200).ffill().fillna(df_15m["close"])
     adx_15_df = ta.adx(df_15m["high"], df_15m["low"], df_15m["close"], length=14)
     if adx_15_df is not None:
         df_15m["adx"] = adx_15_df['ADX_14'].fillna(20)
     else:
         df_15m["adx"] = 20
     vwap_15 = ta.vwap(df_15m["high"], df_15m["low"], df_15m["close"], df_15m["volume"])
-    df_15m["VWAP"] = vwap_15.fillna(method='ffill').fillna(df_15m["close"])
-    df_15m["hh"] = df_15m["high"].rolling(20).max().fillna(method='ffill').fillna(df_15m["high"])
-    df_15m["ll"] = df_15m["low"].rolling(20).min().fillna(method='ffill').fillna(df_15m["low"])
+    df_15m["VWAP"] = vwap_15.ffill().fillna(df_15m["close"])
+    df_15m["hh"] = df_15m["high"].rolling(20).max().ffill().fillna(df_15m["high"])
+    df_15m["ll"] = df_15m["low"].rolling(20).min().ffill().fillna(df_15m["low"])
     df_15m["ema200_slope"] = (df_15m["ema200"] - df_15m["ema200"].shift(5)).fillna(0)
 
     # ----- 1h 指标 -----
-    df_1h["ema200"] = ta.ema(df_1h["close"], length=200).fillna(method='ffill').fillna(df_1h["close"])
+    df_1h["ema200"] = ta.ema(df_1h["close"], length=200).ffill().fillna(df_1h["close"])
     adx_1h_df = ta.adx(df_1h["high"], df_1h["low"], df_1h["close"], length=14)
     if adx_1h_df is not None:
         df_1h["adx"] = adx_1h_df['ADX_14'].fillna(20)
     else:
         df_1h["adx"] = 20
     vwap_1h = ta.vwap(df_1h["high"], df_1h["low"], df_1h["close"], df_1h["volume"])
-    df_1h["VWAP"] = vwap_1h.fillna(method='ffill').fillna(df_1h["close"])
-    df_1h["hh"] = df_1h["high"].rolling(20).max().fillna(method='ffill').fillna(df_1h["high"])
-    df_1h["ll"] = df_1h["low"].rolling(20).min().fillna(method='ffill').fillna(df_1h["low"])
+    df_1h["VWAP"] = vwap_1h.ffill().fillna(df_1h["close"])
+    df_1h["hh"] = df_1h["high"].rolling(20).max().ffill().fillna(df_1h["high"])
+    df_1h["ll"] = df_1h["low"].rolling(20).min().ffill().fillna(df_1h["low"])
     df_1h["ema200_slope"] = (df_1h["ema200"] - df_1h["ema200"].shift(3)).fillna(0)
 
     # 提取最新特征
