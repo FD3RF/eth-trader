@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 智能做单策略终端 v7.0（激进版）
+ETH 100x 智能做单策略终端 v7.1（最终优化版）
 特性：
-- 激进入场参数：信心阈值 75，过滤大幅放宽，模型权重 50%
+- 激进入场参数：信心阈值 70，模型权重 70%，大幅放宽过滤
 - 默认杠杆 30 倍，兼顾胜率与机会
 - UI 卡片化、紧凑布局、超大信号卡
-- 保留全部策略模块与风控
+- 完整策略模块与风控
 """
 
 import streamlit as st
@@ -26,7 +26,7 @@ from scipy import stats
 # ================================
 # 1. 全局配置（激进参数）
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.0", page_icon="📈", initial_sidebar_state="collapsed")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.1", page_icon="📈", initial_sidebar_state="collapsed")
 
 # 自定义CSS（卡片风格、颜色、布局）
 st.markdown("""
@@ -143,7 +143,7 @@ SYMBOL = "ETH/USDT:USDT"
 REFRESH_MS = 2500
 
 # 激进入场阈值
-FINAL_CONF_THRES = 75
+FINAL_CONF_THRES = 70           # 原75，降低到70增加信号
 
 # 固定止损止盈
 STOP_LOSS_PCT = 0.01
@@ -164,19 +164,19 @@ TAKER_FEE = 0.0005
 # 维持保证金率
 MAINTENANCE_MARGIN_RATE = 0.004
 
-# 过滤参数（大幅放宽）
-MIN_ATR_PCT = 0.0005
-MAX_ATR_PCT = 0.03
-VOLUME_RATIO_MIN = 1.0
-MIN_TREND_STRENGTH = 5
-MIN_SCORE_GAP = 3
-MODEL_DIRECTION_MIN = 50
-COOLDOWN_CANDLES = 1
+# 过滤参数（大幅放宽，几乎不设限）
+MIN_ATR_PCT = 0.0001            # 允许极低波动
+MAX_ATR_PCT = 0.1               # 允许极高波动
+VOLUME_RATIO_MIN = 0.8          # 成交量只需达到0.8倍均量
+MIN_TREND_STRENGTH = 0          # 取消趋势强度要求
+MIN_SCORE_GAP = 0                # 取消多空分差要求
+MODEL_DIRECTION_MIN = 0          # 取消模型方向最低要求
+COOLDOWN_CANDLES = 0             # 取消冷却期
 
 # 权重（模型主导）
-TREND_WEIGHT = 0.2
-MOMENTUM_WEIGHT = 0.3
-MODEL_WEIGHT = 0.5
+TREND_WEIGHT = 0.1
+MOMENTUM_WEIGHT = 0.2
+MODEL_WEIGHT = 0.7
 
 # 资金费结算时间
 FUNDING_HOURS = [0, 8, 16]
@@ -194,7 +194,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v70")
+st_autorefresh(interval=REFRESH_MS, key="quant_v71")
 
 # ================================
 # 2. 初始化系统与状态
@@ -1207,7 +1207,7 @@ with st.sidebar:
 # ================================
 # 11. 主循环（卡片化 UI）
 # ================================
-st.title("📈 ETH 100x 智能做单策略终端 v7.0")
+st.title("📈 ETH 100x 智能做单策略终端 v7.1 (最终优化版)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
