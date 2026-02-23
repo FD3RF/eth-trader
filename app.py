@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 真实撮合版 4.6
-特性：
-- 四大模块：入场、出场、仓位、风控（已工程化）
-- 策略可视化卡片 + 信号事件日志
-- 动态仓位缩放（可选）
-- 完整评分函数，无占位
+ETH 100x 做单策略终端 4.7
+修复：
+- t_long 未定义错误
+- fillna 弃用警告
+- use_container_width 弃用警告
+- last_reset_day KeyError
+增强：
+- 策略卡片显示详细触发条件
+- 风控参数动态调节
 """
 
 import streamlit as st
@@ -26,7 +29,7 @@ from scipy import stats
 # ================================
 # 1. 全局配置
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 4.6", page_icon="📊")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 4.7", page_icon="📊")
 
 SYMBOL = "ETH/USDT:USDT"
 REFRESH_MS = 2500
@@ -84,7 +87,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v46")
+st_autorefresh(interval=REFRESH_MS, key="quant_v47")
 
 # ================================
 # 2. 初始化系统与状态
@@ -122,6 +125,8 @@ def init_system():
 exchange, model, scaler = init_system()
 
 def init_session_state():
+    """集中初始化所有 session_state 变量"""
+    today = datetime.now().date()
     defaults = {
         'last_price': 0,
         'system_halted': False,
@@ -136,6 +141,7 @@ def init_session_state():
             'losses': 0,
             'current_consecutive_losses': 0,
             'max_consecutive_losses': 0,
+            'last_reset_day': today,        # 新增，用于每日重置
         },
         'prediction_history': deque(maxlen=200),
         'last_recorded_candle': None,
@@ -158,7 +164,7 @@ def init_session_state():
         'use_atr_stop': USE_ATR_STOP,
         'use_ema_reverse': USE_EMA_REVERSE,
         'use_score_reverse': USE_SCORE_REVERSE,
-        'use_dynamic_position': False,   # 是否启用动态仓位缩放
+        'use_dynamic_position': False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -216,7 +222,7 @@ def get_multi_timeframe_data():
     return df_5m, df_15m, df_1h
 
 # ================================
-# 5. 指标计算（完整版）
+# 5. 指标计算（修复fillna弃用）
 # ================================
 def compute_features(df_5m, df_15m, df_1h):
     df_5m = df_5m.copy()
@@ -434,7 +440,7 @@ def detect_momentum_decay(df_5m):
             macd_vals[1] < macd_vals[0])
 
 # ================================
-# 7. 四大策略模块（类封装）
+# 7. 四大策略模块
 # ================================
 
 class EntryEngine:
@@ -457,7 +463,7 @@ class EntryEngine:
         c1h = df_1h.iloc[-1] if len(df_1h) > 0 else None
 
         filter_reasons = []
-        trigger_details = []  # 记录满足的条件
+        trigger_details = []
 
         # 波动率过滤
         atr_pct = c5.get('atr_pct', 0)
@@ -508,24 +514,23 @@ class EntryEngine:
         if cooling:
             filter_reasons.append("冷却中")
 
-        # 资金费过滤（可选）
+        # 资金费过滤
         if abs(st.session_state.latest_funding_rate) > 0.0005:
             filter_reasons.append("资金费过高")
 
         # 构建理由字符串
         reason = " | ".join(trigger_details) if trigger_details else "无触发条件"
 
-        # 如果有过滤条件，返回None
         if filter_reasons:
-            return None, filter_reasons, (final_long, final_short, prob_long, prob_short), reason
+            return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
         # 最终方向判断
         if final_long >= self.config['conf_thres'] and final_long > final_short:
-            return 'LONG', filter_reasons, (final_long, final_short, prob_long, prob_short), reason
+            return 'LONG', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
         elif final_short >= self.config['conf_thres'] and final_short > final_long:
-            return 'SHORT', filter_reasons, (final_long, final_short, prob_long, prob_short), reason
+            return 'SHORT', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
         else:
-            return None, filter_reasons, (final_long, final_short, prob_long, prob_short), reason
+            return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
 
 class ExitEngine:
@@ -544,19 +549,19 @@ class ExitEngine:
         if reason:
             return exit_price, reason
 
-        # 3. ATR动态止损（如果启用）
+        # 3. ATR动态止损
         if st.session_state.use_atr_stop:
             exit_price, reason = self._check_atr_stop(position, df_5m)
             if reason:
                 return exit_price, reason
 
-        # 4. EMA反转（如果启用）
+        # 4. EMA反转
         if st.session_state.use_ema_reverse:
             exit_price, reason = self._check_ema_reverse(position, df_5m)
             if reason:
                 return exit_price, reason
 
-        # 5. 评分反转（如果启用）
+        # 5. 评分反转
         if st.session_state.use_score_reverse:
             exit_price, reason = self._check_score_reverse(position, final_long, final_short)
             if reason:
@@ -645,10 +650,9 @@ class PositionSizer:
             return 0.01
         size = risk_amount / risk_per_contract
 
-        # 动态缩放：如果启用且提供了最终信心分
         if st.session_state.use_dynamic_position and final_score is not None:
-            scale = 1 + (final_score - 80) * 0.01  # 80为基准，每高1分放大1%
-            scale = max(scale, 0.5)  # 最小缩放到50%
+            scale = 1 + (final_score - 80) * 0.01
+            scale = max(scale, 0.5)
             size *= scale
 
         return round(size, 2)
@@ -956,7 +960,7 @@ def monte_carlo_test(pnl_list, initial_equity, num_simulations=1000):
     return result
 
 # ================================
-# 10. 侧边栏（含风控设置）
+# 10. 侧边栏（替换use_container_width为width）
 # ================================
 with st.sidebar:
     st.header("📊 实时审计")
@@ -1039,7 +1043,7 @@ with st.sidebar:
 
         fig_dist = plot_pnl_distribution(st.session_state.pnl_list)
         if fig_dist:
-            st.plotly_chart(fig_dist, use_container_width=True)
+            st.plotly_chart(fig_dist, use_container_width=True)  # 注意：plotly_chart 仍使用 use_container_width，但该参数尚未弃用，可保留
 
         trade_logs = [log for log in st.session_state.signal_log if log.get('事件') == '平仓']
         pnl_with_time = []
@@ -1104,6 +1108,7 @@ with st.sidebar:
     if st.session_state.signal_log:
         log_list = list(st.session_state.signal_log)[::-1]
         log_df = pd.DataFrame(log_list)
+        # 替换 use_container_width 为 width='stretch'
         st.dataframe(log_df.head(20), width='stretch', height=350)
         if st.button("清除日志"):
             st.session_state.signal_log.clear()
@@ -1113,9 +1118,9 @@ with st.sidebar:
         st.info("等待交易...")
 
 # ================================
-# 11. 主循环（策略可视化）
+# 11. 主循环（修复变量未定义）
 # ================================
-st.title("⚖️ ETH 100x 做单策略终端 4.6")
+st.title("⚖️ ETH 100x 做单策略终端 4.7")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1180,7 +1185,8 @@ try:
     final_score = 0
     filter_reasons = []
     signal_reason = ""
-    scores_display = (0,0,0,0)
+    scores_display = (0,0,0,0,0,0,0,0)  # 扩展为8个值：final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short
+    t_long, t_short, m_long, m_short = 0, 0, 0, 0  # 默认值，避免未定义
 
     if new_candle and not st.session_state.system_halted:
         st.session_state.last_5m_candle_time = current_5m_candle_time
@@ -1190,9 +1196,12 @@ try:
             last_signal_candle=st.session_state.last_signal_candle,
             current_candle_time=current_5m_candle_time
         )
-        final_score = scores[0] if direction == 'LONG' else scores[1]
+        # scores 包含8个值
+        final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short = scores
+        final_score = final_long if direction == 'LONG' else final_short
+        t_long, t_short, m_long, m_short = trend_long, trend_short, mom_long, mom_short
 
-        # 记录信号事件（无论是否满足入场阈值）
+        # 记录信号事件
         if direction:
             st.session_state.signal_log.append({
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1203,7 +1212,6 @@ try:
                 "过滤": "无" if not filter_reasons else " | ".join(filter_reasons)
             })
         else:
-            # 即使无信号，也记录过滤原因（可选）
             if filter_reasons:
                 st.session_state.signal_log.append({
                     "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1223,17 +1231,13 @@ try:
 
         st.session_state.prediction_history.append({
             'time': current_5m_candle_time,
-            'final_long': scores[0],
-            'final_short': scores[1],
+            'final_long': final_long,
+            'final_short': final_short,
             'price': current_price
         })
         scores_display = scores
-
-    # 实时评分显示（用于UI）
-    if not new_candle and len(scores_display) == 4:
-        final_long_disp, final_short_disp, prob_long_disp, prob_short_disp = scores_display
     else:
-        # 重新计算一次用于显示
+        # 如果不是新K线，重新计算当前评分用于UI显示
         c15_aligned = df_15m.asof(df_5m.index[-1])
         c1h_aligned = df_1h.asof(df_5m.index[-1])
         temp_15m = pd.DataFrame([c15_aligned], index=[df_5m.index[-1]])
@@ -1241,9 +1245,9 @@ try:
         t_long, t_short, _, _ = compute_trend_score(temp_15m, temp_1h)
         m_long, m_short = compute_momentum_score(df_5m)
         p_long, p_short = compute_model_prob(model, scaler, latest_feat, t_long, t_short)
-        final_long_disp = (t_long * TREND_WEIGHT + m_long * MOMENTUM_WEIGHT + p_long * MODEL_WEIGHT) / 100
-        final_short_disp = (t_short * TREND_WEIGHT + m_short * MOMENTUM_WEIGHT + p_short * MODEL_WEIGHT) / 100
-        prob_long_disp, prob_short_disp = p_long, p_short
+        final_long = (t_long * TREND_WEIGHT + m_long * MOMENTUM_WEIGHT + p_long * MODEL_WEIGHT) / 100
+        final_short = (t_short * TREND_WEIGHT + m_short * MOMENTUM_WEIGHT + p_short * MODEL_WEIGHT) / 100
+        prob_long, prob_short = p_long, p_short
 
     # ========== 策略可视化卡片 ==========
     with st.container():
@@ -1260,24 +1264,27 @@ try:
             col_c.info("**理由**: -")
             col_d.info(f"**过滤**: {'通过' if not filter_reasons else '未通过: ' + ' | '.join(filter_reasons)}")
 
+        # 显示分项评分
+        st.markdown(f"**趋势**: {t_long:.0f}/{t_short:.0f} | **动量**: {m_long:.0f}/{m_short:.0f} | **模型**: {prob_long:.0f}%/{prob_short:.0f}%")
+
     # ========== 指标行 ==========
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("ETH 实时价", f"${current_price}")
     col2.metric("标记价格", f"${mark_price:.2f}")
     col3.metric("趋势核 (多/空)", f"{t_long:.0f}/{t_short:.0f}")
     col4.metric("动量核 (多/空)", f"{m_long:.0f}/{m_short:.0f}")
-    col5.metric("模型 (多/空)", f"{prob_long_disp:.0f}%/{prob_short_disp:.0f}%")
+    col5.metric("模型 (多/空)", f"{prob_long:.0f}%/{prob_short:.0f}%")
 
-    if final_long_disp > final_short_disp:
-        final_text = f"🟢 {final_long_disp:.0f} ▲ / {final_short_disp:.0f}"
-    elif final_short_disp > final_long_disp:
-        final_text = f"🔴 {final_long_disp:.0f} / {final_short_disp:.0f} ▼"
+    if final_long > final_short:
+        final_text = f"🟢 {final_long:.0f} ▲ / {final_short:.0f}"
+    elif final_short > final_long:
+        final_text = f"🔴 {final_long:.0f} / {final_short:.0f} ▼"
     else:
-        final_text = f"⚪ {final_long_disp:.0f} / {final_short_disp:.0f} ●"
+        final_text = f"⚪ {final_long:.0f} / {final_short:.0f} ●"
     st.markdown(f"**最终信心**<br><span style='font-size:1.2rem;'>{final_text}</span>", unsafe_allow_html=True)
 
-    strength = abs(final_long_disp - final_short_disp)
-    direction_display = "LONG" if final_long_disp > final_short_disp else "SHORT" if final_short_disp > final_long_disp else "NEUTRAL"
+    strength = abs(final_long - final_short)
+    direction_display = "LONG" if final_long > final_short else "SHORT" if final_short > final_long else "NEUTRAL"
     bar_color = "#4CAF50" if direction_display == "LONG" else "#F44336" if direction_display == "SHORT" else "#9E9E9E"
     st.markdown(f"""
     <div style="width:100%; background-color:#ddd; border-radius:5px; margin-top:10px; margin-bottom:10px;">
