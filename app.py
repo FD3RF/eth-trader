@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-ETH 100x 智能做单策略终端 v7.1（最终优化版）
-特性：
-- 激进入场参数：信心阈值 70，模型权重 70%，大幅放宽过滤
-- 默认杠杆 30 倍，兼顾胜率与机会
-- UI 卡片化、紧凑布局、超大信号卡
-- 完整策略模块与风控
+ETH 100x 智能做单策略终端 v7.2（最终修复版）
+修复：
+- 最终信心显示乘以100
+- 信号阈值比较乘以100
+- 其他UI优化
 """
 
 import streamlit as st
@@ -26,7 +25,7 @@ from scipy import stats
 # ================================
 # 1. 全局配置（激进参数）
 # ================================
-st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.1", page_icon="📈", initial_sidebar_state="collapsed")
+st.set_page_config(layout="wide", page_title="ETH 100x 做单策略 v7.2", page_icon="📈", initial_sidebar_state="collapsed")
 
 # 自定义CSS（卡片风格、颜色、布局）
 st.markdown("""
@@ -194,7 +193,7 @@ USE_ATR_STOP = True
 USE_EMA_REVERSE = True
 USE_SCORE_REVERSE = True
 
-st_autorefresh(interval=REFRESH_MS, key="quant_v71")
+st_autorefresh(interval=REFRESH_MS, key="quant_v72")
 
 # ================================
 # 2. 初始化系统与状态
@@ -622,9 +621,10 @@ class EntryEngine:
         if filter_reasons:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
 
-        if final_long >= self.config['conf_thres'] and final_long > final_short:
+        # 修复：比较时乘以100，因为final_long是0-1小数
+        if final_long * 100 >= self.config['conf_thres'] and final_long > final_short:
             return 'LONG', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
-        elif final_short >= self.config['conf_thres'] and final_short > final_long:
+        elif final_short * 100 >= self.config['conf_thres'] and final_short > final_long:
             return 'SHORT', filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
         else:
             return None, filter_reasons, (final_long, final_short, prob_long, prob_short, trend_long, trend_short, mom_long, mom_short), reason
@@ -1207,7 +1207,7 @@ with st.sidebar:
 # ================================
 # 11. 主循环（卡片化 UI）
 # ================================
-st.title("📈 ETH 100x 智能做单策略终端 v7.1 (最终优化版)")
+st.title("📈 ETH 100x 智能做单策略终端 v7.2 (最终修复版)")
 
 try:
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -1289,7 +1289,7 @@ try:
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "事件": "信号",
                 "方向": direction,
-                "置信度": f"{final_score:.1f}",
+                "置信度": f"{final_score*100:.1f}",
                 "理由": signal_reason,
                 "过滤": "无" if not filter_reasons else " | ".join(filter_reasons)
             })
@@ -1401,17 +1401,18 @@ try:
 
     with col_t4:
         final_dir = "bull" if final_long > final_short else "bear" if final_short > final_long else "neutral"
+        # 修复：乘以100显示百分比
         st.markdown(f"""
         <div class="card">
             <div class="card-label">最终信心</div>
-            <div class="card-value {final_dir}">{max(final_long, final_short):.0f}%</div>
+            <div class="card-value {final_dir}">{max(final_long, final_short)*100:.0f}%</div>
         </div>
         """, unsafe_allow_html=True)
 
     # 第三行：超大信号卡（横跨）
     if st.session_state.active_signal:
         direction = st.session_state.active_signal
-        conf = final_score
+        conf = final_score * 100  # 转换为百分比
         arrow = "▲" if direction == "LONG" else "▼"
         signal_class = "bull" if direction == "LONG" else "bear"
         signal_text = f"{direction} {conf:.0f}% {arrow}"
@@ -1438,7 +1439,8 @@ try:
     # 开仓逻辑（新K线且有信号时）
     if new_candle and st.session_state.active_signal and st.session_state.position is None and not st.session_state.system_halted:
         side = st.session_state.active_signal
-        st.success(f"🎯 **执行交易信号：{side}** (信心分 {final_score:.1f})")
+        conf_display = final_score * 100
+        st.success(f"🎯 **执行交易信号：{side}** (信心分 {conf_display:.1f}%)")
         actual_entry, sl, tp, size = open_position(current_price, side, final_score)
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.write(f"**入场价:** {actual_entry:.2f}")
