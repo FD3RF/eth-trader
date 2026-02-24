@@ -1,4 +1,4 @@
-streamlit
-pandas
-numpy
-websocket-client
+streamlit>=1.38.0
+pandas>=2.2.0
+numpy>=1.26.0
+websocket-client>=1.8.0
