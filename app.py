@@ -13,7 +13,6 @@ INTERVAL = "5m"
 LIMIT = 100
 
 # ---------- 初始化 session_state ----------
-# 注意：如果之前有旧数据，下面的重置可以清除
 if 'candle_buffer' not in st.session_state:
     st.session_state.candle_buffer = []
     st.session_state.last_fetch_time = 0
@@ -111,10 +110,10 @@ def update_signal_stats():
         'total': total, 'win': win, 'loss': loss, 'pending': pending, 'win_rate': win_rate
     }
 
-def add_signal_to_history(signal, sl, tp1, tp2):
+def add_signal_to_history(signal, sl, tp1, tp2, signal_time):
     record = {
         'record_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'signal_time': df.index[-1].strftime('%Y-%m-%d %H:%M'),  # 记录信号发生的K线时间
+        'signal_time': signal_time,
         'side': signal[0],
         'price': signal[1],
         'ema_fast': signal[2],
@@ -148,8 +147,8 @@ def clear_signal_history():
     update_signal_stats()
 
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (最终版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 最终版)")
+st.set_page_config(page_title="ETH 5分钟策略 (修复版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 修复版)")
 
 # 新手说明
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
@@ -178,6 +177,12 @@ if st.sidebar.button("立即刷新数据"):
     fetch_and_merge_klines()
     st.rerun()
 
+# 重置所有状态按钮（调试用）
+if st.sidebar.button("🔄 重置所有状态"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
 # ---------- 自动刷新 ----------
 st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
 
@@ -195,7 +200,7 @@ df['time'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=8)
 df.set_index('time', inplace=True)
 df = df[['open', 'high', 'low', 'close', 'volume']]  # 只保留这五列
 
-# 计算指标（注意：这里添加的列名必须与后续一致）
+# 计算指标
 df['ema_fast'] = calculate_ema(df['close'], fast_ema)
 df['ema_slow'] = calculate_ema(df['close'], slow_ema)
 df['rsi'] = calculate_rsi(df['close'], rsi_period)
@@ -205,22 +210,25 @@ signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
                        buy_min, buy_max, sell_min, sell_max)
 
 # ---------- 显示信号卡片并记录新信号 ----------
-st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线数量: {len(df)}")
+# 修复时间格式：确保使用正确的格式
+current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+st.caption(f"最后更新: {current_time_str} | K线数量: {len(df)}")
 
 if signal:
     side, price, ema_f, ema_s, rsi = signal
     sl, tp1, tp2 = calculate_sltp(price, side)
 
     # 判断是否为新信号（基于当前K线时间戳去重）
-    current_kline_time = df.index[-1].timestamp()
+    current_kline_time = df.index[-1]
     if st.session_state.last_signal_time != current_kline_time:
         st.session_state.last_signal_time = current_kline_time
-        add_signal_to_history(signal, sl, tp1, tp2)
+        signal_time_str = current_kline_time.strftime('%Y-%m-%d %H:%M')
+        add_signal_to_history(signal, sl, tp1, tp2, signal_time_str)
 
     if side == 'BUY':
-        st.success(f"### 🟢 多头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+        st.success(f"### 🟢 多头信号 @ {current_kline_time.strftime('%Y-%m-%d %H:%M')}")
     else:
-        st.error(f"### 🔴 空头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+        st.error(f"### 🔴 空头信号 @ {current_kline_time.strftime('%Y-%m-%d %H:%M')}")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -288,12 +296,13 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ---------- 显示最近K线 ----------
 st.subheader("最近 10 根K线")
-# 确保只显示我们需要的列
 display_cols = ['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']
-# 检查这些列是否都存在，避免KeyError
 available_cols = [col for col in display_cols if col in df.columns]
-display_df = df[available_cols].tail(10).round(2)
-st.dataframe(display_df)
+if available_cols:
+    display_df = df[available_cols].tail(10).round(2)
+    st.dataframe(display_df)
+else:
+    st.warning("数据列不完整，请稍后刷新")
 
 # ---------- 历史信号表格 ----------
 st.markdown("---")
@@ -301,12 +310,10 @@ st.subheader("📜 历史信号记录")
 
 if st.session_state.signal_history:
     hist_df = pd.DataFrame(st.session_state.signal_history)
-    # 选择要显示的列（避免不存在）
     hist_cols = ['record_time', 'signal_time', 'side', 'price', 'sl', 'tp1', 'tp2', 'result', 'exit_price', 'exit_time', 'note']
     available_hist_cols = [col for col in hist_cols if col in hist_df.columns]
     display_hist = hist_df[available_hist_cols].copy()
     
-    # 标记颜色
     def color_result(val):
         if val == 'win':
             return 'background-color: #90ee90'
@@ -315,7 +322,10 @@ if st.session_state.signal_history:
         elif val == 'pending':
             return 'background-color: #fffacd'
         return ''
-    styled_hist = display_hist.style.applymap(color_result, subset=['result'] if 'result' in display_hist.columns else [])
+    if 'result' in display_hist.columns:
+        styled_hist = display_hist.style.applymap(color_result, subset=['result'])
+    else:
+        styled_hist = display_hist
     st.dataframe(styled_hist, use_container_width=True, height=300)
 
     # 手动标记结果
