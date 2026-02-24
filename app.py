@@ -13,16 +13,15 @@ INTERVAL = "5m"
 LIMIT = 100
 
 # ---------- 初始化 session_state ----------
+# 注意：如果之前有旧数据，下面的重置可以清除
 if 'candle_buffer' not in st.session_state:
     st.session_state.candle_buffer = []
     st.session_state.last_fetch_time = 0
-    st.session_state.signal_history = []          # 历史信号列表
-    st.session_state.last_signal_time = None       # 上次信号的时间戳（用于去重）
-    st.session_state.signal_stats = {              # 统计缓存
-        'total': 0, 'win': 0, 'loss': 0, 'pending': 0, 'win_rate': 0
-    }
+    st.session_state.signal_history = []
+    st.session_state.last_signal_time = None
+    st.session_state.signal_stats = {'total': 0, 'win': 0, 'loss': 0, 'pending': 0, 'win_rate': 0}
 
-# ---------- 获取K线数据（带缓存合并）----------
+# ---------- 获取K线数据 ----------
 def fetch_and_merge_klines():
     url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
     try:
@@ -114,13 +113,13 @@ def update_signal_stats():
 
 def add_signal_to_history(signal, sl, tp1, tp2):
     record = {
-        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'signal_time': signal[0] if isinstance(signal, tuple) else '',
-        'side': signal[0] if isinstance(signal, tuple) else signal.get('side'),
-        'price': signal[1] if isinstance(signal, tuple) else signal.get('price'),
-        'ema_fast': signal[2] if isinstance(signal, tuple) else signal.get('ema_fast'),
-        'ema_slow': signal[3] if isinstance(signal, tuple) else signal.get('ema_slow'),
-        'rsi': signal[4] if isinstance(signal, tuple) else signal.get('rsi'),
+        'record_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'signal_time': df.index[-1].strftime('%Y-%m-%d %H:%M'),  # 记录信号发生的K线时间
+        'side': signal[0],
+        'price': signal[1],
+        'ema_fast': signal[2],
+        'ema_slow': signal[3],
+        'rsi': signal[4],
         'sl': sl,
         'tp1': tp1,
         'tp2': tp2,
@@ -149,8 +148,8 @@ def clear_signal_history():
     update_signal_stats()
 
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (记录版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 历史记录版)")
+st.set_page_config(page_title="ETH 5分钟策略 (最终版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 最终版)")
 
 # 新手说明
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
@@ -194,8 +193,9 @@ if len(candles) < 30:
 df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 df['time'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=8)
 df.set_index('time', inplace=True)
-df = df[['open', 'high', 'low', 'close', 'volume']]
+df = df[['open', 'high', 'low', 'close', 'volume']]  # 只保留这五列
 
+# 计算指标（注意：这里添加的列名必须与后续一致）
 df['ema_fast'] = calculate_ema(df['close'], fast_ema)
 df['ema_slow'] = calculate_ema(df['close'], slow_ema)
 df['rsi'] = calculate_rsi(df['close'], rsi_period)
@@ -288,8 +288,11 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ---------- 显示最近K线 ----------
 st.subheader("最近 10 根K线")
+# 确保只显示我们需要的列
 display_cols = ['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']
-display_df = df[display_cols].tail(10).round(2)
+# 检查这些列是否都存在，避免KeyError
+available_cols = [col for col in display_cols if col in df.columns]
+display_df = df[available_cols].tail(10).round(2)
 st.dataframe(display_df)
 
 # ---------- 历史信号表格 ----------
@@ -298,10 +301,11 @@ st.subheader("📜 历史信号记录")
 
 if st.session_state.signal_history:
     hist_df = pd.DataFrame(st.session_state.signal_history)
-    # 选择要显示的列
-    cols = ['time', 'signal_time', 'side', 'price', 'sl', 'tp1', 'tp2', 'result', 'exit_price', 'exit_time', 'note']
-    cols = [c for c in cols if c in hist_df.columns]
-    display_hist = hist_df[cols].copy()
+    # 选择要显示的列（避免不存在）
+    hist_cols = ['record_time', 'signal_time', 'side', 'price', 'sl', 'tp1', 'tp2', 'result', 'exit_price', 'exit_time', 'note']
+    available_hist_cols = [col for col in hist_cols if col in hist_df.columns]
+    display_hist = hist_df[available_hist_cols].copy()
+    
     # 标记颜色
     def color_result(val):
         if val == 'win':
@@ -311,14 +315,15 @@ if st.session_state.signal_history:
         elif val == 'pending':
             return 'background-color: #fffacd'
         return ''
-    styled_hist = display_hist.style.applymap(color_result, subset=['result'])
+    styled_hist = display_hist.style.applymap(color_result, subset=['result'] if 'result' in display_hist.columns else [])
     st.dataframe(styled_hist, use_container_width=True, height=300)
 
     # 手动标记结果
     with st.expander("✏️ 手动标记信号结果", expanded=False):
         col1, col2, col3, col4 = st.columns([3, 1, 1, 2])
         with col1:
-            options = [f"{i}. {s['time']} {s['side']} @{s['price']}" for i, s in enumerate(st.session_state.signal_history)]
+            options = [f"{i}. {s.get('record_time', '')} {s.get('side', '')} @{s.get('price', '')}" 
+                       for i, s in enumerate(st.session_state.signal_history)]
             selected_idx = st.selectbox("选择信号", range(len(options)), format_func=lambda x: options[x])
         with col2:
             result = st.selectbox("结果", ["pending", "win", "loss"])
