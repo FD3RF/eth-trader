@@ -64,14 +64,37 @@ def detect_signal(df, fast=9, slow=21, rsi_period=14, buy_min=50, buy_max=70, se
     death_cross = ema_fast_prev >= ema_slow_prev and ema_fast_now < ema_slow_now
 
     if golden_cross and last['close'] > ema_fast_now and buy_min < rsi_now < buy_max:
-        return 'BUY', last['close'], ema_fast_now, ema_slow_now, rsi_now
+        return ('BUY', last['close'], ema_fast_now, ema_slow_now, rsi_now)
     if death_cross and last['close'] < ema_fast_now and sell_min < rsi_now < sell_max:
-        return 'SELL', last['close'], ema_fast_now, ema_slow_now, rsi_now
+        return ('SELL', last['close'], ema_fast_now, ema_slow_now, rsi_now)
     return None
+
+# ---------- 计算止损止盈 ----------
+def calculate_sltp(entry_price, side):
+    if side == 'BUY':
+        sl = entry_price * 0.994
+        tp1 = entry_price * 1.006
+        tp2 = entry_price * 1.012
+    else:
+        sl = entry_price * 1.006
+        tp1 = entry_price * 0.994
+        tp2 = entry_price * 0.988
+    return sl, tp1, tp2
 
 # ---------- Streamlit界面 ----------
 st.set_page_config(page_title="ETH 5分钟策略 (REST版)", layout="wide")
 st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询)")
+
+# 新手说明
+with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
+    st.markdown("""
+    ### 如何根据信号下单？
+    当顶部出现 **🟢 多头信号** 或 **🔴 空头信号** 时，请按以下步骤操作：
+    1. **进场价格** = 信号卡片中的 **“进场价格”** 数值（例如 `1825.60`）
+    2. **止损价格** = 信号卡片中的 **“止损价格”** 数值（例如 `1815.00`）
+    3. 在交易所（如OKX）以市价单或限价单买入/卖出，价格尽量接近进场价。
+    4. 同时设置止损单（止损价）和止盈单（可选，按TP1/TP2设置）。
+    """)
 
 # 侧边栏参数
 st.sidebar.header("策略参数")
@@ -127,16 +150,42 @@ while True:
 
             if signal:
                 side, price, ema_f, ema_s, rsi = signal
+                sl, tp1, tp2 = calculate_sltp(price, side)
+
+                # 信号标题
                 if side == 'BUY':
                     st.success(f"### 🟢 多头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
                 else:
                     st.error(f"### 🔴 空头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
 
+                # 显示关键价格
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("📌 进场价格", f"{price:.2f}")
+                with col2:
+                    st.metric("🛑 止损价格", f"{sl:.2f}", delta_color="inverse")
+                with col3:
+                    st.metric("🎯 第一目标 (TP1)", f"{tp1:.2f}")
+
+                st.metric("🚀 第二目标 (TP2)", f"{tp2:.2f}")
+
+                # 额外指标
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("价格", f"{price:.2f}")
-                col2.metric(f"EMA{fast_ema}", f"{ema_f:.2f}")
-                col3.metric(f"EMA{slow_ema}", f"{ema_s:.2f}")
-                col4.metric("RSI", f"{rsi:.1f}")
+                col1.metric("EMA快线", f"{ema_f:.2f}")
+                col2.metric("EMA慢线", f"{ema_s:.2f}")
+                col3.metric("RSI", f"{rsi:.1f}")
+                col4.metric("当前价格", f"{df['close'].iloc[-1]:.2f}")
+
+                # 添加操作指引
+                st.info(f"""
+                **操作指引**：
+                - **进场**：以市价单或限价单在 **{price:.2f}** 附近买入（多头）或卖出（空头）。
+                - **止损**：立即设置止损单，价格为 **{sl:.2f}**。
+                - **止盈**：可设置两个止盈单：TP1 = **{tp1:.2f}**（平半仓），TP2 = **{tp2:.2f}**（全平）。
+                """)
+
+            else:
+                st.info("⏳ 等待信号出现...")
 
             # 绘制K线图
             fig = go.Figure(data=[go.Candlestick(
