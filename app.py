@@ -5,52 +5,73 @@ import requests
 import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from collections import deque
+from streamlit_autorefresh import st_autorefresh
 
 # ---------- 配置 ----------
 SYMBOL = "ETH-USDT"          # 交易对（现货）
 INTERVAL = "5m"               # K线周期
 LIMIT = 100                   # 每次获取的K线数量
-UPDATE_INTERVAL = 60          # 轮询间隔（秒），实际每5分钟数据才更新
+REFRESH_INTERVAL = 60 * 1000  # 自动刷新间隔（毫秒），默认60秒
 
-# ---------- 全局数据缓存 ----------
-candle_buffer = deque(maxlen=300)
+# ---------- 初始化 session_state ----------
+if 'candle_buffer' not in st.session_state:
+    st.session_state.candle_buffer = []  # 存储K线数据，格式 [timestamp, open, high, low, close, volume]
+    st.session_state.last_fetch_time = 0  # 上次拉取数据的时间戳（用于避免频繁请求）
 
-# ---------- 获取K线数据 ----------
-@st.cache_data(ttl=60)  # 缓存60秒，避免频繁请求
-def fetch_klines():
+# ---------- 获取K线数据（带缓存合并）----------
+def fetch_and_merge_klines():
+    """从OKX API获取最新K线，并与现有缓存合并（去重、排序）"""
     url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
     try:
         resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()['data']
-            # 转换为统一格式 [timestamp, open, high, low, close, volume]
-            candles = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
-            # 按时间正序排列（OKX返回的是倒序）
-            candles.sort(key=lambda x: x[0])
-            return candles
-        else:
+        if resp.status_code != 200:
             st.error(f"API请求失败: {resp.status_code}")
-            return None
+            return False
+
+        data = resp.json()['data']
+        # 转换为统一格式 [timestamp, open, high, low, close, volume]
+        new_candles = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
+        new_candles.sort(key=lambda x: x[0])  # 按时间正序
+
+        if not st.session_state.candle_buffer:
+            # 首次获取，直接赋值
+            st.session_state.candle_buffer = new_candles
+        else:
+            # 合并去重：保留现有和新数据，按时间戳去重，保留最新的
+            all_candles = st.session_state.candle_buffer + new_candles
+            # 去重（保留最后一条相同时间戳的）
+            ts_dict = {c[0]: c for c in all_candles}
+            merged = list(ts_dict.values())
+            merged.sort(key=lambda x: x[0])
+            # 限制最大数量
+            if len(merged) > 300:
+                merged = merged[-300:]
+            st.session_state.candle_buffer = merged
+        return True
     except Exception as e:
         st.error(f"请求异常: {e}")
-        return None
+        return False
 
 # ---------- 指标计算 ----------
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
 def calculate_rsi(series, period=14):
+    """优化版RSI，避免NaN过早出现"""
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    # 前period个值可能为NaN，填充为50（中性）
+    rsi.iloc[:period] = 50.0
     return rsi
 
-def detect_signal(df, fast=9, slow=21, rsi_period=14, buy_min=50, buy_max=70, sell_min=30, sell_max=50):
+def detect_signal(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, sell_max):
     if len(df) < slow + rsi_period + 5:
         return None
     last = df.iloc[-1]
@@ -69,7 +90,6 @@ def detect_signal(df, fast=9, slow=21, rsi_period=14, buy_min=50, buy_max=70, se
         return ('SELL', last['close'], ema_fast_now, ema_slow_now, rsi_now)
     return None
 
-# ---------- 计算止损止盈 ----------
 def calculate_sltp(entry_price, side):
     if side == 'BUY':
         sl = entry_price * 0.994
@@ -81,9 +101,9 @@ def calculate_sltp(entry_price, side):
         tp2 = entry_price * 0.988
     return sl, tp1, tp2
 
-# ---------- Streamlit界面 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (REST版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询)")
+# ---------- Streamlit 页面配置 ----------
+st.set_page_config(page_title="ETH 5分钟策略 (重构版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 重构版)")
 
 # 新手说明
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
@@ -109,104 +129,113 @@ refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 5, 300, 60, 5)
 
 # 手动刷新按钮
 if st.sidebar.button("立即刷新数据"):
-    st.cache_data.clear()
+    fetch_and_merge_klines()
     st.rerun()
 
-# 显示最新更新时间
-placeholder = st.empty()
+# ---------- 自动刷新 ----------
+st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")  # 转换为毫秒
 
-# 主循环（自动刷新）
-while True:
-    # 获取数据
-    candles = fetch_klines()
-    if candles is None:
-        time.sleep(10)
-        continue
+# ---------- 拉取最新数据 ----------
+fetch_and_merge_klines()
 
-    # 更新缓冲区
-    for c in candles:
-        candle_buffer.append(c)
+# ---------- 数据准备和指标计算 ----------
+candles = st.session_state.candle_buffer
+if len(candles) < 30:
+    st.warning(f"正在等待数据积累... 当前 {len(candles)}/30 根")
+    st.stop()  # 数据不足时停止执行后续代码
 
-    if len(candle_buffer) < 30:
-        placeholder.warning(f"正在等待数据积累... 当前 {len(candle_buffer)}/30 根")
+# 转为DataFrame
+df = pd.DataFrame(candles, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+# 修正时间显示（OKX时间戳为毫秒，转换为北京时间）
+df['time'] = pd.to_datetime(df['ts'], unit='ms') + timedelta(hours=8)  # 转换为北京时间
+df.set_index('time', inplace=True)
+
+# 计算指标
+df['ema_fast'] = calculate_ema(df['close'], fast_ema)
+df['ema_slow'] = calculate_ema(df['close'], slow_ema)
+df['rsi'] = calculate_rsi(df['close'], rsi_period)
+
+# 检测信号
+signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
+                       buy_min, buy_max, sell_min, sell_max)
+
+# ---------- 显示信号卡片 ----------
+st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线数量: {len(df)}")
+
+if signal:
+    side, price, ema_f, ema_s, rsi = signal
+    sl, tp1, tp2 = calculate_sltp(price, side)
+
+    if side == 'BUY':
+        st.success(f"### 🟢 多头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
     else:
-        # 转为DataFrame
-        df = pd.DataFrame(list(candle_buffer), columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
-        df['time'] = pd.to_datetime(df['ts'], unit='ms')
-        df.set_index('time', inplace=True)
+        st.error(f"### 🔴 空头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
 
-        # 计算指标
-        df['ema_fast'] = calculate_ema(df['close'], fast_ema)
-        df['ema_slow'] = calculate_ema(df['close'], slow_ema)
-        df['rsi'] = calculate_rsi(df['close'], rsi_period)
+    # 关键价格卡片
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("📌 进场价格", f"{price:.2f}")
+    with col2:
+        st.metric("🛑 止损价格", f"{sl:.2f}", delta_color="inverse")
+    with col3:
+        st.metric("🎯 第一目标 (TP1)", f"{tp1:.2f}")
+    st.metric("🚀 第二目标 (TP2)", f"{tp2:.2f}")
 
-        # 检测信号
-        signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
-                               buy_min, buy_max, sell_min, sell_max)
+    # 指标卡片
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("EMA快线", f"{ema_f:.2f}")
+    col2.metric("EMA慢线", f"{ema_s:.2f}")
+    col3.metric("RSI", f"{rsi:.1f}")
+    col4.metric("当前价格", f"{df['close'].iloc[-1]:.2f}")
 
-        # 创建显示区域
-        with placeholder.container():
-            st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线数量: {len(df)}")
+    st.info(f"""
+    **操作指引**：
+    - **进场**：以市价单或限价单在 **{price:.2f}** 附近买入（多头）或卖出（空头）。
+    - **止损**：立即设置止损单，价格为 **{sl:.2f}**。
+    - **止盈**：可设置两个止盈单：TP1 = **{tp1:.2f}**（平半仓），TP2 = **{tp2:.2f}**（全平）。
+    """)
+else:
+    st.info("⏳ 等待信号出现...")
 
-            if signal:
-                side, price, ema_f, ema_s, rsi = signal
-                sl, tp1, tp2 = calculate_sltp(price, side)
+# ---------- 绘制K线图 + 成交量 ----------
+fig = make_subplots(
+    rows=2, cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.03,
+    row_heights=[0.7, 0.3]
+)
 
-                # 信号标题
-                if side == 'BUY':
-                    st.success(f"### 🟢 多头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
-                else:
-                    st.error(f"### 🔴 空头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+# K线图
+fig.add_trace(go.Candlestick(
+    x=df.index,
+    open=df['open'],
+    high=df['high'],
+    low=df['low'],
+    close=df['close'],
+    name='K线'
+), row=1, col=1)
 
-                # 显示关键价格
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("📌 进场价格", f"{price:.2f}")
-                with col2:
-                    st.metric("🛑 止损价格", f"{sl:.2f}", delta_color="inverse")
-                with col3:
-                    st.metric("🎯 第一目标 (TP1)", f"{tp1:.2f}")
+# EMA线
+fig.add_trace(go.Scatter(x=df.index, y=df['ema_fast'], name=f'EMA{fast_ema}', line=dict(color='orange')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df['ema_slow'], name=f'EMA{slow_ema}', line=dict(color='blue')), row=1, col=1)
 
-                st.metric("🚀 第二目标 (TP2)", f"{tp2:.2f}")
+# 成交量柱状图
+colors = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
+fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='成交量', marker_color=colors), row=2, col=1)
 
-                # 额外指标
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("EMA快线", f"{ema_f:.2f}")
-                col2.metric("EMA慢线", f"{ema_s:.2f}")
-                col3.metric("RSI", f"{rsi:.1f}")
-                col4.metric("当前价格", f"{df['close'].iloc[-1]:.2f}")
+# 布局设置
+fig.update_layout(
+    height=700,
+    template='plotly_dark',
+    xaxis_rangeslider_visible=False,
+    showlegend=True
+)
+fig.update_yaxes(title_text="价格 (USDT)", row=1, col=1)
+fig.update_yaxes(title_text="成交量", row=2, col=1)
 
-                # 添加操作指引
-                st.info(f"""
-                **操作指引**：
-                - **进场**：以市价单或限价单在 **{price:.2f}** 附近买入（多头）或卖出（空头）。
-                - **止损**：立即设置止损单，价格为 **{sl:.2f}**。
-                - **止盈**：可设置两个止盈单：TP1 = **{tp1:.2f}**（平半仓），TP2 = **{tp2:.2f}**（全平）。
-                """)
+st.plotly_chart(fig, use_container_width=True)
 
-            else:
-                st.info("⏳ 等待信号出现...")
-
-            # 绘制K线图
-            fig = go.Figure(data=[go.Candlestick(
-                x=df.index,
-                open=df['open'],
-                high=df['high'],
-                low=df['low'],
-                close=df['close'],
-                name='K线'
-            )])
-            fig.add_trace(go.Scatter(x=df.index, y=df['ema_fast'], name=f'EMA{fast_ema}', line=dict(color='orange')))
-            fig.add_trace(go.Scatter(x=df.index, y=df['ema_slow'], name=f'EMA{slow_ema}', line=dict(color='blue')))
-            fig.update_layout(height=500, template='plotly_dark')
-            st.plotly_chart(fig, use_container_width=True)
-
-            # 显示最近K线
-            st.subheader("最近 10 根K线")
-            display_df = df[['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']].tail(10).round(2)
-            st.dataframe(display_df)
-
-    # 等待指定间隔
-    time.sleep(refresh_interval)
-    st.cache_data.clear()
-    st.rerun()
+# ---------- 显示最近K线 ----------
+st.subheader("最近 10 根K线")
+display_df = df[['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']].tail(10).round(2)
+st.dataframe(display_df)
