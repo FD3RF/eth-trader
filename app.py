@@ -8,45 +8,41 @@ from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
 # ---------- 配置 ----------
-SYMBOL = "ETH-USDT"          # 交易对（现货）
-INTERVAL = "5m"               # K线周期
-LIMIT = 100                   # 每次获取的K线数量
+SYMBOL = "ETH-USDT"
+INTERVAL = "5m"
+LIMIT = 100
 
 # ---------- 初始化 session_state ----------
 if 'candle_buffer' not in st.session_state:
-    st.session_state.candle_buffer = []  # 存储K线数据，格式 [timestamp, open, high, low, close, volume]
+    st.session_state.candle_buffer = []
     st.session_state.last_fetch_time = 0
+    st.session_state.signal_history = []          # 历史信号列表
+    st.session_state.last_signal_time = None       # 上次信号的时间戳（用于去重）
+    st.session_state.signal_stats = {              # 统计缓存
+        'total': 0, 'win': 0, 'loss': 0, 'pending': 0, 'win_rate': 0
+    }
 
 # ---------- 获取K线数据（带缓存合并）----------
 def fetch_and_merge_klines():
-    """从OKX API获取最新K线，并与现有缓存合并（去重、排序）"""
     url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             st.error(f"API请求失败: {resp.status_code}")
             return False
-
         data = resp.json()['data']
-        # 转换为统一格式 [timestamp, open, high, low, close, volume]
         new_candles = []
         for k in data:
-            # OKX返回的时间戳为毫秒，直接使用
             ts = int(k[0])
-            o = float(k[1])
-            h = float(k[2])
-            l = float(k[3])
-            c = float(k[4])
-            vol = float(k[5])
+            o = float(k[1]); h = float(k[2]); l = float(k[3]); c = float(k[4]); vol = float(k[5])
             new_candles.append([ts, o, h, l, c, vol])
-        new_candles.sort(key=lambda x: x[0])  # 按时间正序
+        new_candles.sort(key=lambda x: x[0])
 
         if not st.session_state.candle_buffer:
             st.session_state.candle_buffer = new_candles
         else:
-            # 合并去重
             all_candles = st.session_state.candle_buffer + new_candles
-            ts_dict = {c[0]: c for c in all_candles}  # 保留最后一条
+            ts_dict = {c[0]: c for c in all_candles}
             merged = list(ts_dict.values())
             merged.sort(key=lambda x: x[0])
             if len(merged) > 300:
@@ -69,7 +65,6 @@ def calculate_rsi(series, period=14):
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    # 前period个值填充为50
     rsi.iloc[:period] = 50.0
     return rsi
 
@@ -103,9 +98,59 @@ def calculate_sltp(entry_price, side):
         tp2 = entry_price * 0.988
     return sl, tp1, tp2
 
+# ---------- 信号统计管理 ----------
+def update_signal_stats():
+    total = len(st.session_state.signal_history)
+    if total == 0:
+        st.session_state.signal_stats = {'total': 0, 'win': 0, 'loss': 0, 'pending': 0, 'win_rate': 0}
+        return
+    win = sum(1 for s in st.session_state.signal_history if s.get('result') == 'win')
+    loss = sum(1 for s in st.session_state.signal_history if s.get('result') == 'loss')
+    pending = sum(1 for s in st.session_state.signal_history if s.get('result') == 'pending')
+    win_rate = round(win / (win + loss) * 100, 1) if (win + loss) > 0 else 0
+    st.session_state.signal_stats = {
+        'total': total, 'win': win, 'loss': loss, 'pending': pending, 'win_rate': win_rate
+    }
+
+def add_signal_to_history(signal, sl, tp1, tp2):
+    record = {
+        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'signal_time': signal[0] if isinstance(signal, tuple) else '',
+        'side': signal[0] if isinstance(signal, tuple) else signal.get('side'),
+        'price': signal[1] if isinstance(signal, tuple) else signal.get('price'),
+        'ema_fast': signal[2] if isinstance(signal, tuple) else signal.get('ema_fast'),
+        'ema_slow': signal[3] if isinstance(signal, tuple) else signal.get('ema_slow'),
+        'rsi': signal[4] if isinstance(signal, tuple) else signal.get('rsi'),
+        'sl': sl,
+        'tp1': tp1,
+        'tp2': tp2,
+        'result': 'pending',
+        'exit_price': None,
+        'exit_time': None,
+        'note': ''
+    }
+    st.session_state.signal_history.insert(0, record)
+    if len(st.session_state.signal_history) > 200:
+        st.session_state.signal_history = st.session_state.signal_history[:200]
+    update_signal_stats()
+
+def update_signal_result(index, result, exit_price=None, note=''):
+    if 0 <= index < len(st.session_state.signal_history):
+        st.session_state.signal_history[index]['result'] = result
+        if exit_price:
+            st.session_state.signal_history[index]['exit_price'] = round(exit_price, 2)
+            st.session_state.signal_history[index]['exit_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if note:
+            st.session_state.signal_history[index]['note'] = note
+        update_signal_stats()
+
+def clear_signal_history():
+    st.session_state.signal_history = []
+    update_signal_stats()
+
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (完美版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 完美版)")
+st.set_page_config(page_title="ETH 5分钟策略 (记录版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 历史记录版)")
 
 # 新手说明
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
@@ -146,14 +191,11 @@ if len(candles) < 30:
     st.warning(f"正在等待数据积累... 当前 {len(candles)}/30 根")
     st.stop()
 
-# 转为DataFrame
 df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-# 时间戳处理：OKX返回的是毫秒，直接转换为UTC时间，再转为北京时间（UTC+8）
 df['time'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=8)
 df.set_index('time', inplace=True)
-df = df[['open', 'high', 'low', 'close', 'volume']]  # 只保留价格和成交量
+df = df[['open', 'high', 'low', 'close', 'volume']]
 
-# 计算指标
 df['ema_fast'] = calculate_ema(df['close'], fast_ema)
 df['ema_slow'] = calculate_ema(df['close'], slow_ema)
 df['rsi'] = calculate_rsi(df['close'], rsi_period)
@@ -162,12 +204,18 @@ df['rsi'] = calculate_rsi(df['close'], rsi_period)
 signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
                        buy_min, buy_max, sell_min, sell_max)
 
-# ---------- 显示信号卡片 ----------
+# ---------- 显示信号卡片并记录新信号 ----------
 st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线数量: {len(df)}")
 
 if signal:
     side, price, ema_f, ema_s, rsi = signal
     sl, tp1, tp2 = calculate_sltp(price, side)
+
+    # 判断是否为新信号（基于当前K线时间戳去重）
+    current_kline_time = df.index[-1].timestamp()
+    if st.session_state.last_signal_time != current_kline_time:
+        st.session_state.last_signal_time = current_kline_time
+        add_signal_to_history(signal, sl, tp1, tp2)
 
     if side == 'BUY':
         st.success(f"### 🟢 多头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
@@ -198,6 +246,22 @@ if signal:
 else:
     st.info("⏳ 等待信号出现...")
 
+# ---------- 侧边栏统计卡片 ----------
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 信号统计")
+update_signal_stats()
+stats = st.session_state.signal_stats
+col1, col2 = st.sidebar.columns(2)
+col1.metric("总信号", stats['total'])
+col2.metric("胜率", f"{stats['win_rate']}%")
+col1.metric("✅ 盈利", stats['win'])
+col2.metric("❌ 亏损", stats['loss'])
+if stats['pending'] > 0:
+    st.sidebar.info(f"⏳ 待定信号: {stats['pending']}")
+if st.sidebar.button("🧹 清空历史信号"):
+    clear_signal_history()
+    st.rerun()
+
 # ---------- 绘制K线图 + 成交量 ----------
 fig = make_subplots(
     rows=2, cols=1,
@@ -205,7 +269,6 @@ fig = make_subplots(
     vertical_spacing=0.03,
     row_heights=[0.7, 0.3]
 )
-
 fig.add_trace(go.Candlestick(
     x=df.index,
     open=df['open'],
@@ -214,27 +277,65 @@ fig.add_trace(go.Candlestick(
     close=df['close'],
     name='K线'
 ), row=1, col=1)
-
 fig.add_trace(go.Scatter(x=df.index, y=df['ema_fast'], name=f'EMA{fast_ema}', line=dict(color='orange')), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df['ema_slow'], name=f'EMA{slow_ema}', line=dict(color='blue')), row=1, col=1)
-
 colors = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
 fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='成交量', marker_color=colors), row=2, col=1)
-
-fig.update_layout(
-    height=700,
-    template='plotly_dark',
-    xaxis_rangeslider_visible=False,
-    showlegend=True
-)
+fig.update_layout(height=700, template='plotly_dark', xaxis_rangeslider_visible=False, showlegend=True)
 fig.update_yaxes(title_text="价格 (USDT)", row=1, col=1)
 fig.update_yaxes(title_text="成交量", row=2, col=1)
-
 st.plotly_chart(fig, use_container_width=True)
 
 # ---------- 显示最近K线 ----------
 st.subheader("最近 10 根K线")
-# 确保列名正确
 display_cols = ['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']
 display_df = df[display_cols].tail(10).round(2)
 st.dataframe(display_df)
+
+# ---------- 历史信号表格 ----------
+st.markdown("---")
+st.subheader("📜 历史信号记录")
+
+if st.session_state.signal_history:
+    hist_df = pd.DataFrame(st.session_state.signal_history)
+    # 选择要显示的列
+    cols = ['time', 'signal_time', 'side', 'price', 'sl', 'tp1', 'tp2', 'result', 'exit_price', 'exit_time', 'note']
+    cols = [c for c in cols if c in hist_df.columns]
+    display_hist = hist_df[cols].copy()
+    # 标记颜色
+    def color_result(val):
+        if val == 'win':
+            return 'background-color: #90ee90'
+        elif val == 'loss':
+            return 'background-color: #ffcccb'
+        elif val == 'pending':
+            return 'background-color: #fffacd'
+        return ''
+    styled_hist = display_hist.style.applymap(color_result, subset=['result'])
+    st.dataframe(styled_hist, use_container_width=True, height=300)
+
+    # 手动标记结果
+    with st.expander("✏️ 手动标记信号结果", expanded=False):
+        col1, col2, col3, col4 = st.columns([3, 1, 1, 2])
+        with col1:
+            options = [f"{i}. {s['time']} {s['side']} @{s['price']}" for i, s in enumerate(st.session_state.signal_history)]
+            selected_idx = st.selectbox("选择信号", range(len(options)), format_func=lambda x: options[x])
+        with col2:
+            result = st.selectbox("结果", ["pending", "win", "loss"])
+        with col3:
+            exit_price = st.number_input("出场价", value=0.0, step=0.1)
+        with col4:
+            if st.button("更新结果"):
+                update_signal_result(selected_idx, result, exit_price if exit_price > 0 else None)
+                st.rerun()
+
+    # 导出CSV
+    csv = hist_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 导出历史信号 (CSV)",
+        data=csv,
+        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+else:
+    st.info("暂无历史信号，等待新信号出现...")
