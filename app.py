@@ -15,7 +15,7 @@ LIMIT = 100                   # 每次获取的K线数量
 # ---------- 初始化 session_state ----------
 if 'candle_buffer' not in st.session_state:
     st.session_state.candle_buffer = []  # 存储K线数据，格式 [timestamp, open, high, low, close, volume]
-    st.session_state.last_fetch_time = 0  # 上次拉取数据的时间戳（用于避免频繁请求）
+    st.session_state.last_fetch_time = 0
 
 # ---------- 获取K线数据（带缓存合并）----------
 def fetch_and_merge_klines():
@@ -29,20 +29,26 @@ def fetch_and_merge_klines():
 
         data = resp.json()['data']
         # 转换为统一格式 [timestamp, open, high, low, close, volume]
-        new_candles = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
+        new_candles = []
+        for k in data:
+            # OKX返回的时间戳为毫秒，直接使用
+            ts = int(k[0])
+            o = float(k[1])
+            h = float(k[2])
+            l = float(k[3])
+            c = float(k[4])
+            vol = float(k[5])
+            new_candles.append([ts, o, h, l, c, vol])
         new_candles.sort(key=lambda x: x[0])  # 按时间正序
 
         if not st.session_state.candle_buffer:
-            # 首次获取，直接赋值
             st.session_state.candle_buffer = new_candles
         else:
-            # 合并去重：保留现有和新数据，按时间戳去重，保留最新的
+            # 合并去重
             all_candles = st.session_state.candle_buffer + new_candles
-            # 去重（保留最后一条相同时间戳的）
-            ts_dict = {c[0]: c for c in all_candles}
+            ts_dict = {c[0]: c for c in all_candles}  # 保留最后一条
             merged = list(ts_dict.values())
             merged.sort(key=lambda x: x[0])
-            # 限制最大数量
             if len(merged) > 300:
                 merged = merged[-300:]
             st.session_state.candle_buffer = merged
@@ -56,7 +62,6 @@ def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
 def calculate_rsi(series, period=14):
-    """优化版RSI，避免NaN过早出现"""
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
@@ -64,7 +69,7 @@ def calculate_rsi(series, period=14):
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    # 前period个值可能为NaN，填充为50（中性）
+    # 前period个值填充为50
     rsi.iloc[:period] = 50.0
     return rsi
 
@@ -99,8 +104,8 @@ def calculate_sltp(entry_price, side):
     return sl, tp1, tp2
 
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (最终版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 最终版)")
+st.set_page_config(page_title="ETH 5分钟策略 (完美版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 完美版)")
 
 # 新手说明
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
@@ -130,7 +135,7 @@ if st.sidebar.button("立即刷新数据"):
     st.rerun()
 
 # ---------- 自动刷新 ----------
-st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")  # 转换为毫秒
+st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
 
 # ---------- 拉取最新数据 ----------
 fetch_and_merge_klines()
@@ -139,13 +144,14 @@ fetch_and_merge_klines()
 candles = st.session_state.candle_buffer
 if len(candles) < 30:
     st.warning(f"正在等待数据积累... 当前 {len(candles)}/30 根")
-    st.stop()  # 数据不足时停止执行后续代码
+    st.stop()
 
 # 转为DataFrame
-df = pd.DataFrame(candles, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
-# 修正时间显示（OKX时间戳为毫秒，转换为北京时间）
-df['time'] = pd.to_datetime(df['ts'], unit='ms') + timedelta(hours=8)  # 转换为北京时间
+df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+# 时间戳处理：OKX返回的是毫秒，直接转换为UTC时间，再转为北京时间（UTC+8）
+df['time'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=8)
 df.set_index('time', inplace=True)
+df = df[['open', 'high', 'low', 'close', 'volume']]  # 只保留价格和成交量
 
 # 计算指标
 df['ema_fast'] = calculate_ema(df['close'], fast_ema)
@@ -168,7 +174,6 @@ if signal:
     else:
         st.error(f"### 🔴 空头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
 
-    # 关键价格卡片
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("📌 进场价格", f"{price:.2f}")
@@ -178,7 +183,6 @@ if signal:
         st.metric("🎯 第一目标 (TP1)", f"{tp1:.2f}")
     st.metric("🚀 第二目标 (TP2)", f"{tp2:.2f}")
 
-    # 指标卡片
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("EMA快线", f"{ema_f:.2f}")
     col2.metric("EMA慢线", f"{ema_s:.2f}")
@@ -202,7 +206,6 @@ fig = make_subplots(
     row_heights=[0.7, 0.3]
 )
 
-# K线图
 fig.add_trace(go.Candlestick(
     x=df.index,
     open=df['open'],
@@ -212,15 +215,12 @@ fig.add_trace(go.Candlestick(
     name='K线'
 ), row=1, col=1)
 
-# EMA线
 fig.add_trace(go.Scatter(x=df.index, y=df['ema_fast'], name=f'EMA{fast_ema}', line=dict(color='orange')), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df['ema_slow'], name=f'EMA{slow_ema}', line=dict(color='blue')), row=1, col=1)
 
-# 成交量柱状图
 colors = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' for i in range(len(df))]
 fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='成交量', marker_color=colors), row=2, col=1)
 
-# 布局设置
 fig.update_layout(
     height=700,
     template='plotly_dark',
@@ -234,5 +234,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ---------- 显示最近K线 ----------
 st.subheader("最近 10 根K线")
-display_df = df[['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']].tail(10).round(2)
+# 确保列名正确
+display_cols = ['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']
+display_df = df[display_cols].tail(10).round(2)
 st.dataframe(display_df)
