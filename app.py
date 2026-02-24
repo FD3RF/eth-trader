@@ -2,18 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from collections import deque
 from streamlit_autorefresh import st_autorefresh
 
 # ---------- 配置 ----------
 SYMBOL = "ETH-USDT"          # 交易对（现货）
 INTERVAL = "5m"               # K线周期
 LIMIT = 100                   # 每次获取的K线数量
-REFRESH_INTERVAL = 60 * 1000  # 自动刷新间隔（毫秒），默认60秒
 
 # ---------- 初始化 session_state ----------
 if 'candle_buffer' not in st.session_state:
@@ -102,8 +99,8 @@ def calculate_sltp(entry_price, side):
     return sl, tp1, tp2
 
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (重构版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 重构版)")
+st.set_page_config(page_title="ETH 5分钟策略 (最终版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询 · 最终版)")
 
 # 新手说明
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
