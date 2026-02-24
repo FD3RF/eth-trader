@@ -27,8 +27,8 @@ ws_thread_running = True
 ws_restart_flag = False
 ws_restart_lock = threading.Lock()
 
-# 当前交易对（使用正确的币本位永续合约）
-DEFAULT_SYMBOL = "ETH-USD-SWAP"
+# 当前交易对（现货 ETH-USDT 保证存在）
+DEFAULT_SYMBOL = "ETH-USDT"
 current_symbol = DEFAULT_SYMBOL
 
 # 订阅成功标志
@@ -193,7 +193,7 @@ if 'ws_thread' not in st.session_state:
 
 # ---------- 测试 REST API 连通性 ----------
 try:
-    r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USD-SWAP", timeout=5)
+    r = requests.get(f"https://www.okx.com/api/v5/market/ticker?instId={DEFAULT_SYMBOL}", timeout=5)
     if r.status_code == 200:
         add_log("✅ REST API 连接成功")
         data = r.json()
@@ -493,13 +493,13 @@ def calculate_cumulative_pnl():
 
 # ---------- Streamlit 页面配置 ----------
 st.set_page_config(page_title="加密货币 5分钟剥头皮监控", layout="wide")
-st.title("📈 加密货币 5分钟 EMA 剥头皮监控 (增强版)")
+st.title("📈 加密货币 5分钟 EMA 剥头皮监控 (最终修复版)")
 
 # ---------- 侧边栏参数 ----------
 st.sidebar.header("策略参数")
 
-# 交易对选择（币本位永续合约）
-symbol_options = ["ETH-USD-SWAP", "BTC-USD-SWAP", "SOL-USD-SWAP"]
+# 交易对选择（提供现货和永续合约选项）
+symbol_options = ["ETH-USDT", "BTC-USDT", "ETH-USD-SWAP", "BTC-USD-SWAP"]
 selected_symbol = st.sidebar.selectbox("交易对", symbol_options, index=0)
 if selected_symbol != st.session_state.get('current_symbol', DEFAULT_SYMBOL):
     st.session_state.current_symbol = selected_symbol
@@ -806,13 +806,13 @@ if len(st.session_state.signal_history) > 0:
         with col4:
             if st.button("更新结果"):
                 update_signal_result(selected_idx, result, exit_price if exit_price > 0 else None)
-                st.rerun()  # 修正为 rerun
+                st.rerun()
     
     csv = history_df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 导出历史信号 (CSV)",
         data=csv,
-        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",  # 修正 f-string
+        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
 else:
@@ -829,4 +829,4 @@ time_to_refresh = now - st.session_state.last_update >= effective_interval
 if has_new_data or connection_changed or time_to_refresh:
     st.session_state.last_update = now
     st.session_state.last_candle_count = current_len
-    st.rerun()  # 修正为 rerun
+    st.rerun()
