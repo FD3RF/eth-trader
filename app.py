@@ -27,7 +27,7 @@ ws_thread_running = True
 ws_restart_flag = False
 ws_restart_lock = threading.Lock()
 
-# 当前交易对（默认使用正确的ID，根据OKX文档，币本位永续合约为 ETH-USD-SWAP）
+# 当前交易对（使用正确的币本位永续合约）
 DEFAULT_SYMBOL = "ETH-USD-SWAP"
 current_symbol = DEFAULT_SYMBOL
 
@@ -43,7 +43,7 @@ def on_message(ws, message):
         add_log(f"📩 收到消息: {msg_preview}")
 
         data = json.loads(message)
-        # 检查是否是订阅成功的确认消息（OKX格式）
+        # 检查是否是订阅成功的确认消息
         if data.get('event') == 'subscribe':
             subscription_confirmed = True
             add_log(f"✅ 订阅成功: {data.get('arg')}")
@@ -498,7 +498,7 @@ st.title("📈 加密货币 5分钟 EMA 剥头皮监控 (增强版)")
 # ---------- 侧边栏参数 ----------
 st.sidebar.header("策略参数")
 
-# 交易对选择（手动输入或选择，这里提供常用选项）
+# 交易对选择（币本位永续合约）
 symbol_options = ["ETH-USD-SWAP", "BTC-USD-SWAP", "SOL-USD-SWAP"]
 selected_symbol = st.sidebar.selectbox("交易对", symbol_options, index=0)
 if selected_symbol != st.session_state.get('current_symbol', DEFAULT_SYMBOL):
@@ -806,13 +806,13 @@ if len(st.session_state.signal_history) > 0:
         with col4:
             if st.button("更新结果"):
                 update_signal_result(selected_idx, result, exit_price if exit_price > 0 else None)
-                st.rerun()
+                st.rerun()  # 修正为 rerun
     
     csv = history_df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 导出历史信号 (CSV)",
         data=csv,
-        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",  # 修正 f-string
         mime="text/csv"
     )
 else:
@@ -829,4 +829,4 @@ time_to_refresh = now - st.session_state.last_update >= effective_interval
 if has_new_data or connection_changed or time_to_refresh:
     st.session_state.last_update = now
     st.session_state.last_candle_count = current_len
-    st.rerun()
+    st.rerun()  # 修正为 rerun
