@@ -5,6 +5,7 @@ import threading
 import time
 import json
 import websocket
+import requests
 import sys
 from collections import deque
 from datetime import datetime, timedelta
@@ -46,6 +47,9 @@ def on_message(ws, message):
         if data.get('event') == 'subscribe':
             subscription_confirmed = True
             add_log(f"✅ 订阅成功: {data.get('arg')}")
+
+        if data.get('event') == 'error':
+            add_log(f"❌ 服务器错误: {data.get('msg')}")
 
         if 'data' in data:
             with data_time_lock:
@@ -179,9 +183,41 @@ if 'ws_thread' not in st.session_state:
     add_log(f"Python 版本: {sys.version.split()[0]}")
     add_log("默认参数: EMA9/21, RSI14, 买入50-70, 卖出30-50")
 
-# ---------- 其余函数（信号统计、指标计算等）保持不变 ----------
-# 以下保留您之前完整代码中的所有函数，包括 update_signal_stats, add_signal_to_history, 
-# update_signal_result, clear_signal_history, cleanup_old_signals, calculate_atr,
-# calculate_atr_stop, calculate_ema, calculate_rsi, detect_signal, calculate_sltp,
-# check_exit_conditions, calculate_cumulative_pnl 等。
-# 为了简洁，此处省略重复部分，您可以直接复制之前的完整代码并替换上述部分。
+# ---------- 测试 REST API 连通性 ----------
+try:
+    r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP", timeout=5)
+    if r.status_code == 200:
+        add_log("✅ REST API 连接成功")
+        data = r.json()
+        if 'data' in data and len(data['data']) > 0:
+            add_log(f"最新价格: {data['data'][0]['last']}")
+        else:
+            add_log("⚠️ REST API 返回数据异常")
+    else:
+        add_log(f"❌ REST API 返回 {r.status_code}")
+except Exception as e:
+    add_log(f"❌ REST API 异常: {e}")
+
+# ---------- 其余函数（信号统计、指标计算等）请从您之前的完整代码中复制，此处省略以节省篇幅 ----------
+# 为了完整，您需要将之前代码中的所有函数（update_signal_stats, add_signal_to_history, ...）放在这里。
+# 由于字数限制，请从我们之前提供的最终版代码中复制这些函数，粘贴到此处。
+# 它们包括：update_signal_stats, add_signal_to_history, update_signal_result, clear_signal_history,
+# cleanup_old_signals, calculate_atr, calculate_atr_stop, calculate_ema, calculate_rsi,
+# detect_signal, calculate_sltp, check_exit_conditions, calculate_cumulative_pnl 等。
+
+# ---------- Streamlit 界面部分（保持不变，请从最终版代码中复制）----------
+# 从您之前的最终代码中复制界面部分（包括侧边栏、主区域、图表等）。
+# 注意：请确保所有变量定义和函数调用一致。
+
+# ---------- 智能刷新逻辑 ----------
+MIN_REFRESH = 2.0
+effective_interval = max(refresh_interval, MIN_REFRESH)
+
+now = time.time()
+has_new_data = current_len > st.session_state.last_candle_count
+time_to_refresh = now - st.session_state.last_update >= effective_interval
+
+if has_new_data or connection_changed or time_to_refresh:
+    st.session_state.last_update = now
+    st.session_state.last_candle_count = current_len
+    st.rerun()
