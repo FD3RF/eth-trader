@@ -42,6 +42,7 @@ def on_message(ws, message):
         add_log(f"📩 收到消息: {msg_preview}")
 
         data = json.loads(message)
+        # 检查是否是订阅成功的确认消息（OKX格式）
         if data.get('event') == 'subscribe':
             subscription_confirmed = True
             add_log(f"✅ 订阅成功: {data.get('arg')}")
@@ -93,6 +94,7 @@ def on_open(ws):
         "args": [{"channel": "candle5m", "instId": symbol}]
     }
     ws.send(json.dumps(sub_msg))
+    # 启动一个定时器，如果30秒内未收到订阅确认，则主动重启
     def check_subscription():
         time.sleep(30)
         if not subscription_confirmed:
@@ -277,6 +279,7 @@ def cleanup_old_signals():
     st.session_state.signal_history = cleaned
     update_signal_stats()
 
+# ---------- ATR计算函数 ----------
 def calculate_atr(df, period=14):
     high = df['high']
     low = df['low']
@@ -301,6 +304,7 @@ def calculate_atr_stop(entry_price, side, atr_value, multiplier=1.5):
         tp2 = entry_price - (atr_value * multiplier * 1.2)
     return sl, tp1, tp2
 
+# ---------- 指标计算函数 ----------
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
@@ -358,6 +362,7 @@ def calculate_sltp(entry_price, side):
         tp2 = entry_price * 0.988
     return sl, tp1, tp2
 
+# ---------- 自动出场检查函数（整合功能1、2 + 移动止损）----------
 def check_exit_conditions(df, current_signal, current_price, new_signal=None, atr_value=None):
     if current_signal['result'] != 'pending':
         return False, None, None, None
@@ -455,6 +460,7 @@ def check_exit_conditions(df, current_signal, current_price, new_signal=None, at
     
     return False, None, None, None
 
+# ---------- 计算累计PNL ----------
 def calculate_cumulative_pnl():
     closed_signals = [s for s in st.session_state.signal_history 
                      if s['result'] in ['win', 'loss']]
@@ -498,7 +504,7 @@ buy_min = st.sidebar.number_input("多头 RSI 下限", 0, 100, 50, 1)
 buy_max = st.sidebar.number_input("多头 RSI 上限", 0, 100, 70, 1)
 sell_min = st.sidebar.number_input("空头 RSI 下限", 0, 100, 30, 1)
 sell_max = st.sidebar.number_input("空头 RSI 上限", 0, 100, 50, 1)
-refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 1, 30, 4, 1)  # 定义 refresh_interval
+refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 1, 30, 4, 1)
 
 st.sidebar.markdown("---")
 
@@ -789,13 +795,13 @@ if len(st.session_state.signal_history) > 0:
         with col4:
             if st.button("更新结果"):
                 update_signal_result(selected_idx, result, exit_price if exit_price > 0 else None)
-                st.rerun()
+                st.rerun()  # 修正为 rerun
     
     csv = history_df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 导出历史信号 (CSV)",
         data=csv,
-        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",  # 修正 f-string
         mime="text/csv"
     )
 else:
@@ -803,7 +809,7 @@ else:
 
 # ---------- 智能刷新逻辑 ----------
 MIN_REFRESH = 2.0
-effective_interval = max(refresh_interval, MIN_REFRESH)  # 现在 refresh_interval 已定义
+effective_interval = max(refresh_interval, MIN_REFRESH)
 
 now = time.time()
 has_new_data = current_len > st.session_state.last_candle_count
@@ -812,4 +818,4 @@ time_to_refresh = now - st.session_state.last_update >= effective_interval
 if has_new_data or connection_changed or time_to_refresh:
     st.session_state.last_update = now
     st.session_state.last_candle_count = current_len
-    st.rerun()
+    st.rerun()  # 修正为 rerun
