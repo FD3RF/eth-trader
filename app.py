@@ -94,6 +94,7 @@ def add_signal_to_history(signal, sl, tp1, tp2):
         'result': 'pending',
         'exit_price': None,
         'exit_time': None,
+        'peak': signal[1],          # 记录最高/最低价（用于移动止损）
         'note': ''
     }
     st.session_state.signal_history.insert(0, record)
@@ -116,8 +117,8 @@ def clear_signal_history():
     update_signal_stats()
 
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (终极版)", layout="wide")
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (终极版)")
+st.set_page_config(page_title="ETH 5分钟策略 (移动止损版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (移动止损版)")
 
 # 新手快速上手指南
 with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
@@ -140,6 +141,16 @@ buy_max = st.sidebar.number_input("多头 RSI 上限", 0, 100, 70, 1)
 sell_min = st.sidebar.number_input("空头 RSI 下限", 0, 100, 30, 1)
 sell_max = st.sidebar.number_input("空头 RSI 上限", 0, 100, 50, 1)
 refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 5, 300, 60, 5)
+
+# ---------- 移动止损设置 ----------
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚙️ 移动止损")
+use_trailing = st.sidebar.checkbox("启用移动止损", value=False, help="开启后将在信号卡片中显示移动止损建议")
+if use_trailing:
+    trailing_distance = st.sidebar.slider("回调距离 (%)", 0.1, 2.0, 0.3, 0.1, help="价格从最高点回撤该百分比时触发移动止损")
+    st.sidebar.caption("例：0.3% 表示价格从最高点下跌0.3%时止损")
+else:
+    trailing_distance = 0.3
 
 if st.sidebar.button("立即刷新数据"):
     st.cache_data.clear()
@@ -204,6 +215,17 @@ else:
             st.session_state.last_signal_time = current_kline_time
             add_signal_to_history(signal, sl, tp1, tp2)
 
+    # 更新最新信号的峰值（用于移动止损）
+    if signal_history and signal_history[0]['result'] == 'pending':
+        latest = signal_history[0]
+        current_price = df['close'].iloc[-1]
+        if latest['side'] == 'BUY':
+            if current_price > latest['peak']:
+                latest['peak'] = current_price
+        else:
+            if current_price < latest['peak']:
+                latest['peak'] = current_price
+
     # ---------- 信号卡片显示 ----------
     if signal:
         side, price, ema_f, ema_s, rsi = signal
@@ -240,6 +262,17 @@ else:
         col2.metric("EMA慢线", f"{ema_s:.2f}")
         col3.metric("RSI", f"{rsi:.1f}")
         col4.metric("当前价格", f"{df['close'].iloc[-1]:.2f}")
+
+        # ---------- 移动止损显示 ----------
+        if use_trailing and signal_history and signal_history[0]['result'] == 'pending':
+            latest = signal_history[0]
+            current_price = df['close'].iloc[-1]
+            if side == 'BUY':
+                trailing_sl = max(sl, latest['peak'] * (1 - trailing_distance / 100))
+                st.info(f"📉 **移动止损建议**：当前最高价 {latest['peak']:.2f}，移动止损价应为 **{trailing_sl:.2f}**。\n\n您可手动将止损单调整至此价位。")
+            else:
+                trailing_sl = min(sl, latest['peak'] * (1 + trailing_distance / 100))
+                st.info(f"📉 **移动止损建议**：当前最低价 {latest['peak']:.2f}，移动止损价应为 **{trailing_sl:.2f}**。\n\n您可手动将止损单调整至此价位。")
 
         st.markdown(f"""
         <div style="background-color:#1e3a5f;padding:18px;border-radius:10px;color:#a0d8ff;margin-top:15px;">
@@ -307,7 +340,7 @@ st.subheader("📜 历史信号记录")
 
 if st.session_state.signal_history:
     hist_df = pd.DataFrame(st.session_state.signal_history)
-    hist_cols = ['record_time', 'signal_time', 'side', 'price', 'sl', 'tp1', 'tp2', 'result', 'exit_price', 'exit_time', 'note']
+    hist_cols = ['record_time', 'signal_time', 'side', 'price', 'sl', 'tp1', 'tp2', 'result', 'exit_price', 'exit_time', 'note', 'peak']
     available_cols = [col for col in hist_cols if col in hist_df.columns]
     display_hist = hist_df[available_cols].copy()
 
@@ -353,4 +386,4 @@ else:
     st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
-st.caption("🚀 终极完美版 • 祝交易顺利！")
+st.caption("🚀 终极完美版 • 含移动止损建议 • 祝交易顺利！")
