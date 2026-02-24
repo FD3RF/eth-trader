@@ -26,7 +26,7 @@ ws_thread_running = True
 ws_restart_flag = False
 ws_restart_lock = threading.Lock()
 
-# 当前交易对
+# 当前交易对（初始值）
 current_symbol = "ETH-USDT-SWAP"
 
 # ---------- WebSocket 回调函数 ----------
@@ -70,14 +70,14 @@ def on_open(ws):
     global ws_connected
     with ws_lock:
         ws_connected = True
-    print("WebSocket 已连接，订阅数据...")
-    # 使用当前选择的交易对
+    # 从 session_state 获取最新交易对
+    symbol = st.session_state.get('current_symbol', 'ETH-USDT-SWAP')
+    add_log(f"📡 WebSocket 已连接，订阅 {symbol} 5分钟K线")
     sub_msg = {
         "op": "subscribe",
-        "args": [{"channel": "candle5m", "instId": current_symbol}]
+        "args": [{"channel": "candle5m", "instId": symbol}]
     }
     ws.send(json.dumps(sub_msg))
-    add_log(f"📡 已订阅 {current_symbol} 5分钟K线")
 
 def connect_websocket():
     global ws_connected, ws_thread_running, ws_restart_flag
@@ -99,15 +99,14 @@ def connect_websocket():
                 on_close=on_close
             )
             ws.run_forever(ping_interval=25, ping_timeout=10)
-            # 连接正常退出后重置延迟
-            delay = 1
+            delay = 1  # 正常退出后重置延迟
         except Exception as e:
             print(f"WebSocket 运行异常: {e}")
             add_log(f"⚠️ WebSocket 异常: {str(e)[:50]}")
 
         if ws_thread_running:
             time.sleep(delay)
-            delay = min(delay * 2, 60)  # 指数退避，最大60秒
+            delay = min(delay * 2, 60)  # 指数退避
 
     print("WebSocket 线程已停止")
 
@@ -116,7 +115,22 @@ def restart_websocket():
     with ws_restart_lock:
         ws_restart_flag = True
 
-# ---------- 启动 WebSocket 后台线程 ----------
+# ---------- 日志辅助函数（统一使用 session_state）----------
+def add_log(message):
+    if 'logs' not in st.session_state:
+        st.session_state.logs = []
+    timestamp = time.strftime('%H:%M:%S')
+    # 简单去重：连续相同的连接状态不重复记录
+    last_log = st.session_state.logs[-1] if st.session_state.logs else ""
+    if "WebSocket 已连接" in message and "WebSocket 已连接" in last_log:
+        return
+    if "WebSocket 断开" in message and "WebSocket 断开" in last_log:
+        return
+    st.session_state.logs.append(f"{timestamp} - {message}")
+    if len(st.session_state.logs) > 100:
+        st.session_state.logs = st.session_state.logs[-100:]
+
+# ---------- 启动 WebSocket 后台线程（仅一次）----------
 if 'ws_thread' not in st.session_state:
     st.session_state.ws_thread = None
     st.session_state.last_signal_time = time.time() - 86400
@@ -128,16 +142,11 @@ if 'ws_thread' not in st.session_state:
     st.session_state.signal_stats = {'total': 0, 'win': 0, 'loss': 0, 'pending': 0}
     st.session_state.use_atr = False
     st.session_state.atr_multiplier = 1.5
-    st.session_state.use_trailing = False  # 移动止损开关
-    st.session_state.trailing_distance = 0.3  # 移动止损距离（%）
-    st.session_state.capital = 10000  # 本金
-    st.session_state.leverage = 1  # 杠杆
-
-    def add_log(message):
-        timestamp = time.strftime('%H:%M:%S')
-        st.session_state.logs.append(f"{timestamp} - {message}")
-        if len(st.session_state.logs) > 100:
-            st.session_state.logs = st.session_state.logs[-100:]
+    st.session_state.use_trailing = False
+    st.session_state.trailing_distance = 0.3
+    st.session_state.capital = 10000
+    st.session_state.leverage = 1
+    st.session_state.current_symbol = "ETH-USDT-SWAP"
 
     def start_ws():
         connect_websocket()
@@ -149,20 +158,6 @@ if 'ws_thread' not in st.session_state:
     add_log(f"Streamlit 版本: {st.__version__}")
     add_log(f"Python 版本: {sys.version.split()[0]}")
     add_log("默认参数: EMA9/21, RSI14, 买入50-70, 卖出30-50")
-
-# ---------- 日志辅助函数 ----------
-def add_log(message):
-    if 'logs' not in st.session_state:
-        st.session_state.logs = []
-    timestamp = time.strftime('%H:%M:%S')
-    last_log = st.session_state.logs[-1] if st.session_state.logs else ""
-    if "WebSocket 已连接" in message and "WebSocket 已连接" in last_log:
-        return
-    if "WebSocket 断开" in message and "WebSocket 断开" in last_log:
-        return
-    st.session_state.logs.append(f"{timestamp} - {message}")
-    if len(st.session_state.logs) > 100:
-        st.session_state.logs = st.session_state.logs[-100:]
 
 # ---------- 信号统计函数 ----------
 def update_signal_stats():
@@ -202,7 +197,7 @@ def add_signal_to_history(signal):
         'exit_time': None,
         'exit_reason': None,
         'tp1_hit': False,
-        'highest_price': signal['price'] if signal['side'] == 'BUY' else None,  # 用于移动止损
+        'highest_price': signal['price'] if signal['side'] == 'BUY' else None,
         'lowest_price': signal['price'] if signal['side'] == 'SELL' else None,
         'note': ''
     }
@@ -347,7 +342,7 @@ def check_exit_conditions(df, current_signal, current_price, new_signal=None, at
         if current_signal.get('lowest_price', entry) > current_price:
             current_signal['lowest_price'] = current_price
     
-    # 使用ATR或固定止损
+    # 使用ATR或固定止损（优先使用记录中的值）
     if st.session_state.use_atr and atr_value and atr_value > 0:
         sl = current_signal.get('atr_sl', entry - atr_value * st.session_state.atr_multiplier if side == 'BUY' else entry + atr_value * st.session_state.atr_multiplier)
         tp1 = current_signal.get('atr_tp1', entry + atr_value * st.session_state.atr_multiplier * 0.6 if side == 'BUY' else entry - atr_value * st.session_state.atr_multiplier * 0.6)
@@ -362,8 +357,8 @@ def check_exit_conditions(df, current_signal, current_price, new_signal=None, at
     
     # 移动止损（如果启用）
     trailing_sl = None
-    if st.session_state.use_trailing and not tp1_hit:  # 通常移动止损与TP1分开使用，这里作为可选
-        trail_dist = st.session_state.trailing_distance / 100  # 转为小数
+    if st.session_state.use_trailing and not tp1_hit:
+        trail_dist = st.session_state.trailing_distance / 100
         if side == 'BUY' and current_signal.get('highest_price'):
             trailing_sl = current_signal['highest_price'] * (1 - trail_dist)
         elif side == 'SELL' and current_signal.get('lowest_price'):
@@ -478,11 +473,11 @@ st.sidebar.header("策略参数")
 # 交易对选择
 symbol_options = ["ETH-USDT-SWAP", "BTC-USDT-SWAP", "SOL-USDT-SWAP"]
 selected_symbol = st.sidebar.selectbox("交易对", symbol_options, index=0)
-if selected_symbol != current_symbol:
-    current_symbol = selected_symbol
+if selected_symbol != st.session_state.get('current_symbol', 'ETH-USDT-SWAP'):
+    st.session_state.current_symbol = selected_symbol
     with buffer_lock:
         candle_buffer.clear()
-    add_log(f"🔄 切换交易对至 {current_symbol}")
+    add_log(f"🔄 切换交易对至 {selected_symbol}")
     restart_websocket()
 
 fast_ema = st.sidebar.number_input("快线 EMA", 1, 50, 9, 1)
@@ -620,7 +615,7 @@ else:
             current_atr = None
 
         last_kline_time = df.index[-1].strftime('%Y-%m-%d %H:%M')
-        st.caption(f"📊 最后K线时间：{last_kline_time}   |   当前 K 线数：{current_len}   |   交易对：{current_symbol}")
+        st.caption(f"📊 最后K线时间：{last_kline_time}   |   当前 K 线数：{current_len}   |   交易对：{st.session_state.get('current_symbol', 'ETH-USDT-SWAP')}")
 
         # 检测新信号
         new_signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
