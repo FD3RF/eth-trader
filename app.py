@@ -1,188 +1,163 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import threading
-import time
-import json
-import websocket
 import requests
-import sys
-from collections import deque
+import time
 from datetime import datetime, timedelta
+import plotly.graph_objects as go
+from collections import deque
 
-# ---------- 全局共享缓冲区（线程安全）----------
+# ---------- 配置 ----------
+SYMBOL = "ETH-USDT"          # 交易对（现货）
+INTERVAL = "5m"               # K线周期
+LIMIT = 100                   # 每次获取的K线数量
+UPDATE_INTERVAL = 60          # 轮询间隔（秒），实际每5分钟数据才更新
+
+# ---------- 全局数据缓存 ----------
 candle_buffer = deque(maxlen=300)
-buffer_lock = threading.Lock()
 
-# 连接状态
-ws_connected = False
-ws_lock = threading.Lock()
-
-# 最后收到数据的时间戳
-last_data_received = time.time()
-data_time_lock = threading.Lock()
-
-# WebSocket 线程控制
-ws_thread_running = True
-ws_restart_flag = False
-ws_restart_lock = threading.Lock()
-
-# 当前交易对（现货 ETH-USDT 保证存在）
-DEFAULT_SYMBOL = "ETH-USDT"
-current_symbol = DEFAULT_SYMBOL
-
-# 订阅成功标志
-subscription_confirmed = False
-
-# ---------- WebSocket 回调函数 ----------
-def on_message(ws, message):
-    global last_data_received, subscription_confirmed, ws_thread_running
+# ---------- 获取K线数据 ----------
+@st.cache_data(ttl=60)  # 缓存60秒，避免频繁请求
+def fetch_klines():
+    url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
     try:
-        msg_preview = message[:200] + ("..." if len(message) > 200 else "")
-        print(f"收到消息: {msg_preview}")
-        add_log(f"📩 收到消息: {msg_preview}")
-
-        data = json.loads(message)
-        if data.get('event') == 'subscribe':
-            subscription_confirmed = True
-            add_log(f"✅ 订阅成功: {data.get('arg')}")
-
-        if data.get('event') == 'error':
-            error_msg = data.get('msg', '未知错误')
-            error_code = data.get('code', '')
-            add_log(f"❌ 服务器错误: {error_msg} (code: {error_code})")
-            if error_code == '60018':
-                add_log("🚫 交易对不存在，请检查设置。停止WebSocket重连。")
-                ws_thread_running = False
-                ws.close()
-            return
-
-        if 'data' in data:
-            with data_time_lock:
-                last_data_received = time.time()
-            for item in data['data']:
-                if len(item) != 6:
-                    continue
-                candle = [
-                    int(item[0]), float(item[1]), float(item[2]),
-                    float(item[3]), float(item[4]), float(item[5])
-                ]
-                with buffer_lock:
-                    candle_buffer.append(candle)
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()['data']
+            # 转换为统一格式 [timestamp, open, high, low, close, volume]
+            candles = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
+            # 按时间正序排列（OKX返回的是倒序）
+            candles.sort(key=lambda x: x[0])
+            return candles
+        else:
+            st.error(f"API请求失败: {resp.status_code}")
+            return None
     except Exception as e:
-        add_log(f"⚠️ 消息解析错误: {str(e)[:50]}")
+        st.error(f"请求异常: {e}")
+        return None
 
-def on_error(ws, error):
-    global ws_connected
-    with ws_lock:
-        ws_connected = False
-    add_log(f"❌ WebSocket 错误: {error}")
+# ---------- 指标计算 ----------
+def calculate_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
-def on_close(ws, close_status_code, close_msg):
-    global ws_connected
-    with ws_lock:
-        ws_connected = False
-    add_log(f"🔌 WebSocket 关闭 (code={close_status_code})")
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-def on_open(ws):
-    global ws_connected, subscription_confirmed
-    with ws_lock:
-        ws_connected = True
-    subscription_confirmed = False
-    symbol = st.session_state.get('current_symbol', DEFAULT_SYMBOL)
-    add_log(f"📡 WebSocket 已连接，订阅 {symbol} 5分钟K线")
-    sub_msg = {
-        "op": "subscribe",
-        "args": [{"channel": "candle5m", "instId": symbol}]
-    }
-    ws.send(json.dumps(sub_msg))
-    def check_subscription():
-        time.sleep(30)
-        if not subscription_confirmed and ws_thread_running:
-            add_log("⚠️ 30秒内未收到订阅确认，重启 WebSocket...")
-            restart_websocket()
-    threading.Thread(target=check_subscription, daemon=True).start()
+def detect_signal(df, fast=9, slow=21, rsi_period=14, buy_min=50, buy_max=70, sell_min=30, sell_max=50):
+    if len(df) < slow + rsi_period + 5:
+        return None
+    last = df.iloc[-1]
+    ema_fast_now = df['ema_fast'].iloc[-1]
+    ema_slow_now = df['ema_slow'].iloc[-1]
+    ema_fast_prev = df['ema_fast'].iloc[-2]
+    ema_slow_prev = df['ema_slow'].iloc[-2]
+    rsi_now = df['rsi'].iloc[-1]
 
-def connect_websocket():
-    global ws_connected, ws_thread_running, ws_restart_flag
-    delay = 1
-    while ws_thread_running:
-        try:
-            with ws_restart_lock:
-                if ws_restart_flag:
-                    ws_restart_flag = False
-                    time.sleep(1)
-                    continue
-            ws = websocket.WebSocketApp(
-                "wss://ws.okx.com:8443/ws/v5/public",
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
-            )
-            ws.run_forever(ping_interval=25, ping_timeout=10)
-            delay = 1
-        except Exception as e:
-            add_log(f"⚠️ WebSocket 异常: {str(e)[:50]}")
-        if ws_thread_running:
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
-    print("WebSocket 线程已停止")
+    golden_cross = ema_fast_prev <= ema_slow_prev and ema_fast_now > ema_slow_now
+    death_cross = ema_fast_prev >= ema_slow_prev and ema_fast_now < ema_slow_now
 
-def restart_websocket():
-    global ws_restart_flag
-    with ws_restart_lock:
-        ws_restart_flag = True
+    if golden_cross and last['close'] > ema_fast_now and buy_min < rsi_now < buy_max:
+        return 'BUY', last['close'], ema_fast_now, ema_slow_now, rsi_now
+    if death_cross and last['close'] < ema_fast_now and sell_min < rsi_now < sell_max:
+        return 'SELL', last['close'], ema_fast_now, ema_slow_now, rsi_now
+    return None
 
-def add_log(message):
-    if 'logs' not in st.session_state:
-        st.session_state.logs = []
-    timestamp = time.strftime('%H:%M:%S')
-    st.session_state.logs.append(f"{timestamp} - {message}")
-    if len(st.session_state.logs) > 100:
-        st.session_state.logs = st.session_state.logs[-100:]
+# ---------- Streamlit界面 ----------
+st.set_page_config(page_title="ETH 5分钟策略 (REST版)", layout="wide")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (REST API 轮询)")
 
-# ---------- 启动 WebSocket 后台线程 ----------
-if 'ws_thread' not in st.session_state:
-    st.session_state.ws_thread = None
-    st.session_state.last_signal_time = time.time() - 86400
-    st.session_state.last_candle_count = 0
-    st.session_state.last_update = time.time()
-    st.session_state.logs = []
-    st.session_state.prev_connected = False
-    st.session_state.signal_history = []
-    st.session_state.signal_stats = {'total': 0, 'win': 0, 'loss': 0, 'pending': 0}
-    st.session_state.use_atr = False
-    st.session_state.atr_multiplier = 1.5
-    st.session_state.use_trailing = False
-    st.session_state.trailing_distance = 0.3
-    st.session_state.capital = 10000
-    st.session_state.leverage = 1
-    st.session_state.current_symbol = DEFAULT_SYMBOL
+# 侧边栏参数
+st.sidebar.header("策略参数")
+fast_ema = st.sidebar.number_input("快线 EMA", 1, 50, 9, 1)
+slow_ema = st.sidebar.number_input("慢线 EMA", 2, 100, 21, 1)
+rsi_period = st.sidebar.number_input("RSI 周期", 2, 50, 14, 1)
+buy_min = st.sidebar.number_input("多头 RSI 下限", 0, 100, 50, 1)
+buy_max = st.sidebar.number_input("多头 RSI 上限", 0, 100, 70, 1)
+sell_min = st.sidebar.number_input("空头 RSI 下限", 0, 100, 30, 1)
+sell_max = st.sidebar.number_input("空头 RSI 上限", 0, 100, 50, 1)
+refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 5, 300, 60, 5)
 
-    def start_ws():
-        connect_websocket()
-    thread = threading.Thread(target=start_ws, daemon=True)
-    thread.start()
-    st.session_state.ws_thread = thread
-    add_log("🚀 应用启动")
+# 手动刷新按钮
+if st.sidebar.button("立即刷新数据"):
+    st.cache_data.clear()
+    st.rerun()
 
-# ---------- 测试 REST API ----------
-try:
-    r = requests.get(f"https://www.okx.com/api/v5/market/ticker?instId={DEFAULT_SYMBOL}", timeout=5)
-    if r.status_code == 200:
-        add_log("✅ REST API 连接成功")
-        data = r.json()
-        if 'data' in data and len(data['data']) > 0:
-            add_log(f"最新价格: {data['data'][0]['last']}")
+# 显示最新更新时间
+placeholder = st.empty()
+
+# 主循环（自动刷新）
+while True:
+    # 获取数据
+    candles = fetch_klines()
+    if candles is None:
+        time.sleep(10)
+        continue
+
+    # 更新缓冲区
+    for c in candles:
+        candle_buffer.append(c)
+
+    if len(candle_buffer) < 30:
+        placeholder.warning(f"正在等待数据积累... 当前 {len(candle_buffer)}/30 根")
     else:
-        add_log(f"❌ REST API 返回 {r.status_code}")
-except Exception as e:
-    add_log(f"❌ REST API 异常: {e}")
+        # 转为DataFrame
+        df = pd.DataFrame(list(candle_buffer), columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+        df['time'] = pd.to_datetime(df['ts'], unit='ms')
+        df.set_index('time', inplace=True)
 
-# ---------- 其余函数（信号统计、指标计算等）此处省略以节省篇幅，请从之前完整代码中复制 ----------
-# 注意：您需要将之前完整代码中的 update_signal_stats, add_signal_to_history, 
-# detect_signal, calculate_ema, calculate_rsi, 以及界面部分全部粘贴到此处。
-# 由于字符限制，无法在此完全展示，但您可以直接使用我们之前提供的最终完整代码。
+        # 计算指标
+        df['ema_fast'] = calculate_ema(df['close'], fast_ema)
+        df['ema_slow'] = calculate_ema(df['close'], slow_ema)
+        df['rsi'] = calculate_rsi(df['close'], rsi_period)
 
-# 此处省略大量函数，请务必包含所有信号处理和界面代码！
+        # 检测信号
+        signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
+                               buy_min, buy_max, sell_min, sell_max)
+
+        # 创建显示区域
+        with placeholder.container():
+            st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线数量: {len(df)}")
+
+            if signal:
+                side, price, ema_f, ema_s, rsi = signal
+                if side == 'BUY':
+                    st.success(f"### 🟢 多头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+                else:
+                    st.error(f"### 🔴 空头信号 @ {df.index[-1].strftime('%Y-%m-%d %H:%M')}")
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("价格", f"{price:.2f}")
+                col2.metric(f"EMA{fast_ema}", f"{ema_f:.2f}")
+                col3.metric(f"EMA{slow_ema}", f"{ema_s:.2f}")
+                col4.metric("RSI", f"{rsi:.1f}")
+
+            # 绘制K线图
+            fig = go.Figure(data=[go.Candlestick(
+                x=df.index,
+                open=df['open'],
+                high=df['high'],
+                low=df['low'],
+                close=df['close'],
+                name='K线'
+            )])
+            fig.add_trace(go.Scatter(x=df.index, y=df['ema_fast'], name=f'EMA{fast_ema}', line=dict(color='orange')))
+            fig.add_trace(go.Scatter(x=df.index, y=df['ema_slow'], name=f'EMA{slow_ema}', line=dict(color='blue')))
+            fig.update_layout(height=500, template='plotly_dark')
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 显示最近K线
+            st.subheader("最近 10 根K线")
+            display_df = df[['open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi']].tail(10).round(2)
+            st.dataframe(display_df)
+
+    # 等待指定间隔
+    time.sleep(refresh_interval)
+    st.cache_data.clear()
+    st.rerun()
