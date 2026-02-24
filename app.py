@@ -27,15 +27,16 @@ ws_thread_running = True
 ws_restart_flag = False
 ws_restart_lock = threading.Lock()
 
-# 当前交易对（初始值）
-current_symbol = "ETH-USDT-SWAP"
+# 当前交易对（默认使用正确的ID，根据OKX文档，币本位永续合约为 ETH-USD-SWAP）
+DEFAULT_SYMBOL = "ETH-USD-SWAP"
+current_symbol = DEFAULT_SYMBOL
 
 # 订阅成功标志
 subscription_confirmed = False
 
 # ---------- WebSocket 回调函数 ----------
 def on_message(ws, message):
-    global last_data_received, subscription_confirmed
+    global last_data_received, subscription_confirmed, ws_thread_running
     try:
         msg_preview = message[:200] + ("..." if len(message) > 200 else "")
         print(f"收到消息: {msg_preview}")
@@ -47,8 +48,17 @@ def on_message(ws, message):
             subscription_confirmed = True
             add_log(f"✅ 订阅成功: {data.get('arg')}")
 
+        # 处理服务器返回的错误
         if data.get('event') == 'error':
-            add_log(f"❌ 服务器错误: {data.get('msg')}")
+            error_msg = data.get('msg', '未知错误')
+            error_code = data.get('code', '')
+            add_log(f"❌ 服务器错误: {error_msg} (code: {error_code})")
+            # 如果是交易对不存在，停止重连
+            if error_code == '60018':  # instrument ID does not exist
+                add_log("🚫 交易对不存在，请检查设置。停止WebSocket重连。")
+                ws_thread_running = False
+                ws.close()
+            return
 
         if 'data' in data:
             with data_time_lock:
@@ -87,7 +97,7 @@ def on_open(ws):
     with ws_lock:
         ws_connected = True
     subscription_confirmed = False
-    symbol = st.session_state.get('current_symbol', 'ETH-USDT-SWAP')
+    symbol = st.session_state.get('current_symbol', DEFAULT_SYMBOL)
     add_log(f"📡 WebSocket 已连接，订阅 {symbol} 5分钟K线")
     sub_msg = {
         "op": "subscribe",
@@ -97,7 +107,7 @@ def on_open(ws):
     # 启动一个定时器，如果30秒内未收到订阅确认，则主动重启
     def check_subscription():
         time.sleep(30)
-        if not subscription_confirmed:
+        if not subscription_confirmed and ws_thread_running:
             add_log("⚠️ 30秒内未收到订阅确认，重启 WebSocket...")
             restart_websocket()
     threading.Thread(target=check_subscription, daemon=True).start()
@@ -168,7 +178,7 @@ if 'ws_thread' not in st.session_state:
     st.session_state.trailing_distance = 0.3
     st.session_state.capital = 10000
     st.session_state.leverage = 1
-    st.session_state.current_symbol = "ETH-USDT-SWAP"
+    st.session_state.current_symbol = DEFAULT_SYMBOL
 
     def start_ws():
         connect_websocket()
@@ -183,7 +193,7 @@ if 'ws_thread' not in st.session_state:
 
 # ---------- 测试 REST API 连通性 ----------
 try:
-    r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP", timeout=5)
+    r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USD-SWAP", timeout=5)
     if r.status_code == 200:
         add_log("✅ REST API 连接成功")
         data = r.json()
@@ -488,9 +498,10 @@ st.title("📈 加密货币 5分钟 EMA 剥头皮监控 (增强版)")
 # ---------- 侧边栏参数 ----------
 st.sidebar.header("策略参数")
 
-symbol_options = ["ETH-USDT-SWAP", "BTC-USDT-SWAP", "SOL-USDT-SWAP"]
+# 交易对选择（手动输入或选择，这里提供常用选项）
+symbol_options = ["ETH-USD-SWAP", "BTC-USD-SWAP", "SOL-USD-SWAP"]
 selected_symbol = st.sidebar.selectbox("交易对", symbol_options, index=0)
-if selected_symbol != st.session_state.get('current_symbol', 'ETH-USDT-SWAP'):
+if selected_symbol != st.session_state.get('current_symbol', DEFAULT_SYMBOL):
     st.session_state.current_symbol = selected_symbol
     with buffer_lock:
         candle_buffer.clear()
@@ -628,7 +639,7 @@ else:
             current_atr = None
 
         last_kline_time = df.index[-1].strftime('%Y-%m-%d %H:%M')
-        st.caption(f"📊 最后K线时间：{last_kline_time}   |   当前 K 线数：{current_len}   |   交易对：{st.session_state.get('current_symbol', 'ETH-USDT-SWAP')}")
+        st.caption(f"📊 最后K线时间：{last_kline_time}   |   当前 K 线数：{current_len}   |   交易对：{st.session_state.get('current_symbol', DEFAULT_SYMBOL)}")
 
         new_signal = detect_signal(df, fast_ema, slow_ema, rsi_period,
                                    buy_min, buy_max, sell_min, sell_max)
@@ -795,13 +806,13 @@ if len(st.session_state.signal_history) > 0:
         with col4:
             if st.button("更新结果"):
                 update_signal_result(selected_idx, result, exit_price if exit_price > 0 else None)
-                st.rerun()  # 修正为 rerun
+                st.rerun()
     
     csv = history_df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 导出历史信号 (CSV)",
         data=csv,
-        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",  # 修正 f-string
+        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
 else:
@@ -818,4 +829,4 @@ time_to_refresh = now - st.session_state.last_update >= effective_interval
 if has_new_data or connection_changed or time_to_refresh:
     st.session_state.last_update = now
     st.session_state.last_candle_count = current_len
-    st.rerun()  # 修正为 rerun
+    st.rerun()
