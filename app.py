@@ -11,6 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 import os
 import glob
 import sqlite3
+import re
 
 # ---------- 配置 ----------
 SYMBOL = "ETH-USDT"
@@ -66,11 +67,6 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
-    # 启动时清理30天前的旧数据
-    try:
-        delete_old_signals(30)
-    except:
-        pass
 
 def save_signal_to_db(record):
     """保存新信号到数据库，返回自动生成的id"""
@@ -158,8 +154,32 @@ def fetch_recent_signals(limit=50, as_dict=False):
 def load_recent_to_deque(limit=200):
     """从数据库加载最近limit条记录到deque（用于重启后恢复历史）"""
     rows = fetch_recent_signals(limit, as_dict=True)
-    # 按id降序排列（最新在前）
-    return deque(rows, maxlen=limit)
+    valid_records = []
+    for record in rows:
+        # 仅加载时间格式正确的记录
+        if (record.get('record_time') and
+            re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', record['record_time']) and
+            record.get('signal_time') and
+            re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}', record['signal_time'])):
+            valid_records.append(record)
+    return deque(valid_records, maxlen=limit)
+
+def auto_clean_invalid_signals():
+    """启动时自动清理时间格式异常的数据"""
+    conn = get_db_conn()
+    try:
+        c = conn.cursor()
+        c.execute("""
+        DELETE FROM signals 
+        WHERE record_time NOT LIKE '____-__-__ __:__:__'
+           OR signal_time NOT LIKE '____-__-__ __:__'
+        """)
+        deleted = c.rowcount
+        if deleted > 0:
+            log_event(f"自动清理了 {deleted} 条时间格式异常的信号记录")
+        conn.commit()
+    finally:
+        conn.close()
 
 def delete_old_signals(days=30):
     """删除超过指定天数的记录"""
@@ -426,7 +446,7 @@ def check_trailing_stop(record, current_price, trailing_dist):
     if 'peak' not in record or 'price' not in record or 'side' not in record:
         return False, None, None, None
     peak = record['peak']
-    if peak is None or peak <= 0:  # 增加None检查
+    if peak is None or peak <= 0:
         return False, None, None, None
     side = record['side']
     if side not in ('BUY', 'SELL'):
@@ -556,6 +576,8 @@ st.title("📈 ETH 5分钟 EMA 剥头皮策略 (职业整合版)")
 
 # 初始化数据库
 init_db()
+# 自动清理脏数据
+auto_clean_invalid_signals()
 
 # 尝试从数据库加载最近信号到deque（重启后恢复）
 if 'signal_history' not in st.session_state:
@@ -1064,4 +1086,4 @@ else:
     st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
-st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 • 祝交易大赚！💰")
+st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 • 祝交易大赚！💰")
