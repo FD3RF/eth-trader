@@ -647,11 +647,11 @@ sound_enabled = st.sidebar.checkbox("🔊 启用信号声音提醒", value=True)
 st.sidebar.markdown("---")
 st.sidebar.metric("📡 API 失败次数", st.session_state.api_fail_count)
 
-if st.sidebar.button("立即刷新数据"):
+if st.sidebar.button("立即刷新数据", width='stretch'):
     st.cache_data.clear()
     st.rerun()
 
-if st.sidebar.button("🔄 重置所有状态"):
+if st.sidebar.button("🔄 重置所有状态", width='stretch'):
     for key in ['candle_buffer', 'signal_history', 'signal_stats', 'last_signal_time']:
         try:
             if key in st.session_state:
@@ -671,7 +671,7 @@ if st.sidebar.checkbox("🧪 DB 调试"):
 # 清空历史时是否同时清空数据库
 clear_db_option = st.sidebar.checkbox("同时清空数据库", value=False, key="clear_db_option")
 
-if st.sidebar.button("🗑 清空历史信号"):
+if st.sidebar.button("🗑 清空历史信号", width='stretch'):
     clear_signal_history(clear_db=clear_db_option)
     st.rerun()
 
@@ -949,7 +949,7 @@ else:
         ''', unsafe_allow_html=True)
 
         signal_text = f"🟢 多头信号 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f} 风险{risk_pts:.2f}点" if side == 'BUY' else f"🔴 空头信号 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f} 风险{risk_pts:.2f}点"
-        if st.button("📋 一键复制交易信号", key="copy_btn", use_container_width=True):
+        if st.button("📋 一键复制交易信号", key="copy_btn", width='stretch'):
             st.markdown(f'<script>navigator.clipboard.writeText(`{signal_text}`);</script>', unsafe_allow_html=True)
             st.success("✅ 已复制到剪贴板！直接粘贴到OKX即可下单")
 
@@ -1026,13 +1026,13 @@ else:
     fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
 
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, use_container_width=False, width='stretch')
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.subheader("最近 10 根K线")
     display_df = df.reset_index()[['time', 'open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi', 'atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    st.dataframe(display_df.round(2), use_container_width=True, hide_index=True)
+    st.dataframe(display_df.round(2), width='stretch', hide_index=True)
 
 # ---------- 侧边栏统计 ----------
 st.sidebar.markdown("---")
@@ -1063,7 +1063,7 @@ if signal_history:
             return 'background-color: #fffacd; color: black'
         return ''
     styled = hist_df.style.map(color_result, subset=['result'])
-    st.dataframe(styled, use_container_width=True, height=250)
+    st.dataframe(styled, width='stretch', height=250)
     with st.expander("✏️ 手动标记信号结果", expanded=False):
         col1, col2, col3, col4 = st.columns([3,1,1,2])
         with col1:
@@ -1074,7 +1074,7 @@ if signal_history:
         with col3:
             ep = st.number_input("出场价", value=0.0, step=0.01)
         with col4:
-            if st.button("✅ 更新结果"):
+            if st.button("✅ 更新结果", width='stretch'):
                 rec = signal_history[idx]
                 update_signal_result(idx, res, ep if ep > 0 else None,
                                      exit_reason="手动标记",
