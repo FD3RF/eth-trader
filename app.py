@@ -7,13 +7,16 @@ from collections import deque
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
+import websocket
+import json
+import threading
 
 # ---------- 配置 ----------
 SYMBOL = "ETH-USDT"
 INTERVAL = "5m"
 LIMIT = 200
 
-# ---------- 数据获取 ----------
+# ---------- 数据获取（初始历史用REST，实时用WebSocket） ----------
 @st.cache_data(ttl=15)
 def fetch_klines():
     url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
@@ -24,20 +27,6 @@ def fetch_klines():
             candles = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
             candles.sort(key=lambda x: x[0])
             return candles
-        return None
-    except:
-        return None
-
-@st.cache_data(ttl=5)
-def fetch_latest_candle():
-    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit=1"
-    try:
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json().get('data', [])
-            if data:
-                k = data[0]
-                return [int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])]
         return None
     except:
         return None
@@ -56,6 +45,37 @@ def get_higher_trend():
     except:
         return 'neutral'
     return 'neutral'
+
+# ---------- WebSocket实时更新 ----------
+def on_message(ws, message):
+    data = json.loads(message)
+    if 'data' in data and data['arg']['channel'] == f'candle{INTERVAL}':
+        candle_data = data['data'][0]  # [ts, open, high, low, close, vol]
+        latest_candle = [int(candle_data[0]), float(candle_data[1]), float(candle_data[2]), float(candle_data[3]), float(candle_data[4]), float(candle_data[5])]
+        
+        if len(st.session_state.candle_buffer) == 0 or latest_candle[0] > st.session_state.candle_buffer[-1][0]:
+            st.session_state.candle_buffer.append(latest_candle)
+        elif latest_candle[0] == st.session_state.candle_buffer[-1][0]:
+            st.session_state.candle_buffer[-1] = latest_candle  # 更新正在形成的K线
+        st.rerun()  # 刷新页面
+
+def on_error(ws, error):
+    print("WebSocket Error:", error)
+
+def on_close(ws, close_status_code, close_msg):
+    print("WebSocket Closed")
+
+def run_ws():
+    ws_url = "wss://ws.okx.com:8443/ws/v5/public"
+    ws = websocket.WebSocketApp(ws_url,
+                                on_message=on_message,
+                                on_error=on_error,
+                                on_close=on_close)
+    ws.on_open = lambda ws: ws.send(json.dumps({
+        "op": "subscribe",
+        "args": [{"channel": f"candle{INTERVAL}", "instId": SYMBOL}]
+    }))
+    ws.run_forever()
 
 # ---------- 指标 ----------
 def calculate_ema(series, period):
@@ -198,10 +218,10 @@ with st.expander("📘 新手快速上手指南（点击展开）", expanded=Tru
     1. **进场价格**=信号卡片中的“进场价格”数值（例如 1864.56）
     2. **止损价格**=信号卡片中的“止损价格”数值（例如 1853.37）
     3. 在交易所（如OKX）以市价单或限价单买入/卖出，价格尽量接近进场价。
-    4. 同时设置止损单和止盈单（TP1平半仓，TP2全平）。
+    4. 同时设置止损单（止损价）和止盈单（可选，按TP1/TP2设置）。
     """)
 
-# ---------- 侧边栏 ----------
+# ---------- 侧边栏（完全匹配截图） ----------
 st.sidebar.header("策略参数")
 fast_ema = st.sidebar.number_input("快线 EMA", 1, 50, 9, 1)
 slow_ema = st.sidebar.number_input("慢线 EMA", 2, 100, 21, 1)
@@ -211,31 +231,26 @@ buy_max = st.sidebar.number_input("多头 RSI 上限", 0, 100, 70, 1)
 sell_min = st.sidebar.number_input("空头 RSI 下限", 0, 100, 30, 1)
 sell_max = st.sidebar.number_input("空头 RSI 上限", 0, 100, 50, 1)
 refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 5, 300, 60, 5)
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("✨ 高级过滤")
 use_slope_filter = st.sidebar.checkbox("启用斜率过滤", value=True)
 use_volume_filter = st.sidebar.checkbox("启用成交量爆发过滤", value=True)
 use_atr_filter = st.sidebar.checkbox("启用波动率过滤", value=True)
 use_higher_tf_filter = st.sidebar.checkbox("启用高周期趋势过滤", value=True)
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 动态止损")
-use_atr_sl = st.sidebar.checkbox("启用ATR动态止损", value=True)
+use_atr_sl = st.sidebar.checkbox("启用ATR动态止损", value=False)
 if use_atr_sl:
-    atr_mult_sl = st.sidebar.slider("ATR止损倍数", 0.5, 4.0, 2.55, 0.05)
-    atr_mult_tp1 = st.sidebar.slider("ATR TP1倍数 (RR 1:1)", 0.5, 3.0, 1.0, 0.05)
-    atr_mult_tp2 = st.sidebar.slider("ATR TP2倍数 (RR 2:1)", 1.0, 5.0, 2.0, 0.05)
+    atr_mult_sl = st.sidebar.slider("ATR止损倍数", 0.5, 3.0, 1.2, 0.1)
+    atr_mult_tp1 = st.sidebar.slider("ATR TP1倍数", 0.5, 3.0, 1.2, 0.1)
+    atr_mult_tp2 = st.sidebar.slider("ATR TP2倍数", 1.0, 5.0, 2.0, 0.1)
 else:
     atr_mult_sl = atr_mult_tp1 = atr_mult_tp2 = 1.2
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("✨ 移动止损")
 use_trailing = st.sidebar.checkbox("启用移动止损", value=False)
 trailing_distance = st.sidebar.slider("回调距离 (%)", 0.1, 2.0, 0.3, 0.1) if use_trailing else 0.3
-
 sound_enabled = st.sidebar.checkbox("🔊 启用信号声音提醒", value=True)
-
 if st.sidebar.button("立即刷新数据"):
     st.cache_data.clear()
     st.rerun()
@@ -243,7 +258,6 @@ if st.sidebar.button("🔄 重置所有状态"):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
-
 # 初始化
 if 'candle_buffer' not in st.session_state:
     st.session_state.candle_buffer = deque(maxlen=500)
@@ -253,30 +267,21 @@ if 'signal_stats' not in st.session_state:
     st.session_state.signal_stats = {'total': 0, 'win': 0, 'loss': 0, 'pending': 0, 'win_rate': 0}
 if 'last_signal_time' not in st.session_state:
     st.session_state.last_signal_time = None
-
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
-
-# 获取K线
+# 启动WebSocket
+threading.Thread(target=run_ws, daemon=True).start()
+# 获取初始历史K线
 candles = fetch_klines()
 if candles:
-    if len(candle_buffer) == 0:
-        for c in candles: candle_buffer.append(c)
-    else:
-        max_ts = candle_buffer[-1][0]
-        new_candles = [c for c in candles if c[0] > max_ts]
-        for c in new_candles: candle_buffer.append(c)
-
-latest = fetch_latest_candle()
-if latest and (len(candle_buffer) == 0 or latest[0] > candle_buffer[-1][0]):
-    candle_buffer.append(latest)
-
+    for c in candles:
+        if len(candle_buffer) == 0 or c[0] > candle_buffer[-1][0]:
+            candle_buffer.append(c)
+# 自动刷新（辅助WebSocket）
 st_autorefresh(interval=refresh_interval * 1000, key="final")
-
 higher_trend = get_higher_trend() if use_higher_tf_filter else 'neutral'
 trend_icon = "🟢" if higher_trend == "up" else "🔴" if higher_trend == "down" else "⚪"
 st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线数量: {len(candle_buffer)} | 高周期趋势: {trend_icon} {higher_trend.upper()}")
-
 if len(candle_buffer) < 30:
     st.warning(f"⏳ 数据积累中... 当前 {len(candle_buffer)}/30 根")
 else:
@@ -287,16 +292,12 @@ else:
     df['ema_slow'] = calculate_ema(df['close'], slow_ema)
     df['rsi'] = calculate_rsi_wilder(df['close'], rsi_period)
     df['atr'] = calculate_atr(df, 14)
-
     signal = detect_signal_pro(df, fast_ema, slow_ema, rsi_period, buy_min, buy_max, sell_min, sell_max,
                                higher_trend, use_volume_filter, use_slope_filter, use_atr_filter)
-
-    # ========== 持久显示信号 ==========
     show_signal = signal
     if not show_signal and signal_history and len(signal_history) > 0 and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
         show_signal = (rec['side'], rec['price'], rec['ema_fast'], rec['ema_slow'], rec['rsi'], rec['atr'])
-
     if signal:
         side, price, ema_f, ema_s, rsi, atr_val = signal
         sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
@@ -315,14 +316,11 @@ else:
                 o.start(); setTimeout(() => o.stop(), 180);
                 </script>
                 """, unsafe_allow_html=True)
-
-    # 更新峰值 & 检查止损/止盈
     if signal_history and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
         cp = df['close'].iloc[-1]
         if rec['side'] == 'BUY' and cp > rec['peak']: rec['peak'] = cp
         elif rec['side'] == 'SELL' and cp < rec['peak']: rec['peak'] = cp
-
     cp = df['close'].iloc[-1]
     for i, r in enumerate(signal_history):
         if r['result'] != 'pending': continue
@@ -337,8 +335,7 @@ else:
             exit_flag, res, ep, reason = check_trailing_stop(r, cp, trailing_distance)
             if exit_flag:
                 update_signal_result(i, res, ep, reason)
-
-    # ========== 豪华美化信号卡片 ==========
+    # 信号卡片
     st.markdown("""
     <style>
     .signal-card {
@@ -448,6 +445,14 @@ else:
     }
     @keyframes tp2-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015); } }
     @keyframes tp2-shine { 0% { transform: translateX(-150%) skewX(-15deg); } 100% { transform: translateX(400%) skewX(-15deg); } }
+    .chart-container {
+        background: #0e1621;
+        border-radius: 16px;
+        padding: 12px;
+        border: 2px solid rgba(74,144,255,0.2);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+        margin: 20px 0 30px 0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -477,7 +482,6 @@ else:
             </div>
         ''', unsafe_allow_html=True)
 
-        # TP2 豪华金色卡片
         st.markdown(f'''
         <div class="tp2-container">
             <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:6px;">
@@ -529,25 +533,11 @@ else:
         """, unsafe_allow_html=True)
 
         st.markdown('</div>', unsafe_allow_html=True)
-
     else:
         st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;opacity:0.7;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
 
-    # ========== 美化图表（TradingView专业风格） ==========
-    st.markdown("""
-    <style>
-    .chart-container {
-        background: #0e1621;
-        border-radius: 16px;
-        padding: 12px;
-        border: 2px solid rgba(74,144,255,0.2);
-        box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-        margin: 20px 0 30px 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    # ---------- 图表 ----------
     st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-
     colors = np.where(df['close'] >= df['open'], '#00ff9d', '#ff4d4d')
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.72, 0.28],
                         subplot_titles=("<b>价格 & EMA</b>", "<b>成交量</b>"))
@@ -633,4 +623,4 @@ else:
     st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
-st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 • 祝交易大赚！💰")
+st.caption("🔥 终极职业版 • 实时WebSocket同步 + 持续信号 + ATR动态止损 • 祝交易大赚！💰")
