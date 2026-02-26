@@ -898,6 +898,17 @@ else:
     }
     @keyframes tp2-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015); } }
     @keyframes tp2-shine { 0% { transform: translateX(-150%) skewX(-15deg); } 100% { transform: translateX(400%) skewX(-15deg); } }
+    .finished-signal-card {
+        background: linear-gradient(135deg, #1a2a3a 0%, #0f1a24 100%);
+        border-radius: 12px;
+        padding: 15px;
+        border-left: 6px solid;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        margin-bottom: 10px;
+    }
+    .finished-signal-card.win { border-left-color: #90ee90; }
+    .finished-signal-card.loss { border-left-color: #ffcccb; }
+    .finished-signal-card.exit { border-left-color: #ffd966; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1052,9 +1063,47 @@ c2.metric("亏损", stats['loss'])
 st.sidebar.metric("移动止损退出", stats['exit'])
 st.sidebar.markdown(f'<div style="background:#1e3a5f;padding:12px;border-radius:8px;text-align:center;margin-top:10px;">📍 <strong>待定信号: {stats["pending"]}</strong></div>', unsafe_allow_html=True)
 
+# ========== 新增：已完成信号卡片区域 ==========
+st.markdown("---")
+st.subheader("📋 最近已完成信号（卡片视图）")
+
+if signal_history:
+    # 获取最近5条已结束的信号（非pending）
+    finished = [s for s in list(signal_history) if s.get('result') in ('win', 'loss', 'exit')][:5]
+    if finished:
+        cols = st.columns(len(finished))
+        for i, s in enumerate(finished):
+            with cols[i]:
+                # 计算盈亏点数（仅当有exit_price时）
+                if s['exit_price'] and s['exit_price'] > 0:
+                    if s['side'] == 'BUY':
+                        points = s['exit_price'] - s['price']
+                    else:
+                        points = s['price'] - s['exit_price']
+                else:
+                    points = 0.0
+                # 卡片样式
+                card_class = f"finished-signal-card {s['result']}"
+                st.markdown(f"""
+                <div class="{card_class}">
+                    <div style="font-size:20px; font-weight:bold;">{"🟢 多头" if s['side']=='BUY' else "🔴 空头"}</div>
+                    <div style="font-size:14px; opacity:0.8;">{s['signal_time']}</div>
+                    <hr style="margin:8px 0; opacity:0.3;">
+                    <div>进场: {s['price']:.2f}</div>
+                    <div>出场: {s['exit_price']:.2f if s['exit_price'] else '—'}</div>
+                    <div style="font-weight:bold;">盈亏: {points:+.2f}点</div>
+                    <div style="margin-top:8px;">结果: <span style="font-weight:bold;">{s['result'].upper()}</span></div>
+                    <div style="font-size:12px; opacity:0.7;">{s['exit_reason']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.info("暂无已完成信号")
+else:
+    st.info("暂无信号记录")
+
 # ---------- 历史记录（优化版）----------
 st.markdown("---")
-st.subheader("📜 历史信号记录")
+st.subheader("📜 历史信号记录（表格）")
 if signal_history:
     # 只选择关键字段，并重命名为中文/易懂名称
     hist_data = []
@@ -1111,4 +1160,4 @@ else:
     st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
-st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 • 祝交易大赚！💰")
+st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 + 卡片复盘 • 祝交易大赚！💰")
