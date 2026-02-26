@@ -853,17 +853,16 @@ else:
         # 右侧信息区域
         st.metric("当前价", f"{cp:.2f}")
 
-        # 计算24h涨跌
+        # 计算24h涨跌（修复错误）
         if len(df) > 1:
-            # 找到24小时前的K线
             now = df.index[-1]
             target_time = now - timedelta(hours=24)
-            # 找到最接近的时间
-            time_diff = (df.index - target_time).total_seconds().abs()
-            closest_idx = time_diff.idxmin()
-            prev_close = df.loc[closest_idx, 'close']
-            # 检查是否在24h ± 5分钟内
-            if abs((now - closest_idx).total_seconds()) <= 24*3600 + 300:
+            # 计算时间差绝对值（秒），使用 numpy 的 abs 函数
+            time_diffs = np.abs((df.index - target_time).total_seconds())
+            closest_idx = time_diffs.argmin()
+            # 如果最接近的时间点与目标时间相差在5分钟内，则认为有效
+            if time_diffs[closest_idx] <= 5 * 60:
+                prev_close = df.iloc[closest_idx]['close']
                 change = cp - prev_close
                 change_pct = (change / prev_close) * 100
                 color = "#00ff9d" if change >= 0 else "#ff4d4d"
