@@ -14,8 +14,8 @@ import sqlite3
 import re
 
 # ---------- 配置 ----------
-SYMBOL = "ETHUSDT"                     # Bybit 使用 ETHUSDT
-INTERVAL = "5"                          # Bybit 5分钟为 "5"
+SYMBOL = "ETH-USDT"                     # 仅用于显示，CoinCap 使用固定 baseId 和 quoteId
+INTERVAL = "m5"                          # CoinCap 5分钟为 "m5"
 LIMIT = 200
 RETRIES = 3
 BASE_DELAY = 0.5
@@ -23,7 +23,7 @@ REQUEST_DELAY = 0.5
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 LOG_RETENTION_DAYS = 30
 DB_FILE = "signals.db"
-INTERVAL_MINUTES = 5                     # 5分钟K线
+INTERVAL_MINUTES = 5
 
 # ---------- SQLite 持久化 ----------
 def get_db_conn():
@@ -261,12 +261,12 @@ def fetch_with_retry(func, retries=RETRIES, base_delay=BASE_DELAY):
                 return None
     return None
 
-# ---------- 数据获取（Bybit）----------
+# ---------- 数据获取（CoinCap）----------
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_klines():
     def _fetch():
-        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
-        headers = {"User-Agent": USER_AGENT}
+        url = "https://api.coincap.io/v2/candles?exchange=binance&interval=m5&baseId=ethereum&quoteId=tether&limit=200"
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         resp = requests.get(url, timeout=10, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -278,31 +278,29 @@ def fetch_klines():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict) and result.get('retCode') == 0:
-        data = result.get('result', {}).get('list', [])
-        if not data:
-            st.warning("Bybit 返回空数据")
-            return []
-        # Bybit 返回数组，每个元素为 [timestamp, open, high, low, close, volume, turnover]
-        # 时间戳为字符串（毫秒）
+    if result and isinstance(result, dict) and result.get('data'):
+        data = result['data']
         candles = []
-        for k in data:
-            ts = int(k[0])
-            open_price = float(k[1])
-            high = float(k[2])
-            low = float(k[3])
-            close = float(k[4])
-            volume = float(k[5])
+        for item in data:
+            # period 格式： "2026-02-26T08:00:00.000Z"
+            dt = datetime.strptime(item['period'], "%Y-%m-%dT%H:%M:%S.%fZ")
+            ts = int(dt.timestamp() * 1000)  # 毫秒时间戳
+            open_price = float(item['open'])
+            high = float(item['high'])
+            low = float(item['low'])
+            close = float(item['close'])
+            volume = float(item['volume'])
             candles.append([ts, open_price, high, low, close, volume])
         candles.sort(key=lambda x: x[0])
         return candles
+    st.warning("CoinCap 返回数据异常")
     return []
 
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
     def _fetch():
-        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={SYMBOL}&interval={INTERVAL}&limit=1"
-        headers = {"User-Agent": USER_AGENT}
+        url = "https://api.coincap.io/v2/candles?exchange=binance&interval=m5&baseId=ethereum&quoteId=tether&limit=1"
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -314,11 +312,13 @@ def fetch_latest_candle():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict) and result.get('retCode') == 0:
-        data = result.get('result', {}).get('list', [])
+    if result and isinstance(result, dict) and result.get('data'):
+        data = result['data']
         if data:
-            k = data[0]
-            return [int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])]
+            item = data[0]
+            dt = datetime.strptime(item['period'], "%Y-%m-%dT%H:%M:%S.%fZ")
+            ts = int(dt.timestamp() * 1000)
+            return [ts, float(item['open']), float(item['high']), float(item['low']), float(item['close']), float(item['volume'])]
         st.warning("最新 K 线数据为空")
         return None
     return None
@@ -326,8 +326,8 @@ def fetch_latest_candle():
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
     def _fetch():
-        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={SYMBOL}&interval=60&limit=200"
-        headers = {"User-Agent": USER_AGENT}
+        url = "https://api.coincap.io/v2/candles?exchange=binance&interval=h1&baseId=ethereum&quoteId=tether&limit=200"
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -339,11 +339,11 @@ def get_higher_trend():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict) and result.get('retCode') == 0:
-        data = result.get('result', {}).get('list', [])
+    if result and isinstance(result, dict) and result.get('data'):
+        data = result['data']
         if not data:
             return 'neutral'
-        closes = [float(k[4]) for k in data]
+        closes = [float(item['close']) for item in data]
         if len(closes) < 200:
             return 'neutral'
         ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
