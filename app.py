@@ -213,7 +213,7 @@ def volume_surge_bearish(df, vol_period=20, surge_mult=1.3):
         return df['close'].iloc[-1] < df['open'].iloc[-1]
     return (df['volume'].iloc[-1] / avg_vol > surge_mult) and (df['close'].iloc[-1] < df['open'].iloc[-1])
 
-# ---------- 信号评分系统 ----------
+# ---------- 信号评分系统（含双档量能） ----------
 def calculate_signal_score(side, df, idx=-1):
     row = df.iloc[idx]
     close = row['close']
@@ -229,14 +229,17 @@ def calculate_signal_score(side, df, idx=-1):
         avg_vol = volume
     vol_ratio = volume / avg_vol if avg_vol > 0 else 1.0
 
+    # EMA扩散强度 (%)
     ema_spread = abs(ema_f - ema_s) / close * 100
 
+    # 斜率强度 (% 每根K线)
     if len(df) >= 5 and idx >= 4:
         slope = (ema_f - df['ema_fast'].iloc[idx-4]) / 5 / close * 100
         slope_abs = abs(slope)
     else:
         slope_abs = 0
 
+    # ATR强度 (%)
     atr_pct = (atr / close * 100) if atr > 0 else 0
 
     def score_by_threshold(value, thresholds):
@@ -245,18 +248,27 @@ def calculate_signal_score(side, df, idx=-1):
                 return s
         return 0
 
+    # EMA扩散得分
     ema_thresholds = [(0.2, 100, 20), (0.15, 0.2, 15), (0.1, 0.15, 10), (0.05, 0.1, 5), (0, 0.05, 0)]
     score_ema = score_by_threshold(ema_spread, ema_thresholds)
 
+    # 斜率得分
     slope_thresholds = [(0.04, 100, 20), (0.03, 0.04, 15), (0.02, 0.03, 10), (0.01, 0.02, 5), (0, 0.01, 0)]
     score_slope = score_by_threshold(slope_abs, slope_thresholds)
 
-    vol_thresholds = [(2.0, 100, 20), (1.5, 2.0, 15), (1.2, 1.5, 10), (1.0, 1.2, 5), (0, 1.0, 0)]
-    score_vol = score_by_threshold(vol_ratio, vol_thresholds)
+    # ===== 量能得分改为双档触发 =====
+    if vol_ratio >= 1.3:
+        score_vol = 20
+    elif vol_ratio >= 0.8:
+        score_vol = 10
+    else:
+        score_vol = 0
 
+    # ATR强度得分
     atr_thresholds = [(0.2, 100, 20), (0.16, 0.2, 15), (0.12, 0.16, 10), (0.08, 0.12, 5), (0, 0.08, 0)]
     score_atr = score_by_threshold(atr_pct, atr_thresholds)
 
+    # RSI位置得分（方向自适应）
     if side == 'BUY':
         if 55 <= rsi <= 70:
             score_rsi = 20
@@ -274,7 +286,7 @@ def calculate_signal_score(side, df, idx=-1):
             score_rsi = 5
         else:
             score_rsi = 0
-    else:
+    else:  # SELL
         if 30 <= rsi <= 45:
             score_rsi = 20
         elif 25 <= rsi < 30:
@@ -301,7 +313,7 @@ def calculate_signal_score(side, df, idx=-1):
         'RSI': score_rsi
     }
 
-# ---------- 核心信号检测（集成评分） ----------
+# ---------- 核心信号检测（方向优先） ----------
 def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, sell_max,
                       higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold, slope_threshold=0.00022,
                       use_scoring=False, score_threshold=80):
@@ -312,6 +324,7 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
     rsi_now = df['rsi'].iloc[-1]
     atr_now = df['atr'].iloc[-1]
 
+    # 保留基本的波动范围检查（可以保留或去除，此处保留原样）
     if len(df) >= 20:
         range_pct = (df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()) / last['close']
         if range_pct < 0.003: return None
@@ -320,26 +333,27 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         if ema_f_now > ema_s_now and last['close'] <= prev_high: return None
         if ema_f_now < ema_s_now and last['close'] >= prev_low: return None
 
-    ema_spread_now = abs(ema_f_now - ema_s_now)
-    ema_spread_prev = abs(df['ema_fast'].iloc[-2] - df['ema_slow'].iloc[-2]) if len(df) >= 2 else 0
-    if ema_spread_now <= ema_spread_prev or ema_spread_now / last['close'] < 0.001: return None
+    # 取消严格的EMA扩散递增要求，改为方向优先（在下面分支中处理）
+    # 但仍保留一个非常基础的扩散检查（避免价格完全粘合）
+    if abs(ema_f_now - ema_s_now) / last['close'] < 0.0005:
+        return None
 
-    if len(df) >= 4:
-        if (df['ema_fast'].iloc[-4] < df['ema_slow'].iloc[-4] and ema_f_now > ema_s_now) or \
-           (df['ema_fast'].iloc[-4] > df['ema_slow'].iloc[-4] and ema_f_now < ema_s_now): return None
+    # 计算斜率（用于方向判断）
+    lookback = min(5, len(df)-1)
+    slope = (ema_f_now - df['ema_fast'].iloc[-lookback]) / lookback / last['close']
 
     prev_close = df['close'].iloc[-2] if len(df) >= 2 else last['close']
     is_bullish = (ema_f_now > ema_s_now) and (last['close'] > ema_f_now * 0.999)
     is_bearish = (ema_f_now < ema_s_now) and (last['close'] < ema_f_now * 1.001)
 
-    if abs(ema_f_now - ema_s_now) / last['close'] < 0.0005: return None
-
-    lookback = min(5, len(df)-1)
-    slope = (ema_f_now - df['ema_fast'].iloc[-lookback]) / lookback / last['close']
-
     if is_bullish:
-        if last['close'] <= prev_close: return None
-        if higher_trend == 'down': return None
+        # 方向优先：斜率必须为正
+        if slope <= 0:
+            return None
+        if last['close'] <= prev_close:
+            return None
+        if higher_trend == 'down':
+            return None
         if use_scoring:
             total_score, subscores = calculate_signal_score('BUY', df)
             if total_score >= score_threshold:
@@ -355,8 +369,13 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
             return ('BUY', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
 
     if is_bearish:
-        if last['close'] >= prev_close: return None
-        if higher_trend == 'up': return None
+        # 方向优先：斜率必须为负
+        if slope >= 0:
+            return None
+        if last['close'] >= prev_close:
+            return None
+        if higher_trend == 'up':
+            return None
         if use_scoring:
             total_score, subscores = calculate_signal_score('SELL', df)
             if total_score >= score_threshold:
@@ -526,14 +545,47 @@ with st.sidebar:
 
     use_aggressive = st.checkbox("🔥 激进测试模式（降低所有门槛）", value=False)
 
-    with st.expander("💰 风险仓位计算器", expanded=True):
+    with st.expander("💰 风险仓位计算器（含分级）", expanded=True):
         account = st.number_input("账户余额 (USDT)", value=10000.0, step=100.0)
         risk_pct = st.slider("单笔风险 (%)", 0.5, 5.0, 1.0, 0.1) / 100
+        
+        # 显示分级仓位建议（基于第一条pending信号的评分）
         if signal_history and signal_history[0]['result'] == 'pending':
             r = signal_history[0]
+            # 从note中提取评分
+            score = None
+            note = r.get('note', '')
+            if '评分:' in note:
+                try:
+                    score = int(note.split('评分:')[1].split()[0])
+                except:
+                    pass
+            if score is not None:
+                if score >= 85:
+                    level = "🔴 强信号"
+                    factor = 1.0
+                elif score >= 75:
+                    level = "🟡 普通信号"
+                    factor = 0.7
+                elif score >= 65:
+                    level = "🟢 轻仓试单"
+                    factor = 0.4
+                else:
+                    level = "⚪ 信号偏弱"
+                    factor = 0
+            else:
+                level = "信号（无评分）"
+                factor = 1.0
+
             risk_points = abs(r['price'] - r['sl'])
-            if risk_points > 0:
-                st.success(f"**建议开仓** ≈ **{(account * risk_pct) / risk_points:,.2f} ETH**")
+            if risk_points > 0 and factor > 0:
+                base_qty = (account * risk_pct) / risk_points
+                suggested_qty = base_qty * factor
+                st.success(f"**{level}** 建议开仓 ≈ **{suggested_qty:,.2f} ETH** (基准 {base_qty:,.2f} × {factor})")
+            elif risk_points > 0 and factor == 0:
+                st.info("信号偏弱，不建议开仓")
+        else:
+            st.info("无待处理信号")
 
     sound_enabled = st.checkbox("🔊 启用信号声音提醒", value=True)
 
@@ -646,9 +698,19 @@ else:
             st.markdown(f'<div class="header-red">● 空头信号 @ {signal_time}</div>', unsafe_allow_html=True)
 
         if total_score is not None:
+            # 根据总分显示级别
+            if total_score >= 85:
+                level_tag = "🔴 强信号"
+            elif total_score >= 75:
+                level_tag = "🟡 普通信号"
+            elif total_score >= 65:
+                level_tag = "🟢 轻仓试单"
+            else:
+                level_tag = "⚪ 偏弱"
+
             st.markdown(f"""
             <div class="score-badge">
-                <div class="score-item"><span>总分</span><br><span class="score-value">{total_score}</span></div>
+                <div class="score-item"><span>总分</span><br><span class="score-value">{total_score}</span><br><span style="font-size:14px;">{level_tag}</span></div>
                 <div class="score-item"><span>EMA</span><br>{subscores['EMA']}</div>
                 <div class="score-item"><span>斜率</span><br>{subscores['斜率']}</div>
                 <div class="score-item"><span>量能</span><br>{subscores['量能']}</div>
@@ -772,4 +834,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.26 • 完全匹配截图 • 修复所有已知错误 • 祝你交易顺利！💰🚀")
+st.caption("🔥 极致版 v2026.02.26 • 三层松绑法 • 分级仓位 • 祝你交易顺利！💰🚀")
