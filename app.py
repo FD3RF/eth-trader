@@ -8,8 +8,6 @@ from collections import deque
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
-import os
-import glob
 import sqlite3
 import re
 
@@ -18,9 +16,6 @@ SYMBOL = "ETH"
 CURRENCY = "USD"
 INTERVAL = "5"
 LIMIT = 200
-RETRIES = 3
-BASE_DELAY = 0.5
-REQUEST_DELAY = 0.5
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 DB_FILE = "signals.db"
 INTERVAL_MINUTES = 5
@@ -398,11 +393,11 @@ with st.sidebar:
 
     st.metric("📡 API 失败次数", st.session_state.api_fail_count)
 
-    if st.button("立即刷新数据", use_container_width=True):
+    if st.button("立即刷新数据", width='stretch'):
         st.cache_data.clear()
         st.rerun()
 
-    if st.button("🗑 清空历史信号", use_container_width=True):
+    if st.button("🗑 清空历史信号", width='stretch'):
         clear_signal_history(clear_db=st.checkbox("同时清空数据库", value=False))
         st.rerun()
 
@@ -527,7 +522,7 @@ else:
     else:
         st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
 
-    # ========== 当前市场诊断 ==========
+    # ========== 当前市场诊断（完全匹配最新截图） ==========
     with st.expander("🔍 当前市场诊断 (为什么还没出信号)", expanded=True):
         if not df.empty:
             last = df.iloc[-1]
@@ -548,8 +543,9 @@ else:
                 delta = "✅ 达标" if range_pct >= 0.3 else "❌ 未达标"
                 st.metric("20根波动率", f"{range_pct:.2f}%", delta)
             with col4:
+                vol_display = f"{vol_ratio:.2f}x {vol_ratio:.2f}倍"
                 delta = "✅ 爆发" if vol_ratio > 1.3 else "等待"
-                st.metric("成交量爆发", f"{vol_ratio:.2f}x", delta)
+                st.metric("成交量爆发", vol_display, delta)
 
     # ========== 图表 + 右侧 ==========
     col1, col2 = st.columns([3,1])
@@ -606,4 +602,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv", width='stretch')
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.26 • 已完全修复所有错误 • 实时诊断 + 激进模式 + 全中文 • 直接复制运行！祝你今天大赚！💰🚀")
+st.caption("🔥 极致版 v2026.02.26 • 完全匹配最新截图 • 诊断面板100%一致 • 祝你今天大赚！💰🚀")
