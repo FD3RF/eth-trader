@@ -621,17 +621,20 @@ with st.sidebar:
     fast_ema = st.number_input("快线 EMA", 1, 50, 9, 1)
     slow_ema = st.number_input("慢线 EMA", 2, 100, 21, 1)
     rsi_period = st.number_input("RSI 周期", 2, 50, 14, 1)
-    # 使用双列布局优化RSI区间输入
-    col_min, col_max = st.columns(2)
-    with col_min:
+    
+    # 使用双列布局优化RSI区间输入（修复标签重叠问题）
+    col1, col2 = st.columns(2)
+    with col1:
         buy_min = st.number_input("多头下限", 0, 100, 50, 1)
-    with col_max:
-        buy_max = st.number_input("上限", 0, 100, 70, 1)
-    col_min, col_max = st.columns(2)
-    with col_min:
+    with col2:
+        buy_max = st.number_input("多头上限", 0, 100, 70, 1)
+    
+    col3, col4 = st.columns(2)
+    with col3:
         sell_min = st.number_input("空头下限", 0, 100, 30, 1)
-    with col_max:
-        sell_max = st.number_input("上限", 0, 100, 50, 1)
+    with col4:
+        sell_max = st.number_input("空头上限", 0, 100, 50, 1)
+    
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
 
     with st.expander("✨ 高级过滤", expanded=True):
