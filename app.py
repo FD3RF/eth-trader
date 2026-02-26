@@ -14,8 +14,8 @@ import sqlite3
 import re
 
 # ---------- 配置 ----------
-SYMBOL = "ETH-USDT"                     # 仅用于显示，CoinCap 使用固定 baseId 和 quoteId
-INTERVAL = "m5"                          # CoinCap 5分钟为 "m5"
+SYMBOL = "ETH-USDT"                     # KuCoin 使用 ETH-USDT
+INTERVAL = "5min"                        # KuCoin 5分钟为 "5min"
 LIMIT = 200
 RETRIES = 3
 BASE_DELAY = 0.5
@@ -23,7 +23,7 @@ REQUEST_DELAY = 0.5
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 LOG_RETENTION_DAYS = 30
 DB_FILE = "signals.db"
-INTERVAL_MINUTES = 5
+INTERVAL_MINUTES = 5                     # 5分钟K线
 
 # ---------- SQLite 持久化 ----------
 def get_db_conn():
@@ -261,12 +261,12 @@ def fetch_with_retry(func, retries=RETRIES, base_delay=BASE_DELAY):
                 return None
     return None
 
-# ---------- 数据获取（CoinCap）----------
+# ---------- 数据获取（KuCoin）----------
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_klines():
     def _fetch():
-        url = "https://api.coincap.io/v2/candles?exchange=binance&interval=m5&baseId=ethereum&quoteId=tether&limit=200"
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url = f"https://api.kucoin.com/api/v1/market/candles?type={INTERVAL}&symbol={SYMBOL}&limit={LIMIT}"
+        headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=10, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -278,29 +278,29 @@ def fetch_klines():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict) and result.get('data'):
+    if result and result.get('code') == '200000' and result.get('data'):
         data = result['data']
         candles = []
         for item in data:
-            # period 格式： "2026-02-26T08:00:00.000Z"
-            dt = datetime.strptime(item['period'], "%Y-%m-%dT%H:%M:%S.%fZ")
-            ts = int(dt.timestamp() * 1000)  # 毫秒时间戳
-            open_price = float(item['open'])
-            high = float(item['high'])
-            low = float(item['low'])
-            close = float(item['close'])
-            volume = float(item['volume'])
+            # KuCoin 返回: [time, open, close, high, low, volume, turnover]
+            # time 是秒级时间戳
+            ts = int(item[0]) * 1000
+            open_price = float(item[1])
+            close = float(item[2])
+            high = float(item[3])
+            low = float(item[4])
+            volume = float(item[5])
             candles.append([ts, open_price, high, low, close, volume])
         candles.sort(key=lambda x: x[0])
         return candles
-    st.warning("CoinCap 返回数据异常")
+    st.warning("KuCoin 返回数据异常")
     return []
 
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
     def _fetch():
-        url = "https://api.coincap.io/v2/candles?exchange=binance&interval=m5&baseId=ethereum&quoteId=tether&limit=1"
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url = f"https://api.kucoin.com/api/v1/market/candles?type={INTERVAL}&symbol={SYMBOL}&limit=1"
+        headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -312,13 +312,12 @@ def fetch_latest_candle():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict) and result.get('data'):
+    if result and result.get('code') == '200000' and result.get('data'):
         data = result['data']
         if data:
             item = data[0]
-            dt = datetime.strptime(item['period'], "%Y-%m-%dT%H:%M:%S.%fZ")
-            ts = int(dt.timestamp() * 1000)
-            return [ts, float(item['open']), float(item['high']), float(item['low']), float(item['close']), float(item['volume'])]
+            ts = int(item[0]) * 1000
+            return [ts, float(item[1]), float(item[3]), float(item[4]), float(item[2]), float(item[5])]
         st.warning("最新 K 线数据为空")
         return None
     return None
@@ -326,8 +325,8 @@ def fetch_latest_candle():
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
     def _fetch():
-        url = "https://api.coincap.io/v2/candles?exchange=binance&interval=h1&baseId=ethereum&quoteId=tether&limit=200"
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url = f"https://api.kucoin.com/api/v1/market/candles?type=1hour&symbol={SYMBOL}&limit=200"
+        headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -339,11 +338,12 @@ def get_higher_trend():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict) and result.get('data'):
+    if result and result.get('code') == '200000' and result.get('data'):
         data = result['data']
         if not data:
             return 'neutral'
-        closes = [float(item['close']) for item in data]
+        # 注意 KuCoin 返回顺序：时间、开盘、收盘、最高、最低、成交量，取收盘价
+        closes = [float(item[2]) for item in data]
         if len(closes) < 200:
             return 'neutral'
         ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
