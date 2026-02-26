@@ -123,7 +123,7 @@ def clear_all_signals():
     finally:
         conn.close()
 
-# ---------- 立即初始化（修复核心错误） ----------
+# ---------- 立即初始化 ----------
 init_db()
 auto_clean_invalid_signals()
 
@@ -217,7 +217,6 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
     rsi_now = df['rsi'].iloc[-1]
     atr_now = df['atr'].iloc[-1]
 
-    # 波动过滤
     if len(df) >= 20:
         range_pct = (df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()) / last['close']
         if range_pct < 0.003: return None
@@ -226,12 +225,10 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         if ema_f_now > ema_s_now and last['close'] <= prev_high: return None
         if ema_f_now < ema_s_now and last['close'] >= prev_low: return None
 
-    # 扩散
     ema_spread_now = abs(ema_f_now - ema_s_now)
     ema_spread_prev = abs(df['ema_fast'].iloc[-2] - df['ema_slow'].iloc[-2]) if len(df) >= 2 else 0
     if ema_spread_now <= ema_spread_prev or ema_spread_now / last['close'] < 0.001: return None
 
-    # 交叉过滤
     if len(df) >= 4:
         if (df['ema_fast'].iloc[-4] < df['ema_slow'].iloc[-4] and ema_f_now > ema_s_now) or \
            (df['ema_fast'].iloc[-4] > df['ema_slow'].iloc[-4] and ema_f_now < ema_s_now): return None
@@ -242,7 +239,6 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
 
     if abs(ema_f_now - ema_s_now) / last['close'] < 0.0005: return None
 
-    # 斜率
     lookback = min(5, len(df)-1)
     slope = (ema_f_now - df['ema_fast'].iloc[-lookback]) / lookback / last['close']
     if use_slope_filter and abs(slope) <= slope_threshold: return None
@@ -348,7 +344,6 @@ st.markdown("""
     .tp2-container {background:linear-gradient(135deg,#2c2200 0%,#4a3a00 50%,#2c2200 100%);border:3px solid #ffd700;border-radius:18px;padding:22px;margin:22px 0;text-align:center;box-shadow:0 0 25px rgba(255,215,0,0.7);animation:tp2-pulse 2.5s infinite;}
     @keyframes tp2-pulse {0%,100%{transform:scale(1)}50%{transform:scale(1.015)}}
     .waiting-card {background:#1e3a5f;padding:32px;border-radius:18px;text-align:center;font-size:23px;color:#89c2ff;border:2px dashed #4a90ff;}
-    .diagnosis-card {background:#1e2937;padding:20px;border-radius:16px;margin:10px 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -411,7 +406,7 @@ with st.sidebar:
         clear_signal_history(clear_db=st.checkbox("同时清空数据库", value=False))
         st.rerun()
 
-# ---------- 数据加载 ----------
+# ---------- 数据 ----------
 candles = fetch_klines()
 if candles:
     if not candle_buffer:
@@ -524,7 +519,7 @@ else:
         ''', unsafe_allow_html=True)
 
         signal_text = f"🟢 多头 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f}" if side=='BUY' else f"🔴 空头 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f}"
-        if st.button("📋 一键复制交易信号", use_container_width=True):
+        if st.button("📋 一键复制交易信号", width='stretch'):
             st.markdown(f'<script>navigator.clipboard.writeText(`{signal_text}`);</script>', unsafe_allow_html=True)
             st.success("✅ 已复制！")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -532,7 +527,7 @@ else:
     else:
         st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
 
-    # ========== 当前市场诊断（完全匹配你的截图） ==========
+    # ========== 当前市场诊断 ==========
     with st.expander("🔍 当前市场诊断 (为什么还没出信号)", expanded=True):
         if not df.empty:
             last = df.iloc[-1]
@@ -568,7 +563,7 @@ else:
         fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], marker_color=colors, opacity=0.85, showlegend=False), row=2, col=1)
         fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", annotation_text=f"当前价 {cp:.2f}", annotation_position="top right", row=1, col=1)
         fig.update_layout(height=680, template="plotly_dark", plot_bgcolor="#0e1621", paper_bgcolor="#0e1621", legend=dict(orientation="h", y=1.02))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     with col2:
         st.metric("当前价", f"{cp:.2f}")
@@ -589,7 +584,7 @@ else:
     display_df = df.reset_index()[['time','open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M')
     display_df = display_df.rename(columns={'time':'时间','open':'开盘','high':'最高','low':'最低','close':'收盘','volume':'成交量','ema_fast':'EMA快线','ema_slow':'EMA慢线','rsi':'RSI','atr':'ATR'})
-    st.dataframe(display_df.round(2), use_container_width=True, hide_index=True)
+    st.dataframe(display_df.round(2), width='stretch', hide_index=True)
 
     st.subheader("📜 历史信号记录")
     if signal_history:
@@ -606,9 +601,9 @@ else:
                 "出场原因": s.get('exit_reason','—')
             })
         hist_df = pd.DataFrame(hist_data)
-        st.dataframe(hist_df, use_container_width=True, height=400)
+        st.dataframe(hist_df, width='stretch', height=400)
         csv = hist_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
+        st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv", width='stretch')
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.26 • 完全修复SQLite错误 • 实时诊断 + 激进模式 + 全中文 • 直接复制运行！祝你今天大赚！💰🚀")
+st.caption("🔥 极致版 v2026.02.26 • 已完全修复所有错误 • 实时诊断 + 激进模式 + 全中文 • 直接复制运行！祝你今天大赚！💰🚀")
