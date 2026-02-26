@@ -23,19 +23,17 @@ REQUEST_DELAY = 0.5
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 LOG_RETENTION_DAYS = 30
 DB_FILE = "signals.db"
-INTERVAL_MINUTES = 5  # 5分钟K线
+INTERVAL_MINUTES = 5
 
-# ---------- SQLite 持久化（生产级：WAL + busy_timeout + 索引）----------
+# ---------- SQLite 持久化 ----------
 def get_db_conn():
-    """返回一个线程安全的SQLite连接（需确保调用后关闭）"""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")  # 等待5秒避免锁冲突
+    conn.execute("PRAGMA busy_timeout = 5000;")
     return conn
 
 def init_db():
-    """初始化数据库，创建表及索引"""
     conn = get_db_conn()
     try:
         c = conn.cursor()
@@ -61,20 +59,17 @@ def init_db():
             note TEXT
         )
         """)
-        # 添加索引以加速查询
         c.execute("CREATE INDEX IF NOT EXISTS idx_record_time ON signals(record_time);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_result ON signals(result);")
         conn.commit()
     finally:
         conn.close()
-    # 启动时清理30天前的旧数据
     try:
         delete_old_signals(30)
     except:
         pass
 
 def save_signal_to_db(record):
-    """保存新信号到数据库，返回自动生成的id"""
     conn = get_db_conn()
     try:
         c = conn.cursor()
@@ -107,7 +102,6 @@ def save_signal_to_db(record):
 
 def update_signal_in_db(signal_id, result=None, exit_price=None, exit_time=None,
                         exit_reason=None, peak=None, note=None):
-    """更新已有信号的结果，可同时更新peak和note"""
     conn = get_db_conn()
     try:
         c = conn.cursor()
@@ -141,9 +135,6 @@ def update_signal_in_db(signal_id, result=None, exit_price=None, exit_time=None,
         conn.close()
 
 def fetch_recent_signals(limit=50, as_dict=False):
-    """获取最近limit条信号记录（按id降序）
-       如果 as_dict=True，返回字典列表，否则返回元组列表
-    """
     conn = get_db_conn()
     try:
         c = conn.cursor()
@@ -157,11 +148,9 @@ def fetch_recent_signals(limit=50, as_dict=False):
         conn.close()
 
 def load_recent_to_deque(limit=200):
-    """从数据库加载最近limit条记录到deque（用于重启后恢复历史）"""
     rows = fetch_recent_signals(limit, as_dict=True)
     valid_records = []
     for record in rows:
-        # 仅加载时间格式正确的记录
         if (record.get('record_time') and
             re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', record['record_time']) and
             record.get('signal_time') and
@@ -170,7 +159,6 @@ def load_recent_to_deque(limit=200):
     return deque(valid_records, maxlen=limit)
 
 def auto_clean_invalid_signals():
-    """启动时自动清理时间格式异常的数据"""
     conn = get_db_conn()
     try:
         c = conn.cursor()
@@ -187,7 +175,6 @@ def auto_clean_invalid_signals():
         conn.close()
 
 def delete_old_signals(days=30):
-    """删除超过指定天数的记录"""
     cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_conn()
     try:
@@ -200,7 +187,6 @@ def delete_old_signals(days=30):
         conn.close()
 
 def clear_all_signals():
-    """清空数据库所有信号记录（谨慎使用）"""
     conn = get_db_conn()
     try:
         c = conn.cursor()
@@ -239,11 +225,11 @@ if 'api_fail_count' not in st.session_state:
 def reset_fail_count():
     st.session_state.api_fail_count = 0
 
-# ---------- 统一重试（包含请求级限速）----------
+# ---------- 统一重试 ----------
 def fetch_with_retry(func, retries=RETRIES, base_delay=BASE_DELAY):
     for i in range(retries):
         try:
-            time.sleep(REQUEST_DELAY)  # 请求间隔
+            time.sleep(REQUEST_DELAY)
             return func()
         except requests.exceptions.RequestException as e:
             wait = base_delay * (2 ** i)
@@ -275,7 +261,7 @@ def fetch_with_retry(func, retries=RETRIES, base_delay=BASE_DELAY):
                 return None
     return None
 
-# ---------- 数据获取（降低缓存TTL以平衡实时性）----------
+# ---------- 数据获取 ----------
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_klines():
     def _fetch():
@@ -469,7 +455,6 @@ def check_trailing_stop(record, current_price, trailing_dist):
 
 # ---------- 缺失K线补全 ----------
 def fill_missing_candles(buffer, new_candle):
-    """在将新K线添加到buffer之前，检查并填充缺失的K线"""
     if len(buffer) == 0:
         return [new_candle]
     last_ts = buffer[-1][0]
@@ -487,9 +472,8 @@ def fill_missing_candles(buffer, new_candle):
     else:
         return [new_candle]
 
-# ---------- 信号历史管理（deque + SQLite，以SQLite为最终真相源）----------
+# ---------- 信号历史管理 ----------
 def update_signal_stats():
-    """统计基于deque（最近200条）"""
     history = st.session_state.signal_history
     total = len(history)
     win = sum(1 for s in history if s.get('result') == 'win')
@@ -526,35 +510,26 @@ def add_signal_to_history(signal, sl, tp1, tp2, signal_time_str):
         'peak': signal[1],
         'note': ''
     }
-    # 先存入数据库，获取id
     signal_id = save_signal_to_db(record)
     record['id'] = signal_id
-    # 再存入deque
     st.session_state.signal_history.appendleft(record)
     update_signal_stats()
 
 def update_signal_result(index, result, exit_price=None, exit_reason='', note=''):
-    """更新信号结果，并同步数据库（包含峰值和备注）"""
     history = st.session_state.signal_history
     if 0 <= index < len(history):
         record = history[index]
-        # 确保记录有id
         if 'id' not in record:
             st.warning("记录缺少id，无法同步数据库")
             return
         record['result'] = result
-
         if exit_price is not None and exit_price > 0:
             record['exit_price'] = round(exit_price, 2)
             record['exit_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
         if exit_reason:
             record['exit_reason'] = exit_reason
-
         if note:
             record['note'] = note
-
-        # 同步数据库
         update_signal_in_db(
             signal_id=record['id'],
             result=result,
@@ -564,12 +539,10 @@ def update_signal_result(index, result, exit_price=None, exit_reason='', note=''
             peak=record.get('peak'),
             note=record.get('note')
         )
-
         history[index] = record
         update_signal_stats()
 
 def clear_signal_history(clear_db=False):
-    """清空内存deque，可选清空数据库"""
     st.session_state.signal_history = deque(maxlen=200)
     if clear_db:
         clear_all_signals()
@@ -579,16 +552,12 @@ def clear_signal_history(clear_db=False):
 st.set_page_config(page_title="ETH 5分钟策略 (职业终极版)", layout="wide")
 st.title("📈 ETH 5分钟 EMA 剥头皮策略 (职业整合版)")
 
-# 初始化数据库
 init_db()
-# 自动清理脏数据
 auto_clean_invalid_signals()
 
-# 尝试从数据库加载最近信号到deque（重启后恢复）
 if 'signal_history' not in st.session_state:
     st.session_state.signal_history = load_recent_to_deque(200)
 
-# 其他session_state初始化
 if 'candle_buffer' not in st.session_state:
     st.session_state.candle_buffer = deque(maxlen=500)
 if 'signal_stats' not in st.session_state:
@@ -666,14 +635,12 @@ if st.sidebar.button("🔄 重置所有状态", width='stretch'):
     st.cache_data.clear()
     st.rerun()
 
-# 调试复选框
 if st.sidebar.checkbox("🧪 DB 调试"):
     rows = fetch_recent_signals(10, as_dict=True)
     st.sidebar.write("最近10条数据库记录：")
     for row in rows:
         st.sidebar.write(row)
 
-# 清空历史时是否同时清空数据库
 clear_db_option = st.sidebar.checkbox("同时清空数据库", value=False, key="clear_db_option")
 
 if st.sidebar.button("🗑 清空历史信号", width='stretch'):
@@ -725,7 +692,6 @@ else:
     signal = detect_signal_pro(df, fast_ema, slow_ema, rsi_period, buy_min, buy_max, sell_min, sell_max,
                                higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold)
 
-    # 显示信号卡片
     show_signal = signal
     if not show_signal and signal_history and len(signal_history) > 0 and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
@@ -750,7 +716,6 @@ else:
                 </script>
                 """, unsafe_allow_html=True)
 
-    # 更新峰值并同步数据库（同时更新内存中的记录）
     if signal_history and len(signal_history) > 0 and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
         cp = df['close'].iloc[-1]
@@ -763,9 +728,7 @@ else:
             updated = True
         if updated:
             update_signal_in_db(signal_id=rec['id'], peak=rec['peak'], note="峰值更新")
-            # 内存中 rec 已修改，无需额外操作
 
-    # 检查止损/止盈
     cp = df['close'].iloc[-1]
     for i, r in enumerate(signal_history):
         if r['result'] != 'pending':
@@ -1010,7 +973,6 @@ else:
     """, unsafe_allow_html=True)
     st.markdown('<div class="chart-container">', unsafe_allow_html=True)
 
-    # 优化：仅取最近200根K线绘制图表
     plot_df = df.tail(200)
     colors = np.where(plot_df['close'] >= plot_df['open'], '#00ff9d', '#ff4d4d')
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.72, 0.28],
@@ -1020,6 +982,7 @@ else:
                                  name='K线', increasing_line_color='#00ff9d', decreasing_line_color='#ff4d4d',
                                  line=dict(width=1.8), increasing_fillcolor='#00ff9d', decreasing_fillcolor='#ff4d4d', whiskerwidth=0.6), row=1, col=1)
 
+    # 修正图例名称
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA快线 ({fast_ema})',
                              line=dict(color='#ffd700', width=3.5), hovertemplate='EMA快线: %{y:.2f}<extra></extra>'), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA慢线 ({slow_ema})',
@@ -1048,7 +1011,6 @@ else:
     st.subheader("最近 10 根K线")
     display_df = df.reset_index()[['time', 'open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi', 'atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    # 重命名为中文列名
     display_df = display_df.rename(columns={
         'time': '时间',
         'open': '开盘',
@@ -1076,18 +1038,16 @@ c2.metric("亏损", stats['loss'])
 st.sidebar.metric("移动止损退出", stats['exit'])
 st.sidebar.markdown(f'<div style="background:#1e3a5f;padding:12px;border-radius:8px;text-align:center;margin-top:10px;">📍 <strong>待定信号: {stats["pending"]}</strong></div>', unsafe_allow_html=True)
 
-# ========== 新增：已完成信号卡片区域 ==========
+# ========== 已完成信号卡片区域 ==========
 st.markdown("---")
 st.subheader("📋 最近已完成信号（卡片视图）")
 
 if signal_history:
-    # 获取最近5条已结束的信号（非pending）
     finished = [s for s in list(signal_history) if s.get('result') in ('win', 'loss', 'exit')][:5]
     if finished:
         cols = st.columns(len(finished))
         for i, s in enumerate(finished):
             with cols[i]:
-                # 计算盈亏点数（仅当有exit_price时）
                 if s['exit_price'] and s['exit_price'] > 0:
                     if s['side'] == 'BUY':
                         points = s['exit_price'] - s['price']
@@ -1095,7 +1055,6 @@ if signal_history:
                         points = s['price'] - s['exit_price']
                 else:
                     points = 0.0
-                # 卡片样式
                 card_class = f"finished-signal-card {s['result']}"
                 st.markdown(f"""
                 <div class="{card_class}">
@@ -1114,11 +1073,10 @@ if signal_history:
 else:
     st.info("暂无信号记录")
 
-# ---------- 历史记录（优化版）----------
+# ---------- 历史记录 ----------
 st.markdown("---")
 st.subheader("📜 历史信号记录（表格）")
 if signal_history:
-    # 只选择关键字段，并重命名为中文/易懂名称
     hist_data = []
     for s in list(signal_history)[:50]:
         hist_data.append({
@@ -1136,7 +1094,6 @@ if signal_history:
         })
     hist_df = pd.DataFrame(hist_data)
     
-    # 定义结果颜色样式
     def color_result(val):
         if val == 'win':
             return 'background-color: #90ee90; color: black'
