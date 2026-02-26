@@ -611,4 +611,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.26 • 完全修复SQLite错误 • 实时诊断 + 激进模式 + 全中文 • 直接复制运行！祝你今天大赚！💰🚀")v
+st.caption("🔥 极致版 v2026.02.26 • 完全修复SQLite错误 • 实时诊断 + 激进模式 + 全中文 • 直接复制运行！祝你今天大赚！💰🚀")
