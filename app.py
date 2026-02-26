@@ -593,6 +593,126 @@ st.markdown("""
         color: #ffd966;
         font-weight: bold;
     }
+    /* 信号卡片样式 */
+    .signal-card {
+        background: linear-gradient(135deg, #0a3d2a 0%, #112233 100%);
+        border-radius: 18px;
+        padding: 24px;
+        margin: 15px 0 25px 0;
+        border: 3px solid #00ff9d;
+        box-shadow: 0 10px 30px rgba(0, 255, 157, 0.2);
+        position: relative;
+        overflow: hidden;
+    }
+    .header-green, .header-red {
+        padding: 16px 28px;
+        border-radius: 12px;
+        font-size: 27px;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 22px;
+        letter-spacing: 1px;
+    }
+    .header-green { background: #0a3d2a; color: #00ff9d; border-left: 8px solid #00ff9d; box-shadow: 0 0 15px #00ff9d; }
+    .header-red { background: #3d0a0a; color: #ff4d4d; border-left: 8px solid #ff4d4d; box-shadow: 0 0 15px #ff4d4d; }
+    .price-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        margin-bottom: 20px;
+    }
+    .price-item, .atr-box {
+        background: rgba(255,255,255,0.06);
+        padding: 16px 12px;
+        border-radius: 12px;
+        text-align: center;
+        border: 1px solid rgba(255,255,255,0.12);
+        transition: all 0.3s ease;
+    }
+    .price-item:hover, .atr-box:hover { transform: scale(1.04); box-shadow: 0 0 20px rgba(255,255,255,0.15); }
+    .price-label { font-size: 15px; opacity: 0.85; margin-bottom: 6px; }
+    .price-value { font-size: 29px; font-weight: 700; line-height: 1.05; }
+    .risk-text { font-size: 13px; color: #ff99cc; margin-top: 4px; }
+    .atr-box { border-color: #4a90ff; }
+    .atr-box .price-value { color: #4a90ff; }
+    .metrics-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin: 20px 0;
+    }
+    .metric-item {
+        background: rgba(30,58,95,0.65);
+        padding: 14px 10px;
+        border-radius: 12px;
+        text-align: center;
+        border: 1px solid rgba(74,144,255,0.3);
+    }
+    .metric-item div:first-child { font-size: 13.5px; opacity: 0.8; margin-bottom: 3px; }
+    .metric-value { font-size: 23px; font-weight: 600; }
+    .copy-btn {
+        background: linear-gradient(90deg, #00ff9d, #00cc7a) !important;
+        color: #000 !important;
+        font-weight: 700;
+        font-size: 17px;
+        padding: 14px 32px;
+        border-radius: 10px;
+        transition: all 0.3s;
+    }
+    .copy-btn:hover { transform: scale(1.05); box-shadow: 0 0 25px #00ff9d; }
+    .op-guide {
+        background: #1e3a5f;
+        padding: 22px;
+        border-radius: 14px;
+        color: #a0d8ff;
+        border-left: 6px solid #4a90ff;
+        box-shadow: 0 4px 15px rgba(74,144,255,0.15);
+    }
+    .waiting-card {
+        background: #1e3a5f;
+        padding: 32px;
+        border-radius: 18px;
+        text-align: center;
+        font-size: 23px;
+        color: #89c2ff;
+        border: 2px dashed #4a90ff;
+        box-shadow: 0 8px 25px rgba(74,144,255,0.1);
+        margin: 15px 0 25px 0;
+    }
+    .tp2-container {
+        background: linear-gradient(135deg, #2c2200 0%, #4a3a00 50%, #2c2200 100%);
+        border: 3px solid #ffd700;
+        border-radius: 18px;
+        padding: 22px 18px;
+        margin: 22px 0 26px 0;
+        box-shadow: 0 0 25px rgba(255,215,0,0.7), 0 0 45px rgba(255,170,0,0.4), inset 0 0 25px rgba(255,215,0,0.25);
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+        animation: tp2-pulse 2.5s infinite ease-in-out;
+    }
+    .tp2-container::before {
+        content: '';
+        position: absolute;
+        top: -50%; left: -50%;
+        width: 60%; height: 300%;
+        background: linear-gradient(120deg, transparent, rgba(255,255,255,0.35), transparent);
+        animation: tp2-shine 4s infinite linear;
+        pointer-events: none;
+    }
+    @keyframes tp2-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015); } }
+    @keyframes tp2-shine { 0% { transform: translateX(-150%) skewX(-15deg); } 100% { transform: translateX(400%) skewX(-15deg); } }
+    .finished-signal-card {
+        background: linear-gradient(135deg, #1a2a3a 0%, #0f1a24 100%);
+        border-radius: 12px;
+        padding: 15px;
+        border-left: 6px solid;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        margin-bottom: 10px;
+    }
+    .finished-signal-card.win { border-left-color: #90ee90; }
+    .finished-signal-card.loss { border-left-color: #ffcccb; }
+    .finished-signal-card.exit { border-left-color: #ffd966; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -614,15 +734,13 @@ if 'last_signal_time' not in st.session_state:
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
 
-# ---------- 侧边栏优化（使用折叠）----------
+# ---------- 侧边栏 ----------
 with st.sidebar:
     st.header("策略参数")
-    # 核心参数常开
     fast_ema = st.number_input("快线 EMA", 1, 50, 9, 1)
     slow_ema = st.number_input("慢线 EMA", 2, 100, 21, 1)
     rsi_period = st.number_input("RSI 周期", 2, 50, 14, 1)
     
-    # 使用双列布局优化RSI区间输入（修复标签重叠问题）
     col1, col2 = st.columns(2)
     with col1:
         buy_min = st.number_input("多头下限", 0, 100, 50, 1)
@@ -798,8 +916,92 @@ else:
             if exit_flag:
                 update_signal_result(i, res, ep, reason)
 
+    # ========== 信号卡片区域（在图表上方）==========
+    if show_signal:
+        side, price, ema_f, ema_s, rsi, atr_val = show_signal
+        sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
+        signal_time = df.index[-1].strftime('%Y-%m-%d %H:%M') if signal else (signal_history[0]['signal_time'] if signal_history else '')
+
+        risk_pts = abs(price - sl)
+        risk_pct = (risk_pts / price * 100)
+        profit_pts = abs(tp2 - price)
+        profit_pct = (profit_pts / price * 100)
+
+        st.markdown('<div class="signal-card">', unsafe_allow_html=True)
+
+        if side == 'BUY':
+            st.markdown(f'<div class="header-green">● 多头信号 @ {signal_time}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="header-red">● 空头信号 @ {signal_time}</div>', unsafe_allow_html=True)
+
+        atr_display = f"{atr_val:.2f}" if atr_val is not None else "N/A"
+
+        st.markdown(f'''
+            <div class="price-grid">
+                <div class="price-item"><div class="price-label" style="color:#ff4d4d;">★ 进场价格</div><div class="price-value" style="color:#ffffff;">{price:.2f}</div></div>
+                <div class="price-item"><div class="price-label" style="color:#ff99cc;">● 止损价格</div><div class="price-value" style="color:#ff99cc;">{sl:.2f}</div><div class="risk-text">风险 {risk_pts:.2f}点 ({risk_pct:.2f}%)</div></div>
+                <div class="price-item"><div class="price-label" style="color:#ff99cc;">● 第一目标 (TP1)</div><div class="price-value" style="color:#ff99cc;">{tp1:.2f}</div><div style="font-size:13px;color:#ff99cc;">RR 1:1</div></div>
+                <div class="atr-box"><div style="font-size:15px;color:#4a90ff;">ATR</div><div class="price-value" style="margin-top:2px;">{atr_display}</div></div>
+            </div>
+        ''', unsafe_allow_html=True)
+
+        st.markdown(f'''
+        <div class="tp2-container">
+            <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:6px;">
+                <span style="font-size:26px;color:#ffd700;">✨</span>
+                <span style="font-size:19px;color:#ffd700;font-weight:600;letter-spacing:1px;">第二目标 (TP2) · 全平仓</span>
+                <span style="font-size:26px;color:#ffd700;">✨</span>
+            </div>
+            <div style="font-size:48px;font-weight:900;line-height:1;background:linear-gradient(90deg,#ffe066,#ffd700,#ffeb3b,#ffd700,#ffe066);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 0 20px #ffd700,0 0 40px #ffaa00,0 0 60px rgba(255,215,0,0.6);">{tp2:.2f}</div>
+            <div style="margin-top:8px;display:flex;justify-content:center;gap:20px;font-size:15px;">
+                <span style="background:rgba(255,215,0,0.15);color:#ffd700;padding:4px 14px;border-radius:20px;border:1px solid #ffd700;">RR <strong>2:1</strong></span>
+                <span style="color:#a0ff9d;font-weight:600;">潜在盈利 +{profit_pts:.2f}点 (+{profit_pct:.1f}%)</span>
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+        st.markdown(f'''
+            <div class="metrics-row">
+                <div class="metric-item"><div>EMA快线</div><div class="metric-value" style="color:#ffa500;">{ema_f:.2f}</div></div>
+                <div class="metric-item"><div>EMA慢线</div><div class="metric-value" style="color:#4a90ff;">{ema_s:.2f}</div></div>
+                <div class="metric-item"><div>RSI</div><div class="metric-value" style="color:#00ff9d;">{rsi:.1f}</div></div>
+                <div class="metric-item"><div>当前价格</div><div class="metric-value" style="color:#ffffff;">{cp:.2f}</div></div>
+            </div>
+        ''', unsafe_allow_html=True)
+
+        signal_text = f"🟢 多头信号 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f} 风险{risk_pts:.2f}点" if side == 'BUY' else f"🔴 空头信号 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f} 风险{risk_pts:.2f}点"
+        if st.button("📋 一键复制交易信号", key="copy_btn", width='stretch'):
+            st.markdown(f'<script>navigator.clipboard.writeText(`{signal_text}`);</script>', unsafe_allow_html=True)
+            st.success("✅ 已复制到剪贴板！直接粘贴到OKX即可下单")
+
+        if use_trailing and signal_history and signal_history[0]['result'] == 'pending':
+            latest = signal_history[0]
+            peak = latest['peak']
+            if side == 'BUY':
+                trailing_sl = max(sl, peak * (1 - trailing_distance / 100))
+                st.success(f"📈 当前最高 **{peak:.2f}** → 建议移动止损 **{trailing_sl:.2f}**（已上移）")
+            else:
+                trailing_sl = min(sl, peak * (1 + trailing_distance / 100))
+                st.error(f"📉 当前最低 **{peak:.2f}** → 建议移动止损 **{trailing_sl:.2f}**（已下移）")
+
+        st.markdown(f"""
+        <div class="op-guide">
+            <strong>📌 操作指引：</strong>
+            <ul style="margin:12px 0 0 22px;padding:0;line-height:1.7;">
+                <li>进场：在 <strong>{price:.2f}</strong> 附近买入/卖出。</li>
+                <li>止损：立即挂单 <strong>{sl:.2f}</strong>。</li>
+                <li>止盈：TP1 <strong>{tp1:.2f}</strong>（平半仓），TP2 <strong>{tp2:.2f}</strong>（全平）。</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    else:
+        st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;opacity:0.7;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
+
     # ========== 主内容区三列布局 ==========
-    col1, col2 = st.columns([3, 1])  # 左侧3/4，右侧1/4
+    col1, col2 = st.columns([3, 1])
 
     with col1:
         # 图表区域
@@ -856,14 +1058,12 @@ else:
         # 右侧信息区域
         st.metric("当前价", f"{cp:.2f}")
 
-        # 计算24h涨跌（修复错误）
+        # 计算24h涨跌
         if len(df) > 1:
             now = df.index[-1]
             target_time = now - timedelta(hours=24)
-            # 计算时间差绝对值（秒），使用 numpy 的 abs 函数
             time_diffs = np.abs((df.index - target_time).total_seconds())
             closest_idx = time_diffs.argmin()
-            # 如果最接近的时间点与目标时间相差在5分钟内，则认为有效
             if time_diffs[closest_idx] <= 5 * 60:
                 prev_close = df.iloc[closest_idx]['close']
                 change = cp - prev_close
@@ -878,7 +1078,6 @@ else:
 
         st.markdown("---")
 
-        # 统计摘要（彩色）
         stats = st.session_state.signal_stats
         st.markdown(f"**总信号:** {stats['total']}")
         st.markdown(f"<span class='stat-win'>✅ 盈利: {stats['win']}</span>", unsafe_allow_html=True)
@@ -888,12 +1087,10 @@ else:
         st.markdown("---")
 
         st.subheader("📋 最近信号")
-        # 显示最近3条已完成信号（竖排）
         if signal_history:
             finished = [s for s in list(signal_history) if s.get('result') in ('win', 'loss', 'exit')][:3]
             if finished:
                 for s in finished:
-                    # 计算盈亏
                     if s['exit_price'] and s['exit_price'] > 0:
                         if s['side'] == 'BUY':
                             points = s['exit_price'] - s['price']
@@ -934,13 +1131,12 @@ else:
     })
     st.dataframe(display_df.round(2), width='stretch', hide_index=True)
 
-    # ---------- 历史信号记录（带表情符号）----------
+    # ---------- 历史信号记录 ----------
     st.markdown("---")
     st.subheader("📜 历史信号记录")
     if signal_history:
         hist_data = []
         for s in list(signal_history)[:50]:
-            # 结果加表情
             if s['result'] == 'win':
                 result_emoji = "✅ 赢"
             elif s['result'] == 'loss':
