@@ -14,8 +14,8 @@ import sqlite3
 import re
 
 # ---------- 配置 ----------
-SYMBOL = "ETHUSDT"                     # Binance 格式：ETHUSDT
-INTERVAL = "5m"                         # 5分钟
+SYMBOL = "ETHUSDT"                     # Bybit 使用 ETHUSDT
+INTERVAL = "5"                          # Bybit 5分钟为 "5"
 LIMIT = 200
 RETRIES = 3
 BASE_DELAY = 0.5
@@ -261,11 +261,11 @@ def fetch_with_retry(func, retries=RETRIES, base_delay=BASE_DELAY):
                 return None
     return None
 
-# ---------- 数据获取（Binance）----------
+# ---------- 数据获取（Bybit）----------
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_klines():
     def _fetch():
-        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
         headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=10, headers=headers)
         retry_after = resp.headers.get("Retry-After")
@@ -278,13 +278,15 @@ def fetch_klines():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, list):
-        if not result:
-            st.warning("Binance 返回空数据")
+    if result and isinstance(result, dict) and result.get('retCode') == 0:
+        data = result.get('result', {}).get('list', [])
+        if not data:
+            st.warning("Bybit 返回空数据")
             return []
+        # Bybit 返回数组，每个元素为 [timestamp, open, high, low, close, volume, turnover]
+        # 时间戳为字符串（毫秒）
         candles = []
-        for k in result:
-            # Binance 返回数组，索引：0时间戳(ms),1开盘,2最高,3最低,4收盘,5成交量,6收盘时间,... 我们只取前6个
+        for k in data:
             ts = int(k[0])
             open_price = float(k[1])
             high = float(k[2])
@@ -299,7 +301,7 @@ def fetch_klines():
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
     def _fetch():
-        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit=1"
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={SYMBOL}&interval={INTERVAL}&limit=1"
         headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
@@ -312,9 +314,10 @@ def fetch_latest_candle():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, list):
-        if result:
-            k = result[0]
+    if result and isinstance(result, dict) and result.get('retCode') == 0:
+        data = result.get('result', {}).get('list', [])
+        if data:
+            k = data[0]
             return [int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])]
         st.warning("最新 K 线数据为空")
         return None
@@ -323,7 +326,7 @@ def fetch_latest_candle():
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
     def _fetch():
-        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval=1h&limit=200"
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={SYMBOL}&interval=60&limit=200"
         headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
@@ -336,10 +339,11 @@ def get_higher_trend():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, list):
-        if not result:
+    if result and isinstance(result, dict) and result.get('retCode') == 0:
+        data = result.get('result', {}).get('list', [])
+        if not data:
             return 'neutral'
-        closes = [float(k[4]) for k in result]
+        closes = [float(k[4]) for k in data]
         if len(closes) < 200:
             return 'neutral'
         ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
