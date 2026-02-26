@@ -16,7 +16,7 @@ import re
 # ---------- 配置 ----------
 SYMBOL = "ETH"
 CURRENCY = "USD"
-INTERVAL = "5"          # CryptoCompare 5分钟为 "5"
+INTERVAL = "5"
 LIMIT = 200
 RETRIES = 3
 BASE_DELAY = 0.5
@@ -278,7 +278,7 @@ def fetch_klines():
         data = result['Data']['Data']
         candles = []
         for item in data:
-            ts = item['time'] * 1000  # 秒转毫秒
+            ts = item['time'] * 1000
             open_price = item['open']
             high = item['high']
             low = item['low']
@@ -352,17 +352,30 @@ def calculate_atr(df, period=14):
     tr2 = (df['high'] - df['close'].shift()).abs()
     tr3 = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+    # Wilder ATR: 使用指数加权平均，alpha = 1/period
+    return tr.ewm(alpha=1/period, adjust=False).mean()
 
-def volume_surge(df, vol_period=20, surge_mult=1.5):
+def volume_surge(df, vol_period=20, surge_mult=1.3):
     if len(df) < vol_period + 1:
-        return True
+        return False
     avg_vol = df['volume'].rolling(window=vol_period).mean().iloc[-1]
-    return df['volume'].iloc[-1] > avg_vol * surge_mult
+    vol_ratio = df['volume'].iloc[-1] / avg_vol
+    if vol_ratio > surge_mult and df['close'].iloc[-1] > df['open'].iloc[-1]:
+        return True
+    return False
 
-# ========== 核心信号检测 ==========
+def volume_surge_bearish(df, vol_period=20, surge_mult=1.3):
+    if len(df) < vol_period + 1:
+        return False
+    avg_vol = df['volume'].rolling(window=vol_period).mean().iloc[-1]
+    vol_ratio = df['volume'].iloc[-1] / avg_vol
+    if vol_ratio > surge_mult and df['close'].iloc[-1] < df['open'].iloc[-1]:
+        return True
+    return False
+
+# ========== 核心信号检测（5分钟极致强化版）==========
 def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, sell_max,
-                      higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold=0.001):
+                      higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold=0.0012):
     if df.empty:
         return None
     if len(df) < slow + rsi_period + 10:
@@ -371,26 +384,98 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         return None
 
     last = df.iloc[-1]
-    ema_f_now = df['ema_fast'].iloc[-1]
-    ema_s_now = df['ema_slow'].iloc[-1]
+
+    # ---- 动态波动过滤 + 结构突破（升级版） ----
+    range_lookback = 20
+    if len(df) >= range_lookback:
+        recent_high = df['high'].iloc[-range_lookback:].max()
+        recent_low = df['low'].iloc[-range_lookback:].min()
+        range_pct = (recent_high - recent_low) / last['close']
+        # 横盘直接禁单
+        if range_pct < 0.003:
+            return None
+
+        # 极致强化1：必须突破最近5根K线结构（排除当前）
+        if len(df) >= 6:
+            prev_high = df['high'].iloc[-6:-1].max()
+            prev_low = df['low'].iloc[-6:-1].min()
+        else:
+            prev_high = df['high'].iloc[-2]
+            prev_low = df['low'].iloc[-2]
+
+        ema_f_now = df['ema_fast'].iloc[-1]
+        ema_s_now = df['ema_slow'].iloc[-1]
+
+        if ema_f_now > ema_s_now:
+            if last['close'] <= prev_high:
+                return None
+        else:
+            if last['close'] >= prev_low:
+                return None
+    else:
+        # 数据不足时不进行此过滤
+        ema_f_now = df['ema_fast'].iloc[-1]
+        ema_s_now = df['ema_slow'].iloc[-1]
+
     rsi_now = df['rsi'].iloc[-1]
     atr_now = df['atr'].iloc[-1]
+
+    # 趋势扩散确认（EMA 间距必须扩大）
+    ema_spread_now = abs(ema_f_now - ema_s_now)
+    ema_spread_prev = abs(df['ema_fast'].iloc[-2] - df['ema_slow'].iloc[-2]) if len(df) >= 2 else 0
+    if ema_spread_now <= ema_spread_prev:
+        return None
+
+    # EMA 扩散强度阈值（至少0.1%）
+    ema_strength = ema_spread_now / last['close']
+    if ema_strength < 0.001:
+        return None
+
+    # 禁止EMA刚交叉后立即做单（过滤前3根K线）
+    if len(df) >= 4:
+        cross_up = (
+            df['ema_fast'].iloc[-4] < df['ema_slow'].iloc[-4] and
+            ema_f_now > ema_s_now
+        )
+        cross_down = (
+            df['ema_fast'].iloc[-4] > df['ema_slow'].iloc[-4] and
+            ema_f_now < ema_s_now
+        )
+        if cross_up or cross_down:
+            return None
+
+    # 连续K线确认
+    if len(df) >= 2:
+        prev_close = df['close'].iloc[-2]
 
     is_bullish = (ema_f_now > ema_s_now) and (last['close'] > ema_f_now * 0.999)
     is_bearish = (ema_f_now < ema_s_now) and (last['close'] < ema_f_now * 1.001)
 
-    slope_fast = (ema_f_now - df['ema_fast'].iloc[-4]) / 3 if len(df) >= 4 else 0
+    # EMA 距离过滤（避免震荡盘）
+    ema_distance = abs(ema_f_now - ema_s_now) / last['close']
+    if ema_distance < 0.0005:
+        return None
+
+    # 标准化斜率计算（安全回看）
+    lookback = min(5, len(df) - 1)
+    slope_fast = (ema_f_now - df['ema_fast'].iloc[-lookback]) / lookback
+    slope_strength = slope_fast / last['close']
+
+    # 极致强化2：斜率硬阈值（绝对值）
+    if use_slope_filter and abs(slope_strength) <= 0.00022:
+        return None
 
     if pd.isna(atr_now):
         atr_ok = True
     else:
         atr_ok = atr_now > last['close'] * atr_threshold if use_atr_filter else True
 
-    vol_ok = volume_surge(df) if use_volume_filter else True
-
     if is_bullish and buy_min < rsi_now < buy_max:
-        if use_slope_filter and slope_fast <= 0:
+        # 连续K线确认：当前收盘 > 前一根收盘
+        if len(df) >= 2 and last['close'] <= prev_close:
             return None
+        # 成交量确认
+        vol_ok = volume_surge(df) if use_volume_filter else True
         if higher_trend == 'down':
             return None
         if not atr_ok or not vol_ok:
@@ -398,8 +483,9 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         return ('BUY', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
 
     if is_bearish and sell_min < rsi_now < sell_max:
-        if use_slope_filter and slope_fast >= 0:
+        if len(df) >= 2 and last['close'] >= prev_close:
             return None
+        vol_ok = volume_surge_bearish(df) if use_volume_filter else True
         if higher_trend == 'up':
             return None
         if not atr_ok or not vol_ok:
@@ -408,7 +494,7 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
     return None
 
 # ========== ATR动态止损/止盈 ==========
-def calculate_sltp(entry_price, side, atr=None, use_atr=False, atr_mult_sl=2.55, atr_mult_tp1=1.0, atr_mult_tp2=2.0):
+def calculate_sltp(entry_price, side, atr=None, use_atr=False, atr_mult_sl=2.2, atr_mult_tp1=0.8, atr_mult_tp2=1.6):
     if use_atr and atr and atr > 0:
         risk = atr * atr_mult_sl
         if side == 'BUY':
@@ -541,7 +627,7 @@ def clear_signal_history(clear_db=False):
     update_signal_stats()
 
 # ---------- Streamlit 页面配置 ----------
-st.set_page_config(page_title="ETH 5分钟策略 (职业终极版)", layout="wide")
+st.set_page_config(page_title="ETH 5分钟策略 (5分钟极致版)", layout="wide")
 
 # ----- 全局CSS优化 -----
 st.markdown("""
@@ -708,7 +794,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (职业整合版)")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (5分钟极致版)")
 
 init_db()
 auto_clean_invalid_signals()
@@ -726,24 +812,23 @@ if 'last_signal_time' not in st.session_state:
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
 
-# ---------- 侧边栏 ----------
+# ---------- 侧边栏（极致优化参数）----------
 with st.sidebar:
     st.header("策略参数")
-    fast_ema = st.number_input("快线 EMA", 1, 50, 9, 1)
+    fast_ema = st.number_input("快线 EMA", 1, 50, 8, 1)
     slow_ema = st.number_input("慢线 EMA", 2, 100, 21, 1)
     rsi_period = st.number_input("RSI 周期", 2, 50, 14, 1)
     
     col1, col2 = st.columns(2)
     with col1:
-        buy_min = st.number_input("多头下限", 0, 100, 50, 1)
+        buy_min = st.number_input("多头下限", 0, 100, 57, 1)
     with col2:
         buy_max = st.number_input("多头上限", 0, 100, 70, 1)
-    
     col3, col4 = st.columns(2)
     with col3:
         sell_min = st.number_input("空头下限", 0, 100, 30, 1)
     with col4:
-        sell_max = st.number_input("空头上限", 0, 100, 50, 1)
+        sell_max = st.number_input("空头上限", 0, 100, 43, 1)
     
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
 
@@ -753,22 +838,22 @@ with st.sidebar:
         use_atr_filter = st.checkbox("启用波动率过滤", value=True)
         atr_threshold = st.slider(
             "ATR 阈值 (相对于价格的百分比)",
-            min_value=0.05, max_value=0.5, value=0.1, step=0.05,
-            help="ATR 必须大于价格 × 此百分比。若信号太少，可适当降低此值（例如 0.05%）。"
+            min_value=0.05, max_value=0.5, value=0.12, step=0.01,   # 极致强化3：默认0.12%
+            help="ATR 必须大于价格 × 此百分比。5分钟ETH最佳0.12%-0.13%"
         ) / 100
         use_higher_tf_filter = st.checkbox("启用高周期趋势过滤", value=True)
 
     with st.expander("📊 动态止损", expanded=True):
         use_atr_sl = st.checkbox("启用ATR动态止损", value=True)
         if use_atr_sl:
-            atr_mult_sl = st.slider("ATR止损倍数", 0.5, 4.0, 2.55, 0.05)
-            atr_mult_tp1 = st.slider("ATR TP1倍数 (RR 1:1)", 0.5, 3.0, 1.0, 0.05)
-            atr_mult_tp2 = st.slider("ATR TP2倍数 (RR 2:1)", 1.0, 5.0, 2.0, 0.05)
+            atr_mult_sl = st.slider("ATR止损倍数", 0.5, 4.0, 2.2, 0.05)
+            atr_mult_tp1 = st.slider("ATR TP1倍数 (RR 1:1)", 0.2, 3.0, 0.8, 0.05)
+            atr_mult_tp2 = st.slider("ATR TP2倍数 (RR 2:1)", 0.5, 5.0, 1.6, 0.05)
         else:
             atr_mult_sl = atr_mult_tp1 = atr_mult_tp2 = 1.2
 
     with st.expander("✨ 移动止损", expanded=False):
-        use_trailing = st.checkbox("启用移动止损", value=False)
+        use_trailing = st.checkbox("启用移动止损", value=False)   # 建议关闭
         trailing_distance = st.slider("回调距离 (%)", 0.1, 2.0, 0.3, 0.1) if use_trailing else 0.3
 
     sound_enabled = st.checkbox("🔊 启用信号声音提醒", value=True)
@@ -1190,4 +1275,4 @@ else:
         st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
-st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 + 卡片复盘 + 24h涨跌 • 祝交易大赚！💰")
+st.caption("🔥 5分钟极致版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 + 卡片复盘 + 24h涨跌 + 动态结构过滤 + 极致斜率 • 祝交易大赚！💰")
