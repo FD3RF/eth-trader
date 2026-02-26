@@ -568,16 +568,6 @@ if 'last_signal_time' not in st.session_state:
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
 
-with st.expander("📘 新手快速上手指南（点击展开）", expanded=True):
-    st.markdown("""
-    ### 如何根据信号下单？
-    当顶部出现 🟢 多头信号 或 🔴 空头信号 时，请按以下步骤操作：
-    1. **进场价格** = 信号卡片中的“进场价格”数值（例如 1864.56）
-    2. **止损价格** = 信号卡片中的“止损价格”数值（例如 1853.37）
-    3. 在交易所（如OKX）以市价单或限价单买入/卖出，价格尽量接近进场价。
-    4. 同时设置止损单和止盈单（TP1平半仓，TP2全平）。
-    """)
-
 # ---------- 侧边栏参数 ----------
 st.sidebar.header("策略参数")
 fast_ema = st.sidebar.number_input("快线 EMA", 1, 50, 9, 1)
@@ -982,7 +972,6 @@ else:
                                  name='K线', increasing_line_color='#00ff9d', decreasing_line_color='#ff4d4d',
                                  line=dict(width=1.8), increasing_fillcolor='#00ff9d', decreasing_fillcolor='#ff4d4d', whiskerwidth=0.6), row=1, col=1)
 
-    # 修正图例名称
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA快线 ({fast_ema})',
                              line=dict(color='#ffd700', width=3.5), hovertemplate='EMA快线: %{y:.2f}<extra></extra>'), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA慢线 ({slow_ema})',
