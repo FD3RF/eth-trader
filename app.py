@@ -550,6 +550,52 @@ def clear_signal_history(clear_db=False):
 
 # ---------- Streamlit 页面配置 ----------
 st.set_page_config(page_title="ETH 5分钟策略 (职业终极版)", layout="wide")
+
+# ----- 全局CSS优化 -----
+st.markdown("""
+<style>
+    * {
+        font-family: 'Inter', 'Microsoft YaHei', sans-serif;
+    }
+    .stApp {
+        background-color: #0f172a;
+    }
+    /* 卡片悬停效果 */
+    .finished-signal-card {
+        transition: transform 0.2s;
+        margin-bottom: 10px;
+    }
+    .finished-signal-card:hover {
+        transform: scale(1.02);
+    }
+    /* 表格文字居中 */
+    .dataframe th, .dataframe td {
+        text-align: center !important;
+    }
+    /* 侧边栏滑块标签加粗 */
+    .stSlider label {
+        font-weight: 600;
+    }
+    /* metric数值放大 */
+    .metric-value {
+        font-size: 2rem !important;
+    }
+    /* 侧边栏统计彩色文字 */
+    .stat-win {
+        color: #00ff9d;
+        font-weight: bold;
+    }
+    .stat-loss {
+        color: #ff4d4d;
+        font-weight: bold;
+    }
+    .stat-exit {
+        color: #ffd966;
+        font-weight: bold;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("📈 ETH 5分钟 EMA 剥头皮策略 (职业整合版)")
 
 init_db()
@@ -568,74 +614,72 @@ if 'last_signal_time' not in st.session_state:
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
 
-# ---------- 侧边栏参数 ----------
-st.sidebar.header("策略参数")
-fast_ema = st.sidebar.number_input("快线 EMA", 1, 50, 9, 1)
-slow_ema = st.sidebar.number_input("慢线 EMA", 2, 100, 21, 1)
-rsi_period = st.sidebar.number_input("RSI 周期", 2, 50, 14, 1)
-buy_min = st.sidebar.number_input("多头 RSI 下限", 0, 100, 50, 1)
-buy_max = st.sidebar.number_input("多头 RSI 上限", 0, 100, 70, 1)
-sell_min = st.sidebar.number_input("空头 RSI 下限", 0, 100, 30, 1)
-sell_max = st.sidebar.number_input("空头 RSI 上限", 0, 100, 50, 1)
-refresh_interval = st.sidebar.number_input("刷新间隔(秒)", 5, 300, 60, 5)
+# ---------- 侧边栏优化（使用折叠）----------
+with st.sidebar:
+    st.header("策略参数")
+    # 核心参数常开
+    fast_ema = st.number_input("快线 EMA", 1, 50, 9, 1)
+    slow_ema = st.number_input("慢线 EMA", 2, 100, 21, 1)
+    rsi_period = st.number_input("RSI 周期", 2, 50, 14, 1)
+    buy_min = st.number_input("多头 RSI 下限", 0, 100, 50, 1)
+    buy_max = st.number_input("多头 RSI 上限", 0, 100, 70, 1)
+    sell_min = st.number_input("空头 RSI 下限", 0, 100, 30, 1)
+    sell_max = st.number_input("空头 RSI 上限", 0, 100, 50, 1)
+    refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("✨ 高级过滤")
-use_slope_filter = st.sidebar.checkbox("启用斜率过滤", value=True)
-use_volume_filter = st.sidebar.checkbox("启用成交量爆发过滤", value=True)
-use_atr_filter = st.sidebar.checkbox("启用波动率过滤", value=True)
-atr_threshold = st.sidebar.slider(
-    "ATR 阈值 (相对于价格的百分比)",
-    min_value=0.05, max_value=0.5, value=0.1, step=0.05,
-    help="ATR 必须大于价格 × 此百分比。若信号太少，可适当降低此值（例如 0.05%）。"
-) / 100
-use_higher_tf_filter = st.sidebar.checkbox("启用高周期趋势过滤", value=True)
+    with st.expander("✨ 高级过滤", expanded=True):
+        use_slope_filter = st.checkbox("启用斜率过滤", value=True)
+        use_volume_filter = st.checkbox("启用成交量爆发过滤", value=True)
+        use_atr_filter = st.checkbox("启用波动率过滤", value=True)
+        atr_threshold = st.slider(
+            "ATR 阈值 (相对于价格的百分比)",
+            min_value=0.05, max_value=0.5, value=0.1, step=0.05,
+            help="ATR 必须大于价格 × 此百分比。若信号太少，可适当降低此值（例如 0.05%）。"
+        ) / 100
+        use_higher_tf_filter = st.checkbox("启用高周期趋势过滤", value=True)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📊 动态止损")
-use_atr_sl = st.sidebar.checkbox("启用ATR动态止损", value=True)
-if use_atr_sl:
-    atr_mult_sl = st.sidebar.slider("ATR止损倍数", 0.5, 4.0, 2.55, 0.05)
-    atr_mult_tp1 = st.sidebar.slider("ATR TP1倍数 (RR 1:1)", 0.5, 3.0, 1.0, 0.05)
-    atr_mult_tp2 = st.sidebar.slider("ATR TP2倍数 (RR 2:1)", 1.0, 5.0, 2.0, 0.05)
-else:
-    atr_mult_sl = atr_mult_tp1 = atr_mult_tp2 = 1.2
+    with st.expander("📊 动态止损", expanded=True):
+        use_atr_sl = st.checkbox("启用ATR动态止损", value=True)
+        if use_atr_sl:
+            atr_mult_sl = st.slider("ATR止损倍数", 0.5, 4.0, 2.55, 0.05)
+            atr_mult_tp1 = st.slider("ATR TP1倍数 (RR 1:1)", 0.5, 3.0, 1.0, 0.05)
+            atr_mult_tp2 = st.slider("ATR TP2倍数 (RR 2:1)", 1.0, 5.0, 2.0, 0.05)
+        else:
+            atr_mult_sl = atr_mult_tp1 = atr_mult_tp2 = 1.2
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("✨ 移动止损")
-use_trailing = st.sidebar.checkbox("启用移动止损", value=False)
-trailing_distance = st.sidebar.slider("回调距离 (%)", 0.1, 2.0, 0.3, 0.1) if use_trailing else 0.3
+    with st.expander("✨ 移动止损", expanded=False):
+        use_trailing = st.checkbox("启用移动止损", value=False)
+        trailing_distance = st.slider("回调距离 (%)", 0.1, 2.0, 0.3, 0.1) if use_trailing else 0.3
 
-sound_enabled = st.sidebar.checkbox("🔊 启用信号声音提醒", value=True)
+    sound_enabled = st.checkbox("🔊 启用信号声音提醒", value=True)
 
-st.sidebar.markdown("---")
-st.sidebar.metric("📡 API 失败次数", st.session_state.api_fail_count)
+    st.markdown("---")
+    st.metric("📡 API 失败次数", st.session_state.api_fail_count)
 
-if st.sidebar.button("立即刷新数据", width='stretch'):
-    st.cache_data.clear()
-    st.rerun()
+    if st.button("立即刷新数据", width='stretch'):
+        st.cache_data.clear()
+        st.rerun()
 
-if st.sidebar.button("🔄 重置所有状态", width='stretch'):
-    for key in ['candle_buffer', 'signal_history', 'signal_stats', 'last_signal_time']:
-        try:
-            if key in st.session_state:
-                del st.session_state[key]
-        except Exception as e:
-            st.warning(f"清除状态 {key} 时发生错误: {e}")
-    st.cache_data.clear()
-    st.rerun()
+    if st.button("🔄 重置所有状态", width='stretch'):
+        for key in ['candle_buffer', 'signal_history', 'signal_stats', 'last_signal_time']:
+            try:
+                if key in st.session_state:
+                    del st.session_state[key]
+            except Exception as e:
+                st.warning(f"清除状态 {key} 时发生错误: {e}")
+        st.cache_data.clear()
+        st.rerun()
 
-if st.sidebar.checkbox("🧪 DB 调试"):
-    rows = fetch_recent_signals(10, as_dict=True)
-    st.sidebar.write("最近10条数据库记录：")
-    for row in rows:
-        st.sidebar.write(row)
+    if st.checkbox("🧪 DB 调试"):
+        rows = fetch_recent_signals(10, as_dict=True)
+        st.write("最近10条数据库记录：")
+        for row in rows:
+            st.write(row)
 
-clear_db_option = st.sidebar.checkbox("同时清空数据库", value=False, key="clear_db_option")
-
-if st.sidebar.button("🗑 清空历史信号", width='stretch'):
-    clear_signal_history(clear_db=clear_db_option)
-    st.rerun()
+    clear_db_option = st.checkbox("同时清空数据库", value=False, key="clear_db_option")
+    if st.button("🗑 清空历史信号", width='stretch'):
+        clear_signal_history(clear_db=clear_db_option)
+        st.rerun()
 
 # ---------- 获取K线数据 ----------
 candles = fetch_klines()
@@ -682,6 +726,7 @@ else:
     signal = detect_signal_pro(df, fast_ema, slow_ema, rsi_period, buy_min, buy_max, sell_min, sell_max,
                                higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold)
 
+    # 显示信号卡片（新信号或待定）
     show_signal = signal
     if not show_signal and signal_history and len(signal_history) > 0 and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
@@ -706,6 +751,7 @@ else:
                 </script>
                 """, unsafe_allow_html=True)
 
+    # 更新峰值
     if signal_history and len(signal_history) > 0 and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
         cp = df['close'].iloc[-1]
@@ -720,6 +766,7 @@ else:
             update_signal_in_db(signal_id=rec['id'], peak=rec['peak'], note="峰值更新")
 
     cp = df['close'].iloc[-1]
+    # 检查止损/止盈
     for i, r in enumerate(signal_history):
         if r['result'] != 'pending':
             continue
@@ -741,262 +788,104 @@ else:
             if exit_flag:
                 update_signal_result(i, res, ep, reason)
 
-    # ========== 信号卡片样式 ==========
-    st.markdown("""
-    <style>
-    .signal-card {
-        background: linear-gradient(135deg, #0a3d2a 0%, #112233 100%);
-        border-radius: 18px;
-        padding: 24px;
-        margin: 15px 0 25px 0;
-        border: 3px solid #00ff9d;
-        box-shadow: 0 10px 30px rgba(0, 255, 157, 0.2);
-        position: relative;
-        overflow: hidden;
-    }
-    .header-green, .header-red {
-        padding: 16px 28px;
-        border-radius: 12px;
-        font-size: 27px;
-        font-weight: 700;
-        text-align: center;
-        margin-bottom: 22px;
-        letter-spacing: 1px;
-    }
-    .header-green { background: #0a3d2a; color: #00ff9d; border-left: 8px solid #00ff9d; box-shadow: 0 0 15px #00ff9d; }
-    .header-red { background: #3d0a0a; color: #ff4d4d; border-left: 8px solid #ff4d4d; box-shadow: 0 0 15px #ff4d4d; }
-    .price-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 14px;
-        margin-bottom: 20px;
-    }
-    .price-item, .atr-box {
-        background: rgba(255,255,255,0.06);
-        padding: 16px 12px;
-        border-radius: 12px;
-        text-align: center;
-        border: 1px solid rgba(255,255,255,0.12);
-        transition: all 0.3s ease;
-    }
-    .price-item:hover, .atr-box:hover { transform: scale(1.04); box-shadow: 0 0 20px rgba(255,255,255,0.15); }
-    .price-label { font-size: 15px; opacity: 0.85; margin-bottom: 6px; }
-    .price-value { font-size: 29px; font-weight: 700; line-height: 1.05; }
-    .risk-text { font-size: 13px; color: #ff99cc; margin-top: 4px; }
-    .atr-box { border-color: #4a90ff; }
-    .atr-box .price-value { color: #4a90ff; }
-    .metrics-row {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 12px;
-        margin: 20px 0;
-    }
-    .metric-item {
-        background: rgba(30,58,95,0.65);
-        padding: 14px 10px;
-        border-radius: 12px;
-        text-align: center;
-        border: 1px solid rgba(74,144,255,0.3);
-    }
-    .metric-item div:first-child { font-size: 13.5px; opacity: 0.8; margin-bottom: 3px; }
-    .metric-value { font-size: 23px; font-weight: 600; }
-    .copy-btn {
-        background: linear-gradient(90deg, #00ff9d, #00cc7a) !important;
-        color: #000 !important;
-        font-weight: 700;
-        font-size: 17px;
-        padding: 14px 32px;
-        border-radius: 10px;
-        transition: all 0.3s;
-    }
-    .copy-btn:hover { transform: scale(1.05); box-shadow: 0 0 25px #00ff9d; }
-    .op-guide {
-        background: #1e3a5f;
-        padding: 22px;
-        border-radius: 14px;
-        color: #a0d8ff;
-        border-left: 6px solid #4a90ff;
-        box-shadow: 0 4px 15px rgba(74,144,255,0.15);
-    }
-    .waiting-card {
-        background: #1e3a5f;
-        padding: 32px;
-        border-radius: 18px;
-        text-align: center;
-        font-size: 23px;
-        color: #89c2ff;
-        border: 2px dashed #4a90ff;
-        box-shadow: 0 8px 25px rgba(74,144,255,0.1);
-    }
-    .tp2-container {
-        background: linear-gradient(135deg, #2c2200 0%, #4a3a00 50%, #2c2200 100%);
-        border: 3px solid #ffd700;
-        border-radius: 18px;
-        padding: 22px 18px;
-        margin: 22px 0 26px 0;
-        box-shadow: 0 0 25px rgba(255,215,0,0.7), 0 0 45px rgba(255,170,0,0.4), inset 0 0 25px rgba(255,215,0,0.25);
-        text-align: center;
-        position: relative;
-        overflow: hidden;
-        animation: tp2-pulse 2.5s infinite ease-in-out;
-    }
-    .tp2-container::before {
-        content: '';
-        position: absolute;
-        top: -50%; left: -50%;
-        width: 60%; height: 300%;
-        background: linear-gradient(120deg, transparent, rgba(255,255,255,0.35), transparent);
-        animation: tp2-shine 4s infinite linear;
-        pointer-events: none;
-    }
-    @keyframes tp2-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015); } }
-    @keyframes tp2-shine { 0% { transform: translateX(-150%) skewX(-15deg); } 100% { transform: translateX(400%) skewX(-15deg); } }
-    .finished-signal-card {
-        background: linear-gradient(135deg, #1a2a3a 0%, #0f1a24 100%);
-        border-radius: 12px;
-        padding: 15px;
-        border-left: 6px solid;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        margin-bottom: 10px;
-    }
-    .finished-signal-card.win { border-left-color: #90ee90; }
-    .finished-signal-card.loss { border-left-color: #ffcccb; }
-    .finished-signal-card.exit { border-left-color: #ffd966; }
-    </style>
-    """, unsafe_allow_html=True)
+    # ========== 主内容区三列布局 ==========
+    col1, col2 = st.columns([3, 1])  # 左侧3/4，右侧1/4
 
-    if show_signal:
-        side, price, ema_f, ema_s, rsi, atr_val = show_signal
-        sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
-        signal_time = df.index[-1].strftime('%Y-%m-%d %H:%M') if signal else (signal_history[0]['signal_time'] if signal_history else '')
-
-        risk_pts = abs(price - sl)
-        risk_pct = (risk_pts / price * 100)
-        profit_pts = abs(tp2 - price)
-        profit_pct = (profit_pts / price * 100)
-
-        st.markdown('<div class="signal-card">', unsafe_allow_html=True)
-
-        if side == 'BUY':
-            st.markdown(f'<div class="header-green">● 多头信号 @ {signal_time}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="header-red">● 空头信号 @ {signal_time}</div>', unsafe_allow_html=True)
-
-        atr_display = f"{atr_val:.2f}" if atr_val is not None else "N/A"
-
-        st.markdown(f'''
-            <div class="price-grid">
-                <div class="price-item"><div class="price-label" style="color:#ff4d4d;">★ 进场价格</div><div class="price-value" style="color:#ffffff;">{price:.2f}</div></div>
-                <div class="price-item"><div class="price-label" style="color:#ff99cc;">● 止损价格</div><div class="price-value" style="color:#ff99cc;">{sl:.2f}</div><div class="risk-text">风险 {risk_pts:.2f}点 ({risk_pct:.2f}%)</div></div>
-                <div class="price-item"><div class="price-label" style="color:#ff99cc;">● 第一目标 (TP1)</div><div class="price-value" style="color:#ff99cc;">{tp1:.2f}</div><div style="font-size:13px;color:#ff99cc;">RR 1:1</div></div>
-                <div class="atr-box"><div style="font-size:15px;color:#4a90ff;">ATR</div><div class="price-value" style="margin-top:2px;">{atr_display}</div></div>
-            </div>
-        ''', unsafe_allow_html=True)
-
-        st.markdown(f'''
-        <div class="tp2-container">
-            <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:6px;">
-                <span style="font-size:26px;color:#ffd700;">✨</span>
-                <span style="font-size:19px;color:#ffd700;font-weight:600;letter-spacing:1px;">第二目标 (TP2) · 全平仓</span>
-                <span style="font-size:26px;color:#ffd700;">✨</span>
-            </div>
-            <div style="font-size:48px;font-weight:900;line-height:1;background:linear-gradient(90deg,#ffe066,#ffd700,#ffeb3b,#ffd700,#ffe066);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 0 20px #ffd700,0 0 40px #ffaa00,0 0 60px rgba(255,215,0,0.6);">{tp2:.2f}</div>
-            <div style="margin-top:8px;display:flex;justify-content:center;gap:20px;font-size:15px;">
-                <span style="background:rgba(255,215,0,0.15);color:#ffd700;padding:4px 14px;border-radius:20px;border:1px solid #ffd700;">RR <strong>2:1</strong></span>
-                <span style="color:#a0ff9d;font-weight:600;">潜在盈利 +{profit_pts:.2f}点 (+{profit_pct:.1f}%)</span>
-            </div>
-        </div>
-        ''', unsafe_allow_html=True)
-
-        st.markdown(f'''
-            <div class="metrics-row">
-                <div class="metric-item"><div>EMA快线</div><div class="metric-value" style="color:#ffa500;">{ema_f:.2f}</div></div>
-                <div class="metric-item"><div>EMA慢线</div><div class="metric-value" style="color:#4a90ff;">{ema_s:.2f}</div></div>
-                <div class="metric-item"><div>RSI</div><div class="metric-value" style="color:#00ff9d;">{rsi:.1f}</div></div>
-                <div class="metric-item"><div>当前价格</div><div class="metric-value" style="color:#ffffff;">{cp:.2f}</div></div>
-            </div>
-        ''', unsafe_allow_html=True)
-
-        signal_text = f"🟢 多头信号 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f} 风险{risk_pts:.2f}点" if side == 'BUY' else f"🔴 空头信号 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f} 风险{risk_pts:.2f}点"
-        if st.button("📋 一键复制交易信号", key="copy_btn", width='stretch'):
-            st.markdown(f'<script>navigator.clipboard.writeText(`{signal_text}`);</script>', unsafe_allow_html=True)
-            st.success("✅ 已复制到剪贴板！直接粘贴到OKX即可下单")
-
-        if use_trailing and signal_history and signal_history[0]['result'] == 'pending':
-            latest = signal_history[0]
-            peak = latest['peak']
-            if side == 'BUY':
-                trailing_sl = max(sl, peak * (1 - trailing_distance / 100))
-                st.success(f"📈 当前最高 **{peak:.2f}** → 建议移动止损 **{trailing_sl:.2f}**（已上移）")
-            else:
-                trailing_sl = min(sl, peak * (1 + trailing_distance / 100))
-                st.error(f"📉 当前最低 **{peak:.2f}** → 建议移动止损 **{trailing_sl:.2f}**（已下移）")
-
-        st.markdown(f"""
-        <div class="op-guide">
-            <strong>📌 操作指引：</strong>
-            <ul style="margin:12px 0 0 22px;padding:0;line-height:1.7;">
-                <li>进场：在 <strong>{price:.2f}</strong> 附近买入/卖出。</li>
-                <li>止损：立即挂单 <strong>{sl:.2f}</strong>。</li>
-                <li>止盈：TP1 <strong>{tp1:.2f}</strong>（平半仓），TP2 <strong>{tp2:.2f}</strong>（全平）。</li>
-            </ul>
-        </div>
+    with col1:
+        # 图表区域
+        st.markdown("""
+        <style>
+        .chart-container {
+            background: #0e1621;
+            border-radius: 16px;
+            padding: 12px;
+            border: 2px solid rgba(74,144,255,0.2);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+            margin-bottom: 20px;
+        }
+        </style>
         """, unsafe_allow_html=True)
+        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
 
+        plot_df = df.tail(200)
+        colors = np.where(plot_df['close'] >= plot_df['open'], '#00ff9d', '#ff4d4d')
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.72, 0.28],
+                            subplot_titles=("<b>价格 & EMA</b>", "<b>成交量</b>"))
+
+        fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['open'], high=plot_df['high'], low=plot_df['low'], close=plot_df['close'],
+                                     name='K线', increasing_line_color='#00ff9d', decreasing_line_color='#ff4d4d',
+                                     line=dict(width=1.8), increasing_fillcolor='#00ff9d', decreasing_fillcolor='#ff4d4d', whiskerwidth=0.6), row=1, col=1)
+
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA快线 ({fast_ema})',
+                                 line=dict(color='#ffd700', width=3.5), hovertemplate='EMA快线: %{y:.2f}<extra></extra>'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA慢线 ({slow_ema})',
+                                 line=dict(color='#4da9ff', width=3.5), hovertemplate='EMA慢线: %{y:.2f}<extra></extra>'), row=1, col=1)
+        # 成交量trace，隐藏图例
+        fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], name='成交量', marker_color=colors, opacity=0.85,
+                             hovertemplate='成交量: %{y:,.0f}<extra></extra>', showlegend=False), row=2, col=1)
+
+        fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", line_width=1.5, row=1, col=1,
+                      annotation_text=f"当前价 {cp:.2f}", annotation_position="top right",
+                      annotation_font=dict(size=13, color="#00ff9d"))
+
+        fig.update_layout(height=680, template="plotly_dark", plot_bgcolor="#0e1621", paper_bgcolor="#0e1621",
+                          font=dict(family="Microsoft YaHei, Arial, sans-serif", size=13, color="#e0e0e0"),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                                      bgcolor="rgba(15,23,42,0.85)", bordercolor="#334155", borderwidth=1,
+                                      font=dict(size=12.5, color="#e0e0e0")),
+                          margin=dict(l=10, r=30, t=50, b=30), hovermode="x unified",
+                          hoverlabel=dict(bgcolor="#1e2937", font_size=13, font_family="Microsoft YaHei"))
+
+        fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
+
+        st.plotly_chart(fig, width='stretch')
         st.markdown('</div>', unsafe_allow_html=True)
 
-    else:
-        st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;opacity:0.7;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
+    with col2:
+        # 右侧信息区域
+        st.metric("当前价", f"{cp:.2f}", delta=None, delta_color="normal")
+        st.markdown("---")
 
-    # ========== 图表 ==========
-    st.markdown("""
-    <style>
-    .chart-container {
-        background: #0e1621;
-        border-radius: 16px;
-        padding: 12px;
-        border: 2px solid rgba(74,144,255,0.2);
-        box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-        margin: 20px 0 30px 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+        # 统计摘要（彩色）
+        stats = st.session_state.signal_stats
+        st.markdown(f"**总信号:** {stats['total']}")
+        st.markdown(f"<span class='stat-win'>✅ 盈利: {stats['win']}</span>", unsafe_allow_html=True)
+        st.markdown(f"<span class='stat-loss'>❌ 亏损: {stats['loss']}</span>", unsafe_allow_html=True)
+        st.markdown(f"<span class='stat-exit'>⏹️ 移动退出: {stats['exit']}</span>", unsafe_allow_html=True)
+        st.markdown(f"**胜率:** {stats['win_rate']}%")
+        st.markdown("---")
 
-    plot_df = df.tail(200)
-    colors = np.where(plot_df['close'] >= plot_df['open'], '#00ff9d', '#ff4d4d')
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.72, 0.28],
-                        subplot_titles=("<b>价格 & EMA</b>", "<b>成交量</b>"))
+        st.subheader("📋 最近信号")
+        # 显示最近3条已完成信号（竖排）
+        if signal_history:
+            finished = [s for s in list(signal_history) if s.get('result') in ('win', 'loss', 'exit')][:3]
+            if finished:
+                for s in finished:
+                    # 计算盈亏
+                    if s['exit_price'] and s['exit_price'] > 0:
+                        if s['side'] == 'BUY':
+                            points = s['exit_price'] - s['price']
+                        else:
+                            points = s['price'] - s['exit_price']
+                    else:
+                        points = 0.0
+                    card_class = f"finished-signal-card {s['result']}"
+                    st.markdown(f"""
+                    <div class="{card_class}" style="background: linear-gradient(135deg, #1a2a3a 0%, #0f1a24 100%); border-radius: 12px; padding: 15px; border-left: 6px solid {'#90ee90' if s['result']=='win' else '#ffcccb' if s['result']=='loss' else '#ffd966'};">
+                        <div style="font-size:18px; font-weight:bold;">{"🟢 多头" if s['side']=='BUY' else "🔴 空头"}</div>
+                        <div style="font-size:12px; opacity:0.8;">{s['signal_time']}</div>
+                        <div>盈亏: <span style="font-weight:bold; {'color:#90ee90' if points>0 else '#ff4d4d' if points<0 else '#ffffff'}">{points:+.2f}点</span></div>
+                        <div style="font-size:12px; opacity:0.7;">{s['exit_reason']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("暂无已完成信号")
+        else:
+            st.info("暂无信号记录")
 
-    fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['open'], high=plot_df['high'], low=plot_df['low'], close=plot_df['close'],
-                                 name='K线', increasing_line_color='#00ff9d', decreasing_line_color='#ff4d4d',
-                                 line=dict(width=1.8), increasing_fillcolor='#00ff9d', decreasing_fillcolor='#ff4d4d', whiskerwidth=0.6), row=1, col=1)
-
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA快线 ({fast_ema})',
-                             line=dict(color='#ffd700', width=3.5), hovertemplate='EMA快线: %{y:.2f}<extra></extra>'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA慢线 ({slow_ema})',
-                             line=dict(color='#4da9ff', width=3.5), hovertemplate='EMA慢线: %{y:.2f}<extra></extra>'), row=1, col=1)
-    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], name='成交量', marker_color=colors, opacity=0.85,
-                         hovertemplate='成交量: %{y:,.0f}<extra></extra>'), row=2, col=1)
-
-    fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", line_width=1.5, row=1, col=1,
-                  annotation_text=f"当前价 {cp:.2f}", annotation_position="top right",
-                  annotation_font=dict(size=13, color="#00ff9d"))
-
-    fig.update_layout(height=680, template="plotly_dark", plot_bgcolor="#0e1621", paper_bgcolor="#0e1621",
-                      font=dict(family="Microsoft YaHei, Arial, sans-serif", size=13, color="#e0e0e0"),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                                  bgcolor="rgba(15,23,42,0.85)", bordercolor="#334155", borderwidth=1,
-                                  font=dict(size=12.5, color="#e0e0e0")),
-                      margin=dict(l=10, r=30, t=50, b=30), hovermode="x unified",
-                      hoverlabel=dict(bgcolor="#1e2937", font_size=13, font_family="Microsoft YaHei"))
-
-    fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
-
-    st.plotly_chart(fig, width='stretch')
-    st.markdown('</div>', unsafe_allow_html=True)
-
+    # ---------- 下方表格 ----------
+    st.markdown("---")
     st.subheader("最近 10 根K线")
     display_df = df.reset_index()[['time', 'open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi', 'atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -1014,109 +903,72 @@ else:
     })
     st.dataframe(display_df.round(2), width='stretch', hide_index=True)
 
-# ---------- 侧边栏统计 ----------
-st.sidebar.markdown("---")
-st.sidebar.subheader("📊 信号统计")
-update_signal_stats()
-stats = st.session_state.signal_stats
-st.sidebar.metric("总信号", stats['total'])
-st.sidebar.metric("胜率", f"{stats['win_rate']}%")
-c1, c2 = st.sidebar.columns(2)
-c1.metric("盈利", stats['win'])
-c2.metric("亏损", stats['loss'])
-st.sidebar.metric("移动止损退出", stats['exit'])
-st.sidebar.markdown(f'<div style="background:#1e3a5f;padding:12px;border-radius:8px;text-align:center;margin-top:10px;">📍 <strong>待定信号: {stats["pending"]}</strong></div>', unsafe_allow_html=True)
+    # ---------- 历史信号记录（带表情符号）----------
+    st.markdown("---")
+    st.subheader("📜 历史信号记录")
+    if signal_history:
+        hist_data = []
+        for s in list(signal_history)[:50]:
+            # 结果加表情
+            if s['result'] == 'win':
+                result_emoji = "✅ 赢"
+            elif s['result'] == 'loss':
+                result_emoji = "❌ 亏"
+            elif s['result'] == 'exit':
+                result_emoji = "⏹️ 退"
+            else:
+                result_emoji = "⏳ 待"
+            hist_data.append({
+                "记录时间": s['record_time'],
+                "信号时间": s['signal_time'],
+                "方向": "🟢 多头" if s['side'] == 'BUY' else "🔴 空头",
+                "进场价": f"{s['price']:.2f}",
+                "止损": f"{s['sl']:.2f}",
+                "TP1": f"{s['tp1']:.2f}",
+                "TP2": f"{s['tp2']:.2f}",
+                "结果": result_emoji,
+                "出场价": f"{s['exit_price']:.2f}" if s['exit_price'] else "—",
+                "出场原因": s['exit_reason'] if s['exit_reason'] else "—",
+                "峰值": f"{s['peak']:.2f}" if s['peak'] else "—"
+            })
+        hist_df = pd.DataFrame(hist_data)
 
-# ========== 已完成信号卡片区域 ==========
-st.markdown("---")
-st.subheader("📋 最近已完成信号（卡片视图）")
+        def color_result(val):
+            if '✅' in val:
+                return 'background-color: #90ee90; color: black'
+            elif '❌' in val:
+                return 'background-color: #ffcccb; color: black'
+            elif '⏹️' in val:
+                return 'background-color: #ffd966; color: black'
+            elif '⏳' in val:
+                return 'background-color: #fffacd; color: black'
+            return ''
 
-if signal_history:
-    finished = [s for s in list(signal_history) if s.get('result') in ('win', 'loss', 'exit')][:5]
-    if finished:
-        cols = st.columns(len(finished))
-        for i, s in enumerate(finished):
-            with cols[i]:
-                if s['exit_price'] and s['exit_price'] > 0:
-                    if s['side'] == 'BUY':
-                        points = s['exit_price'] - s['price']
-                    else:
-                        points = s['price'] - s['exit_price']
-                else:
-                    points = 0.0
-                card_class = f"finished-signal-card {s['result']}"
-                st.markdown(f"""
-                <div class="{card_class}">
-                    <div style="font-size:20px; font-weight:bold;">{"🟢 多头" if s['side']=='BUY' else "🔴 空头"}</div>
-                    <div style="font-size:14px; opacity:0.8;">{s['signal_time']}</div>
-                    <hr style="margin:8px 0; opacity:0.3;">
-                    <div>进场: {s['price']:.2f}</div>
-                    <div>出场: {s['exit_price']:.2f if s['exit_price'] else '—'}</div>
-                    <div style="font-weight:bold;">盈亏: {points:+.2f}点</div>
-                    <div style="margin-top:8px;">结果: <span style="font-weight:bold;">{s['result'].upper()}</span></div>
-                    <div style="font-size:12px; opacity:0.7;">{s['exit_reason']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+        styled = hist_df.style.map(color_result, subset=['结果'])
+        styled.set_properties(**{'text-align': 'center'})
+        styled.set_table_styles([dict(selector='th', props=[('text-align', 'center')])])
+        st.dataframe(styled, width='stretch', height=400)
+
+        with st.expander("✏️ 手动标记信号结果", expanded=False):
+            col1, col2, col3, col4 = st.columns([3,1,1,2])
+            with col1:
+                options = [f"{i}. {s['record_time']} {s['side']} @{s['price']:.2f}" for i, s in enumerate(list(signal_history)[:50])]
+                idx = st.selectbox("选择信号", range(len(options)), format_func=lambda x: options[x])
+            with col2:
+                res = st.selectbox("结果", ["pending", "win", "loss", "exit"])
+            with col3:
+                ep = st.number_input("出场价", value=0.0, step=0.01)
+            with col4:
+                if st.button("✅ 更新结果", width='stretch'):
+                    rec = signal_history[idx]
+                    update_signal_result(idx, res, ep if ep > 0 else None,
+                                         exit_reason="手动标记",
+                                         note="用户手动更新")
+                    st.rerun()
+        csv = hist_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
     else:
-        st.info("暂无已完成信号")
-else:
-    st.info("暂无信号记录")
-
-# ---------- 历史记录 ----------
-st.markdown("---")
-st.subheader("📜 历史信号记录（表格）")
-if signal_history:
-    hist_data = []
-    for s in list(signal_history)[:50]:
-        hist_data.append({
-            "记录时间": s['record_time'],
-            "信号时间": s['signal_time'],
-            "方向": "🟢 多头" if s['side'] == 'BUY' else "🔴 空头",
-            "进场价": f"{s['price']:.2f}",
-            "止损": f"{s['sl']:.2f}",
-            "TP1": f"{s['tp1']:.2f}",
-            "TP2": f"{s['tp2']:.2f}",
-            "结果": s['result'],
-            "出场价": f"{s['exit_price']:.2f}" if s['exit_price'] else "—",
-            "出场原因": s['exit_reason'] if s['exit_reason'] else "—",
-            "峰值": f"{s['peak']:.2f}" if s['peak'] else "—"
-        })
-    hist_df = pd.DataFrame(hist_data)
-    
-    def color_result(val):
-        if val == 'win':
-            return 'background-color: #90ee90; color: black'
-        elif val == 'loss':
-            return 'background-color: #ffcccb; color: black'
-        elif val == 'exit':
-            return 'background-color: #ffd966; color: black'
-        elif val == 'pending':
-            return 'background-color: #fffacd; color: black'
-        return ''
-    
-    styled = hist_df.style.map(color_result, subset=['结果'])
-    st.dataframe(styled, width='stretch', height=400)
-    
-    with st.expander("✏️ 手动标记信号结果", expanded=False):
-        col1, col2, col3, col4 = st.columns([3,1,1,2])
-        with col1:
-            options = [f"{i}. {s['record_time']} {s['side']} @{s['price']:.2f}" for i, s in enumerate(list(signal_history)[:50])]
-            idx = st.selectbox("选择信号", range(len(options)), format_func=lambda x: options[x])
-        with col2:
-            res = st.selectbox("结果", ["pending", "win", "loss", "exit"])
-        with col3:
-            ep = st.number_input("出场价", value=0.0, step=0.01)
-        with col4:
-            if st.button("✅ 更新结果", width='stretch'):
-                rec = signal_history[idx]
-                update_signal_result(idx, res, ep if ep > 0 else None,
-                                     exit_reason="手动标记",
-                                     note="用户手动更新")
-                st.rerun()
-    csv = hist_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
-else:
-    st.info("暂无历史信号，等待新信号出现...")
+        st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
 st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 + 卡片复盘 • 祝交易大赚！💰")
