@@ -621,10 +621,17 @@ with st.sidebar:
     fast_ema = st.number_input("快线 EMA", 1, 50, 9, 1)
     slow_ema = st.number_input("慢线 EMA", 2, 100, 21, 1)
     rsi_period = st.number_input("RSI 周期", 2, 50, 14, 1)
-    buy_min = st.number_input("多头 RSI 下限", 0, 100, 50, 1)
-    buy_max = st.number_input("多头 RSI 上限", 0, 100, 70, 1)
-    sell_min = st.number_input("空头 RSI 下限", 0, 100, 30, 1)
-    sell_max = st.number_input("空头 RSI 上限", 0, 100, 50, 1)
+    # 使用双列布局优化RSI区间输入
+    col_min, col_max = st.columns(2)
+    with col_min:
+        buy_min = st.number_input("多头下限", 0, 100, 50, 1)
+    with col_max:
+        buy_max = st.number_input("上限", 0, 100, 70, 1)
+    col_min, col_max = st.columns(2)
+    with col_min:
+        sell_min = st.number_input("空头下限", 0, 100, 30, 1)
+    with col_max:
+        sell_max = st.number_input("上限", 0, 100, 50, 1)
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
 
     with st.expander("✨ 高级过滤", expanded=True):
@@ -844,7 +851,29 @@ else:
 
     with col2:
         # 右侧信息区域
-        st.metric("当前价", f"{cp:.2f}", delta=None, delta_color="normal")
+        st.metric("当前价", f"{cp:.2f}")
+
+        # 计算24h涨跌
+        if len(df) > 1:
+            # 找到24小时前的K线
+            now = df.index[-1]
+            target_time = now - timedelta(hours=24)
+            # 找到最接近的时间
+            time_diff = (df.index - target_time).total_seconds().abs()
+            closest_idx = time_diff.idxmin()
+            prev_close = df.loc[closest_idx, 'close']
+            # 检查是否在24h ± 5分钟内
+            if abs((now - closest_idx).total_seconds()) <= 24*3600 + 300:
+                change = cp - prev_close
+                change_pct = (change / prev_close) * 100
+                color = "#00ff9d" if change >= 0 else "#ff4d4d"
+                arrow = "▲" if change >= 0 else "▼"
+                st.markdown(f"24h涨跌: <span style='color:{color}'>{arrow} {change:+.2f} ({change_pct:+.2f}%)</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("24h涨跌: --")
+        else:
+            st.markdown("24h涨跌: --")
+
         st.markdown("---")
 
         # 统计摘要（彩色）
@@ -971,4 +1000,4 @@ else:
         st.info("暂无历史信号，等待新信号出现...")
 
 st.markdown("---")
-st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 + 卡片复盘 • 祝交易大赚！💰")
+st.caption("🔥 终极职业版 • 持续信号 + ATR动态止损 + 豪华卡片 + 专业图表 + SQLite持久化 + 缺失K线补全 + 峰值同步 + 自动数据清洗 + 卡片复盘 + 24h涨跌 • 祝交易大赚！💰")
