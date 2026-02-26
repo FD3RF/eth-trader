@@ -132,44 +132,51 @@ if 'last_signal_time' not in st.session_state: st.session_state.last_signal_time
 # ---------- 数据获取 ----------
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_klines():
-    def _fetch():
+    try:
         url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit={LIMIT}&aggregate={INTERVAL}"
         resp = requests.get(url, timeout=10, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
-        return resp.json()
-    result = _fetch()
-    if result and result.get('Response') == 'Success':
-        data = result['Data']['Data']
-        return [[item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']] for item in data]
-    return []
+        result = resp.json()
+        if result and result.get('Response') == 'Success':
+            data = result['Data']['Data']
+            return [[item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']] for item in data]
+        else:
+            st.warning("API返回异常，稍后重试")
+            return []
+    except Exception as e:
+        st.session_state.api_fail_count += 1
+        st.error(f"获取K线失败: {e}")
+        return []
 
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
-    def _fetch():
+    try:
         url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit=1&aggregate={INTERVAL}"
         resp = requests.get(url, timeout=5, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
-        return resp.json()
-    result = _fetch()
-    if result and result.get('Response') == 'Success':
-        item = result['Data']['Data'][0]
-        return [item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']]
-    return None
+        result = resp.json()
+        if result and result.get('Response') == 'Success':
+            item = result['Data']['Data'][0]
+            return [item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']]
+        return None
+    except:
+        return None
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
-    def _fetch():
+    try:
         url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={SYMBOL}&tsym={CURRENCY}&limit=200"
         resp = requests.get(url, timeout=5, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
-        return resp.json()
-    result = _fetch()
-    if result and result.get('Response') == 'Success':
-        closes = [d['close'] for d in result['Data']['Data']]
-        if len(closes) >= 200:
-            ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
-            return 'up' if closes[-1] > ema200 else 'down'
-    return 'neutral'
+        result = resp.json()
+        if result and result.get('Response') == 'Success':
+            closes = [d['close'] for d in result['Data']['Data']]
+            if len(closes) >= 200:
+                ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
+                return 'up' if closes[-1] > ema200 else 'down'
+        return 'neutral'
+    except:
+        return 'neutral'
 
 # ---------- 指标 ----------
 def calculate_ema(series, period):
@@ -185,7 +192,11 @@ def calculate_rsi_wilder(series, period=14):
     return (100 - (100 / (1 + rs))).fillna(50)
 
 def calculate_atr(df, period=14):
-    tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(axis=1)
+    # 计算真实波幅 TR
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.ewm(alpha=1/period, adjust=False).mean()
 
 def volume_surge(df, vol_period=20, surge_mult=1.3):
@@ -202,9 +213,116 @@ def volume_surge_bearish(df, vol_period=20, surge_mult=1.3):
         return df['close'].iloc[-1] < df['open'].iloc[-1]
     return (df['volume'].iloc[-1] / avg_vol > surge_mult) and (df['close'].iloc[-1] < df['open'].iloc[-1])
 
-# ---------- 核心信号检测 ----------
+# ---------- 信号评分系统 ----------
+def calculate_signal_score(side, df, idx=-1):
+    """
+    计算信号评分（0-100）及子分数
+    side: 'BUY' or 'SELL'
+    df: DataFrame，需包含 ema_fast, ema_slow, rsi, atr, volume, close
+    idx: 默认为最后一行
+    """
+    row = df.iloc[idx]
+    close = row['close']
+    ema_f = row['ema_fast']
+    ema_s = row['ema_slow']
+    rsi = row['rsi']
+    atr = row['atr'] if not pd.isna(row['atr']) else 0
+    volume = row['volume']
+
+    # 平均成交量（使用过去20根，不包括当前）
+    if len(df) >= 20 and idx >= 0:
+        avg_vol = df['volume'].iloc[max(0, idx-20):idx].mean() if idx > 0 else df['volume'].iloc[-20:].mean()
+    else:
+        avg_vol = volume
+    vol_ratio = volume / avg_vol if avg_vol > 0 else 1.0
+
+    # EMA扩散强度 (%)
+    ema_spread = abs(ema_f - ema_s) / close * 100
+
+    # 斜率强度 (% 每根K线)
+    if len(df) >= 5 and idx >= 4:
+        slope = (ema_f - df['ema_fast'].iloc[idx-4]) / 5 / close * 100
+        slope_abs = abs(slope)
+    else:
+        slope_abs = 0
+
+    # ATR强度 (%)
+    atr_pct = (atr / close * 100) if atr > 0 else 0
+
+    # 各项得分 (0-20)
+    def score_by_threshold(value, thresholds):
+        # thresholds: [(low, high, score), ...] 区间左闭右闭
+        for low, high, s in thresholds:
+            if low <= value <= high:
+                return s
+        return 0
+
+    # EMA扩散得分
+    ema_thresholds = [(0.2, 100, 20), (0.15, 0.2, 15), (0.1, 0.15, 10), (0.05, 0.1, 5), (0, 0.05, 0)]
+    score_ema = score_by_threshold(ema_spread, ema_thresholds)
+
+    # 斜率得分
+    slope_thresholds = [(0.04, 100, 20), (0.03, 0.04, 15), (0.02, 0.03, 10), (0.01, 0.02, 5), (0, 0.01, 0)]
+    score_slope = score_by_threshold(slope_abs, slope_thresholds)
+
+    # 量能倍数得分
+    vol_thresholds = [(2.0, 100, 20), (1.5, 2.0, 15), (1.2, 1.5, 10), (1.0, 1.2, 5), (0, 1.0, 0)]
+    score_vol = score_by_threshold(vol_ratio, vol_thresholds)
+
+    # ATR强度得分
+    atr_thresholds = [(0.2, 100, 20), (0.16, 0.2, 15), (0.12, 0.16, 10), (0.08, 0.12, 5), (0, 0.08, 0)]
+    score_atr = score_by_threshold(atr_pct, atr_thresholds)
+
+    # RSI位置得分（方向自适应）
+    if side == 'BUY':
+        # 理想区间 55-70，向外递减
+        if 55 <= rsi <= 70:
+            score_rsi = 20
+        elif 50 <= rsi < 55:
+            score_rsi = 15
+        elif 45 <= rsi < 50:
+            score_rsi = 10
+        elif 40 <= rsi < 45:
+            score_rsi = 5
+        elif 70 < rsi <= 75:
+            score_rsi = 15
+        elif 75 < rsi <= 80:
+            score_rsi = 10
+        elif 80 < rsi <= 85:
+            score_rsi = 5
+        else:
+            score_rsi = 0
+    else:  # SELL
+        if 30 <= rsi <= 45:
+            score_rsi = 20
+        elif 25 <= rsi < 30:
+            score_rsi = 15
+        elif 20 <= rsi < 25:
+            score_rsi = 10
+        elif 15 <= rsi < 20:
+            score_rsi = 5
+        elif 45 < rsi <= 50:
+            score_rsi = 15
+        elif 50 < rsi <= 55:
+            score_rsi = 10
+        elif 55 < rsi <= 60:
+            score_rsi = 5
+        else:
+            score_rsi = 0
+
+    total = score_ema + score_slope + score_vol + score_atr + score_rsi
+    return total, {
+        'EMA': score_ema,
+        '斜率': score_slope,
+        '量能': score_vol,
+        'ATR': score_atr,
+        'RSI': score_rsi
+    }
+
+# ---------- 核心信号检测（集成评分） ----------
 def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, sell_max,
-                      higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold, slope_threshold=0.00022):
+                      higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_threshold, slope_threshold=0.00022,
+                      use_scoring=False, score_threshold=80):
     if df.empty or len(df) < slow + rsi_period + 10: return None
     last = df.iloc[-1]
     ema_f_now = df['ema_fast'].iloc[-1]
@@ -236,21 +354,42 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
 
     lookback = min(5, len(df)-1)
     slope = (ema_f_now - df['ema_fast'].iloc[-lookback]) / lookback / last['close']
-    if use_slope_filter and abs(slope) <= slope_threshold: return None
 
-    atr_ok = (not pd.isna(atr_now) and atr_now > last['close'] * atr_threshold) if use_atr_filter else True
-
-    if is_bullish and buy_min < rsi_now < buy_max:
+    # 评分系统分支
+    if is_bullish:
         if last['close'] <= prev_close: return None
-        vol_ok = volume_surge(df) if use_volume_filter else True
-        if higher_trend == 'down' or not atr_ok or not vol_ok: return None
-        return ('BUY', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
+        if higher_trend == 'down': return None
+        if use_scoring:
+            total_score, subscores = calculate_signal_score('BUY', df)
+            if total_score >= score_threshold:
+                return ('BUY', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now, total_score, subscores)
+            else:
+                return None
+        else:
+            if not (buy_min < rsi_now < buy_max): return None
+            vol_ok = volume_surge(df) if use_volume_filter else True
+            if not vol_ok: return None
+            if use_slope_filter and abs(slope) <= slope_threshold: return None
+            if use_atr_filter and (pd.isna(atr_now) or atr_now <= last['close'] * atr_threshold): return None
+            return ('BUY', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
 
-    if is_bearish and sell_min < rsi_now < sell_max:
+    if is_bearish:
         if last['close'] >= prev_close: return None
-        vol_ok = volume_surge_bearish(df) if use_volume_filter else True
-        if higher_trend == 'up' or not atr_ok or not vol_ok: return None
-        return ('SELL', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
+        if higher_trend == 'up': return None
+        if use_scoring:
+            total_score, subscores = calculate_signal_score('SELL', df)
+            if total_score >= score_threshold:
+                return ('SELL', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now, total_score, subscores)
+            else:
+                return None
+        else:
+            if not (sell_min < rsi_now < sell_max): return None
+            vol_ok = volume_surge_bearish(df) if use_volume_filter else True
+            if not vol_ok: return None
+            if use_slope_filter and abs(slope) <= slope_threshold: return None
+            if use_atr_filter and (pd.isna(atr_now) or atr_now <= last['close'] * atr_threshold): return None
+            return ('SELL', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
+
     return None
 
 # ---------- SL/TP ----------
@@ -303,9 +442,16 @@ def update_signal_stats():
     st.session_state.signal_stats = {'total':total,'win':win,'loss':loss,'exit':ex,'pending':pend,'win_rate':wr}
 
 def add_signal_to_history(signal, sl, tp1, tp2, signal_time_str):
+    # 如果信号包含评分信息，解包
+    if len(signal) > 6:
+        side, price, ema_f, ema_s, rsi, atr_val, total_score, subscores = signal
+        note = f"评分:{total_score} EMA:{subscores['EMA']} 斜率:{subscores['斜率']} 量能:{subscores['量能']} ATR:{subscores['ATR']} RSI:{subscores['RSI']}"
+    else:
+        side, price, ema_f, ema_s, rsi, atr_val = signal
+        note = ""
     record = {'record_time':datetime.now().strftime('%Y-%m-%d %H:%M:%S'),'signal_time':signal_time_str,
-              'side':signal[0],'price':signal[1],'ema_fast':signal[2],'ema_slow':signal[3],'rsi':signal[4],
-              'atr':signal[5],'sl':sl,'tp1':tp1,'tp2':tp2,'result':'pending','peak':signal[1]}
+              'side':side,'price':price,'ema_fast':ema_f,'ema_slow':ema_s,'rsi':rsi,
+              'atr':atr_val,'sl':sl,'tp1':tp1,'tp2':tp2,'result':'pending','peak':price, 'note':note}
     rid = save_signal_to_db(record)
     record['id'] = rid
     st.session_state.signal_history.appendleft(record)
@@ -339,10 +485,13 @@ st.markdown("""
     .tp2-container {background:linear-gradient(135deg,#2c2200 0%,#4a3a00 50%,#2c2200 100%);border:3px solid #ffd700;border-radius:18px;padding:22px;margin:22px 0;text-align:center;box-shadow:0 0 25px rgba(255,215,0,0.7);animation:tp2-pulse 2.5s infinite;}
     @keyframes tp2-pulse {0%,100%{transform:scale(1)}50%{transform:scale(1.015)}}
     .waiting-card {background:#1e3a5f;padding:32px;border-radius:18px;text-align:center;font-size:23px;color:#89c2ff;border:2px dashed #4a90ff;}
+    .score-badge {display:flex;justify-content:space-around;background:rgba(0,255,157,0.1);padding:12px;border-radius:12px;margin:12px 0;}
+    .score-item {text-align:center;}
+    .score-value {font-size:24px;font-weight:bold;color:#00ff9d;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (极致版)")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (极致版 + 评分系统)")
 
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
@@ -360,6 +509,10 @@ with st.sidebar:
     with col3: sell_min = st.number_input("空头下限", 0, 100, 30, 1)
     with col4: sell_max = st.number_input("空头上限", 0, 100, 43, 1)
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
+
+    with st.expander("📊 信号评分系统", expanded=True):
+        use_scoring = st.checkbox("启用评分系统（综合评分≥阈值才触发）", value=True)
+        score_threshold = st.slider("评分阈值", 0, 100, 80, 1)
 
     with st.expander("✨ 高级过滤", expanded=True):
         use_slope_filter = st.checkbox("启用斜率过滤", value=True)
@@ -437,15 +590,24 @@ else:
     atr_th = 0.0008 if use_aggressive else atr_threshold
 
     signal = detect_signal_pro(df, fast_ema, slow_ema, rsi_period, buy_min, buy_max, sell_min, sell_max,
-                               higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_th, slope_th)
+                               higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_th, slope_th,
+                               use_scoring, score_threshold)
 
+    # 若当前无信号但有pending信号，仍可显示卡片
     show_signal = signal
     if not show_signal and signal_history and signal_history[0]['result'] == 'pending':
         rec = signal_history[0]
+        # 从历史记录中构造一个显示用的信号元组（不含评分）
         show_signal = (rec['side'], rec['price'], rec['ema_fast'], rec['ema_slow'], rec['rsi'], rec['atr'])
 
     if signal:
-        side, price, ema_f, ema_s, rsi, atr_val = signal
+        # 解包信号，可能包含评分
+        if len(signal) > 6:
+            side, price, ema_f, ema_s, rsi, atr_val, total_score, subscores = signal
+        else:
+            side, price, ema_f, ema_s, rsi, atr_val = signal
+            total_score, subscores = None, None
+
         sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
         signal_time_str = df.index[-1].strftime('%Y-%m-%d %H:%M')
         if st.session_state.last_signal_time != df.index[-1]:
@@ -474,7 +636,13 @@ else:
 
     # ========== 信号卡片 ==========
     if show_signal:
-        side, price, ema_f, ema_s, rsi, atr_val = show_signal
+        # 从 show_signal 中获取显示信息（可能是当前信号或历史pending信号）
+        if len(show_signal) > 6:
+            side, price, ema_f, ema_s, rsi, atr_val, total_score, subscores = show_signal
+        else:
+            side, price, ema_f, ema_s, rsi, atr_val = show_signal
+            total_score, subscores = None, None
+
         sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
         signal_time = df.index[-1].strftime('%Y-%m-%d %H:%M')
         risk_pts = abs(price - sl)
@@ -487,6 +655,19 @@ else:
             st.markdown(f'<div class="header-green">● 多头信号 @ {signal_time}</div>', unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="header-red">● 空头信号 @ {signal_time}</div>', unsafe_allow_html=True)
+
+        # 如果存在评分，显示评分面板
+        if total_score is not None:
+            st.markdown(f"""
+            <div class="score-badge">
+                <div class="score-item"><span>总分</span><br><span class="score-value">{total_score}</span></div>
+                <div class="score-item"><span>EMA</span><br>{subscores['EMA']}</div>
+                <div class="score-item"><span>斜率</span><br>{subscores['斜率']}</div>
+                <div class="score-item"><span>量能</span><br>{subscores['量能']}</div>
+                <div class="score-item"><span>ATR</span><br>{subscores['ATR']}</div>
+                <div class="score-item"><span>RSI</span><br>{subscores['RSI']}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown(f'''
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;">
@@ -522,7 +703,7 @@ else:
     else:
         st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
 
-    # ========== 当前市场诊断（完全匹配最新截图） ==========
+    # ========== 当前市场诊断 ==========
     with st.expander("🔍 当前市场诊断 (为什么还没出信号)", expanded=True):
         if not df.empty:
             last = df.iloc[-1]
@@ -575,13 +756,14 @@ else:
         st.markdown(f"⏹️ 移动退出: {stats['exit']}")
         st.markdown(f"**胜率:** {stats['win_rate']}%")
 
-    # ========== 表格 ==========
+    # ========== 最近K线表格 ==========
     st.subheader("最近 10 根K线")
     display_df = df.reset_index()[['time','open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M')
     display_df = display_df.rename(columns={'time':'时间','open':'开盘','high':'最高','low':'最低','close':'收盘','volume':'成交量','ema_fast':'EMA快线','ema_slow':'EMA慢线','rsi':'RSI','atr':'ATR'})
     st.dataframe(display_df.round(2), width='stretch', hide_index=True)
 
+    # ========== 历史信号记录 ==========
     st.subheader("📜 历史信号记录")
     if signal_history:
         hist_data = []
@@ -594,7 +776,8 @@ else:
                 "TP1": f"{s['tp1']:.2f}", "TP2": f"{s['tp2']:.2f}",
                 "结果": res_emoji,
                 "出场价": f"{s.get('exit_price','—'):.2f}" if s.get('exit_price') else "—",
-                "出场原因": s.get('exit_reason','—')
+                "出场原因": s.get('exit_reason','—'),
+                "备注": s.get('note','')
             })
         hist_df = pd.DataFrame(hist_data)
         st.dataframe(hist_df, width='stretch', height=400)
@@ -602,4 +785,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv", width='stretch')
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.26 • 完全匹配最新截图 • 诊断面板100%一致 • 祝你今天大赚！💰🚀")
+st.caption("🔥 极致版 v2026.02.26 • 集成评分系统 • 修复已知错误 • 祝你交易顺利！💰🚀")
