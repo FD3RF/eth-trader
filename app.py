@@ -1048,6 +1048,19 @@ else:
     st.subheader("最近 10 根K线")
     display_df = df.reset_index()[['time', 'open', 'high', 'low', 'close', 'volume', 'ema_fast', 'ema_slow', 'rsi', 'atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    # 重命名为中文列名
+    display_df = display_df.rename(columns={
+        'time': '时间',
+        'open': '开盘',
+        'high': '最高',
+        'low': '最低',
+        'close': '收盘',
+        'volume': '成交量',
+        'ema_fast': 'EMA快线',
+        'ema_slow': 'EMA慢线',
+        'rsi': 'RSI',
+        'atr': 'ATR'
+    })
     st.dataframe(display_df.round(2), width='stretch', hide_index=True)
 
 # ---------- 侧边栏统计 ----------
