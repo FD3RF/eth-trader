@@ -14,8 +14,8 @@ import sqlite3
 import re
 
 # ---------- 配置 ----------
-SYMBOL = "ETH-USDT"
-INTERVAL = "5m"
+SYMBOL = "ETHUSDT"                     # Binance 格式：ETHUSDT
+INTERVAL = "5m"                         # 5分钟
 LIMIT = 200
 RETRIES = 3
 BASE_DELAY = 0.5
@@ -23,7 +23,7 @@ REQUEST_DELAY = 0.5
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 LOG_RETENTION_DAYS = 30
 DB_FILE = "signals.db"
-INTERVAL_MINUTES = 5
+INTERVAL_MINUTES = 5                     # 5分钟K线
 
 # ---------- SQLite 持久化 ----------
 def get_db_conn():
@@ -261,12 +261,12 @@ def fetch_with_retry(func, retries=RETRIES, base_delay=BASE_DELAY):
                 return None
     return None
 
-# ---------- 数据获取 ----------
+# ---------- 数据获取（Binance）----------
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_klines():
     def _fetch():
-        url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
+        headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=10, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -278,12 +278,20 @@ def fetch_klines():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict):
-        data = result.get('data', [])
-        if not data:
-            st.warning("OKX 返回空数据")
+    if result and isinstance(result, list):
+        if not result:
+            st.warning("Binance 返回空数据")
             return []
-        candles = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
+        candles = []
+        for k in result:
+            # Binance 返回数组，索引：0时间戳(ms),1开盘,2最高,3最低,4收盘,5成交量,6收盘时间,... 我们只取前6个
+            ts = int(k[0])
+            open_price = float(k[1])
+            high = float(k[2])
+            low = float(k[3])
+            close = float(k[4])
+            volume = float(k[5])
+            candles.append([ts, open_price, high, low, close, volume])
         candles.sort(key=lambda x: x[0])
         return candles
     return []
@@ -291,8 +299,8 @@ def fetch_klines():
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
     def _fetch():
-        url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit=1"
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit=1"
+        headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -304,10 +312,9 @@ def fetch_latest_candle():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict):
-        data = result.get('data', [])
-        if data:
-            k = data[0]
+    if result and isinstance(result, list):
+        if result:
+            k = result[0]
             return [int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])]
         st.warning("最新 K 线数据为空")
         return None
@@ -316,8 +323,8 @@ def fetch_latest_candle():
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
     def _fetch():
-        url = f"https://www.okx.com/api/v5/market/history-candles?instId={SYMBOL}&bar=1H&limit=200"
-        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval=1h&limit=200"
+        headers = {"User-Agent": USER_AGENT}
         resp = requests.get(url, timeout=5, headers=headers)
         retry_after = resp.headers.get("Retry-After")
         if retry_after and retry_after.isdigit():
@@ -329,12 +336,10 @@ def get_higher_trend():
     result = fetch_with_retry(_fetch)
     if result:
         reset_fail_count()
-    if result and isinstance(result, dict):
-        data = result.get('data', [])
-        if not data:
+    if result and isinstance(result, list):
+        if not result:
             return 'neutral'
-        data.reverse()
-        closes = [float(k[4]) for k in data]
+        closes = [float(k[4]) for k in result]
         if len(closes) < 200:
             return 'neutral'
         ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
