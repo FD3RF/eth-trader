@@ -501,7 +501,6 @@ with st.sidebar:
         sell_max = st.number_input("空头上限", 0, 100, 43, 1, label_visibility="collapsed")
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
     
-    # 显示剩余时间（静态提示）
     st.caption(f"⏳ 下次刷新: {refresh_interval} 秒后")
 
     with st.expander("📊 信号分析系统", expanded=True):
@@ -567,7 +566,6 @@ if latest and (not candle_buffer or latest[0] > candle_buffer[-1][0]):
 st_autorefresh(interval=refresh_interval * 1000, key="final")
 
 higher_trend = get_higher_trend() if use_higher_tf_filter else 'neutral'
-# 顶部信息
 st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 长线: {slow_ema} | 周期: {higher_trend.upper()}")
 
 if len(candle_buffer) < 30:
@@ -706,7 +704,7 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     # ========== 当前市场诊断 ==========
-    with st.expander("🔍 当前市场诊断 (为什么还没出信号)", expanded=True):
+    with st.expander("🔍 当前市场诊断 (为什么还没出货信号)", expanded=True):
         if not df.empty:
             last = df.iloc[-1]
             ema_spread_pct = abs(last['ema_fast'] - last['ema_slow']) / last['close'] * 100
@@ -715,7 +713,6 @@ else:
             avg_vol = df['volume'].rolling(20).mean().iloc[-1]
             vol_ratio = last['volume'] / avg_vol if avg_vol > 0 else 0.0
 
-            # 两列布局
             col_d1, col_d2 = st.columns(2)
             with col_d1:
                 st.markdown(f"**EMA扩散度**  {ema_spread_pct:.3f}%  {'✅' if ema_spread_pct>=0.1 else '❌'} {'达标' if ema_spread_pct>=0.1 else '未达标'}")
@@ -725,11 +722,20 @@ else:
                 vol_status = "爆发" if vol_ratio>1.3 else "等待"
                 st.markdown(f"**成交量倍数**  {vol_ratio:.2f}x {vol_ratio:.2f}倍  {'✅' if vol_ratio>1.3 else '⏳'} {vol_status}")
 
-    # ========== 价格与统计 ==========
+    # ========== 价格与统计 (安全处理24h变化) ==========
+    if len(df) >= 288:
+        change_24h = cp - df['close'].iloc[-288]
+        change_pct_24h = change_24h / df['close'].iloc[-288] * 100
+        change_display = f"{change_24h:+.2f} ({change_pct_24h:+.2f}%)"
+        color = '#00ff9d' if change_24h >= 0 else '#ff4d4d'
+    else:
+        change_display = "N/A"
+        color = '#888'
+
     st.markdown(f"""
     <div class="stat-row">
         <span style="font-size:28px; font-weight:bold;">{cp:.2f}</span>
-        <span>24h涨跌: <span style="color:{'#00ff9d' if (cp - df['close'].iloc[-288])>=0 else '#ff4d4d'}">{cp - df['close'].iloc[-288]:+.2f} ({(cp - df['close'].iloc[-288])/df['close'].iloc[-288]*100:+.2f}%)</span></span>
+        <span>24h涨跌: <span style="color:{color}">{change_display}</span></span>
         <span>总盈亏: {st.session_state.signal_stats['win'] - st.session_state.signal_stats['loss']}</span>
         <span>盈利: {st.session_state.signal_stats['win']}</span>
         <span>亏损: {st.session_state.signal_stats['loss']}</span>
