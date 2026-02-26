@@ -67,6 +67,11 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
+    # 启动时清理30天前的旧数据
+    try:
+        delete_old_signals(30)
+    except:
+        pass
 
 def save_signal_to_db(record):
     """保存新信号到数据库，返回自动生成的id"""
@@ -1026,7 +1031,7 @@ else:
     fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)", zeroline=False, showline=True, linewidth=1, linecolor="#334155")
 
-    st.plotly_chart(fig, use_container_width=False, width='stretch')
+    st.plotly_chart(fig, width='stretch')
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.subheader("最近 10 根K线")
@@ -1047,11 +1052,29 @@ c2.metric("亏损", stats['loss'])
 st.sidebar.metric("移动止损退出", stats['exit'])
 st.sidebar.markdown(f'<div style="background:#1e3a5f;padding:12px;border-radius:8px;text-align:center;margin-top:10px;">📍 <strong>待定信号: {stats["pending"]}</strong></div>', unsafe_allow_html=True)
 
-# ---------- 历史记录 ----------
+# ---------- 历史记录（优化版）----------
 st.markdown("---")
 st.subheader("📜 历史信号记录")
 if signal_history:
-    hist_df = pd.DataFrame(list(signal_history)[:50])
+    # 只选择关键字段，并重命名为中文/易懂名称
+    hist_data = []
+    for s in list(signal_history)[:50]:
+        hist_data.append({
+            "记录时间": s['record_time'],
+            "信号时间": s['signal_time'],
+            "方向": "🟢 多头" if s['side'] == 'BUY' else "🔴 空头",
+            "进场价": f"{s['price']:.2f}",
+            "止损": f"{s['sl']:.2f}",
+            "TP1": f"{s['tp1']:.2f}",
+            "TP2": f"{s['tp2']:.2f}",
+            "结果": s['result'],
+            "出场价": f"{s['exit_price']:.2f}" if s['exit_price'] else "—",
+            "出场原因": s['exit_reason'] if s['exit_reason'] else "—",
+            "峰值": f"{s['peak']:.2f}" if s['peak'] else "—"
+        })
+    hist_df = pd.DataFrame(hist_data)
+    
+    # 定义结果颜色样式
     def color_result(val):
         if val == 'win':
             return 'background-color: #90ee90; color: black'
@@ -1062,8 +1085,10 @@ if signal_history:
         elif val == 'pending':
             return 'background-color: #fffacd; color: black'
         return ''
-    styled = hist_df.style.map(color_result, subset=['result'])
-    st.dataframe(styled, width='stretch', height=250)
+    
+    styled = hist_df.style.map(color_result, subset=['结果'])
+    st.dataframe(styled, width='stretch', height=400)
+    
     with st.expander("✏️ 手动标记信号结果", expanded=False):
         col1, col2, col3, col4 = st.columns([3,1,1,2])
         with col1:
