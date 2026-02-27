@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import sqlite3
 import re
+import random
 
 # ---------- 配置 ----------
 SYMBOL = "ETH"
@@ -131,51 +132,62 @@ if 'last_signal_time' not in st.session_state: st.session_state.last_signal_time
 if 'last_refresh_time' not in st.session_state: st.session_state.last_refresh_time = time.time()
 
 # ---------- 数据获取 (OKX) ----------
-def fetch_klines():
-    """
-    从 OKX 获取 ETH/USDT 5分钟K线数据（公开API，无需密钥）
-    返回格式：[[timestamp, open, high, low, close, volume], ...]
-    """
-    try:
-        url = "https://www.okx.com/api/v5/market/candles"
-        params = {
-            'instId': 'ETH-USDT',
-            'bar': '5m',          # 5分钟K线，支持1m/3m/5m/15m/30m/1H/2H/4H/6H/12H/1D
-            'limit': LIMIT
-        }
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        result = resp.json()
-        
-        if result.get('code') == '0':
-            data = result.get('data', [])
-            if not data:
-                st.warning("OKX 返回空数据")
-                return []
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_klines_cached():
+    return fetch_klines_with_retry()
+
+def fetch_klines_with_retry(max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            url = "https://www.okx.com/api/v5/market/candles"
+            params = {
+                'instId': 'ETH-USDT',
+                'bar': '5m',
+                'limit': LIMIT
+            }
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            result = resp.json()
             
-            converted = []
-            for item in data:
-                # OKX 返回格式: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
-                # 前6个字段: 时间戳(毫秒), 开, 高, 低, 收, 成交量(币)
-                converted.append([
-                    int(item[0]),           # 时间戳(毫秒)
-                    float(item[1]),          # 开盘价
-                    float(item[2]),          # 最高价
-                    float(item[3]),          # 最低价
-                    float(item[4]),          # 收盘价
-                    float(item[5])           # 成交量(以币为单位)
-                ])
-            return converted
-        else:
-            st.warning(f"OKX API 返回错误: {result.get('msg')} (code: {result.get('code')})")
+            if result.get('code') == '0':
+                data = result.get('data', [])
+                if not data:
+                    st.warning("OKX 返回空数据")
+                    return []
+                
+                converted = []
+                for item in data:
+                    converted.append([
+                        int(item[0]),
+                        float(item[1]),
+                        float(item[2]),
+                        float(item[3]),
+                        float(item[4]),
+                        float(item[5])
+                    ])
+                return converted
+            else:
+                st.warning(f"OKX API 返回错误: {result.get('msg')} (code: {result.get('code')})")
+                return []
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code in (429, 50011):
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(wait)
+                st.warning(f"OKX 限流，等待 {wait:.1f} 秒重试 ({attempt+1}/{max_retries})")
+                continue
+            raise
+        except Exception as e:
+            st.session_state.api_fail_count += 1
+            st.error(f"获取 OKX K线失败: {e}")
             return []
-    except Exception as e:
-        st.session_state.api_fail_count += 1
-        st.error(f"获取 OKX K线失败: {e}")
-        return []
+    st.error("达到最大重试次数，API 持续限流")
+    return []
+
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_latest_candle_cached():
+    return fetch_latest_candle()
 
 def fetch_latest_candle():
-    """获取最新一根K线（OKX）"""
     try:
         url = "https://www.okx.com/api/v5/market/candles"
         params = {
@@ -375,6 +387,12 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         if slope <= 0: return None
         if last['close'] <= prev_close: return None
         if higher_trend == 'down': return None
+
+        # 新增：连续阳线确认
+        if len(df) >= 3:
+            recent_bull = sum(df['close'].iloc[-3:] > df['open'].iloc[-3:]) >= 2
+            if not recent_bull: return None
+
         if use_scoring:
             total_score, subscores = calculate_signal_score('BUY', df)
             if total_score >= score_threshold:
@@ -393,6 +411,12 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         if slope >= 0: return None
         if last['close'] >= prev_close: return None
         if higher_trend == 'up': return None
+
+        # 新增：连续阴线确认
+        if len(df) >= 3:
+            recent_bear = sum(df['close'].iloc[-3:] < df['open'].iloc[-3:]) >= 2
+            if not recent_bear: return None
+
         if use_scoring:
             total_score, subscores = calculate_signal_score('SELL', df)
             if total_score >= score_threshold:
@@ -615,7 +639,7 @@ with st.sidebar:
         st.rerun()
 
 # ---------- 数据 ----------
-candles = fetch_klines()
+candles = fetch_klines_cached()
 if candles:
     # 检查获取的数据是否有效（至少有一根K线且价格合理）
     if len(candles) > 0 and candles[0][1] > 0:  # 开盘价>0
@@ -638,7 +662,7 @@ if candles:
 else:
     st.warning("无法获取K线数据，请稍后重试")
 
-latest = fetch_latest_candle()
+latest = fetch_latest_candle_cached()
 if latest and latest[1] > 0:
     if not candle_buffer or latest[0] > candle_buffer[-1][0]:
         for mc in fill_missing_candles(candle_buffer, latest):
