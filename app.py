@@ -139,9 +139,115 @@ def fill_missing(buf, new):
 st.set_page_config(page_title="ETH 5分钟终极版", layout="wide")
 st.markdown("""
 <style>
-    .stApp {background:#0f172a;}
-    .signal-card {background:linear-gradient(135deg,#0a3d2a,#112233); border-radius:18px; padding:20px; border:2px solid #00ff9d;}
-    .waiting-card {background:#1e3a5f; padding:30px; border-radius:18px; text-align:center;}
+    /* 全局暗黑主題強化 */
+    .stApp { background: #0a0e17; }
+    
+    /* 信號卡片主體 */
+    .signal-card {
+        background: linear-gradient(135deg, #0f2a1f, #0a1f33);
+        border: 2px solid #00ff9d;
+        border-radius: 16px;
+        padding: 24px;
+        margin: 16px 0;
+        box-shadow: 0 0 20px rgba(0, 255, 157, 0.25);
+        position: relative;
+        overflow: hidden;
+        animation: pulse-glow 3s ease-in-out infinite alternate;  /* ← 新增脈動發光 */
+    }
+
+    /* 脈動發光動畫（邊框 + 陰影呼吸） */
+    @keyframes pulse-glow {
+        0% {
+            box-shadow: 0 0 15px rgba(0, 255, 157, 0.3),
+                        inset 0 0 10px rgba(0, 255, 157, 0.15);
+            border-color: #00ff9d;
+        }
+        50% {
+            box-shadow: 0 0 35px rgba(0, 255, 157, 0.6),
+                        inset 0 0 20px rgba(0, 255, 157, 0.3);
+            border-color: #00ff9d;
+        }
+        100% {
+            box-shadow: 0 0 15px rgba(0, 255, 157, 0.3),
+                        inset 0 0 10px rgba(0, 255, 157, 0.15);
+            border-color: #00ff9d;
+        }
+    }
+
+    /* 多頭專屬更強綠色脈動（可選） */
+    .signal-card.buy-active {
+        animation: pulse-glow-buy 2.8s ease-in-out infinite alternate;
+    }
+    @keyframes pulse-glow-buy {
+        0% { box-shadow: 0 0 20px #00ff9d80; border-color: #00ff9d; }
+        50% { box-shadow: 0 0 45px #00ff9dc0; border-color: #4dff88; }
+        100% { box-shadow: 0 0 20px #00ff9d80; border-color: #00ff9d; }
+    }
+
+    /* 空頭專屬紅色脈動 */
+    .signal-card.sell-active {
+        animation: pulse-glow-sell 2.8s ease-in-out infinite alternate;
+    }
+    @keyframes pulse-glow-sell {
+        0% { box-shadow: 0 0 20px #ff4d8880; border-color: #ff4d88; }
+        50% { box-shadow: 0 0 45px #ff4d88c0; border-color: #ff6699; }
+        100% { box-shadow: 0 0 20px #ff4d8880; border-color: #ff4d88; }
+    }
+
+    /* 如果你想要文字標題也輕微閃爍（較強烈警示，可選） */
+    .blink-title {
+        animation: subtle-blink 4s infinite ease-in-out;
+    }
+    @keyframes subtle-blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.75; }
+    }
+
+    /* 卡片標題 */
+    .signal-title {
+        color: #00ff9d;
+        font-size: 1.6rem;
+        margin-bottom: 16px;
+        font-weight: bold;
+    }
+    
+    /* 數值大字 */
+    .big-number {
+        font-size: 2.2rem;
+        font-weight: bold;
+        margin: 4px 0;
+    }
+    
+    /* 綠色正向、紅色負向 */
+    .positive { color: #00ff9d; }
+    .negative { color: #ff4d88; }
+    
+    /* 小標籤 */
+    .label { color: #a0b0c0; font-size: 0.9rem; margin-bottom: 4px; }
+    
+    /* 進度條容器 */
+    .progress-container {
+        background: #1e293b;
+        border-radius: 8px;
+        height: 12px;
+        margin: 12px 0;
+        overflow: hidden;
+    }
+    .progress-bar {
+        height: 100%;
+        background: linear-gradient(to right, #00ff9d, #00bfff);
+        transition: width 0.4s ease;
+    }
+
+    /* 等待卡片 */
+    .waiting-card {
+        background: linear-gradient(135deg, #0f2a1f, #0a1f33);
+        border: 2px solid #4da9ff;
+        border-radius: 16px;
+        padding: 40px;
+        text-align: center;
+        color: #ccd6e0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -234,15 +340,21 @@ else:
     ema_f, ema_s, price = last['ema_fast'], last['ema_slow'], last['close']
     if ema_f > ema_s and price > ema_f:
         trend = "🟢 强势多头 (价格在快线上方)"
+        trend_color = "#00ff9d"
     elif ema_f > ema_s:
         trend = "🟢 多头 (价格在快线下方)"
+        trend_color = "#00ff9d"
     elif ema_f < ema_s and price < ema_f:
         trend = "🔴 强势空头 (价格在快线下方)"
+        trend_color = "#ff4d88"
     elif ema_f < ema_s:
         trend = "🔴 空头 (价格在快线上方)"
+        trend_color = "#ff4d88"
     else:
         trend = "⚪ 震荡"
-    st.markdown(f"**当前趋势**: {trend} | 快线 {ema_f:.2f} 慢线 {ema_s:.2f} 价格 {price:.2f}")
+        trend_color = "#aaa"
+    st.markdown(f"<h2 style='color:{trend_color}; text-align:center;'>{trend}</h2>", unsafe_allow_html=True)
+    st.markdown(f"快线 {ema_f:.2f} 慢线 {ema_s:.2f} 价格 {price:.2f}", unsafe_allow_html=True)
 
     # ---------- 信号检测 ----------
     signal = detect_signal(df, fast, slow, (buy_min,buy_max), (sell_min,sell_max), use_score, score_thresh)
@@ -290,26 +402,91 @@ else:
     # ---------- 信号卡片 ----------
     if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
         r = st.session_state.history[0]
-        risk = abs(r['price']-r['sl'])
+        cp = df['close'].iloc[-1]  # 目前價格
+        
+        # 計算盈虧 %
+        if r['side'] == 'BUY':
+            pnl_pct = (cp - r['price']) / r['price'] * 100
+            pnl_class = "positive" if pnl_pct >= 0 else "negative"
+            pnl_sign = "+" if pnl_pct >= 0 else ""
+            direction_emoji = "🟢 多頭"
+            risk_color = "#ff4d88"  # 止損紅
+        else:
+            pnl_pct = (r['price'] - cp) / r['price'] * 100
+            pnl_class = "positive" if pnl_pct >= 0 else "negative"
+            pnl_sign = "+" if pnl_pct >= 0 else ""
+            direction_emoji = "🔴 空頭"
+            risk_color = "#ff4d88"
+
+        # 進度到 TP2（0~1）
+        if r['side'] == 'BUY':
+            progress = max(0, min(1, (cp - r['price']) / (r['tp2'] - r['price'])))
+        else:
+            progress = max(0, min(1, (r['price'] - cp) / (r['price'] - r['tp2'])))
+
+        # 距離 SL / TP1 / TP2
+        dist_sl = abs(cp - r['sl'])
+        dist_sl_pct = dist_sl / r['price'] * 100
+        dist_tp1 = abs(r['tp1'] - cp)
+        dist_tp2 = abs(r['tp2'] - cp)
+
+        # 動態選擇 class
+        card_class = "signal-card"
+        if r['side'] == 'BUY':
+            card_class += " buy-active"
+        else:
+            card_class += " sell-active"
+
+        # 可選：如果 pnl_pct > 某值（如 +2%），加強標題閃爍
+        title_class = "signal-title"
+        if abs(pnl_pct) > 3:  # 例如盈虧超過3%才閃爍標題
+            title_class += " blink-title"
+
         st.markdown(f"""
-        <div class="signal-card">
-            <h3 style="color:#00ff9d;">{'🟢 多头' if r['side']=='BUY' else '🔴 空头'} @ {r['time']}</h3>
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">
-                <div>进场<br><b>{r['price']:.2f}</b></div>
-                <div>止损<br><b style="color:#ff99cc;">{r['sl']:.2f}</b><br>风险 {risk:.2f}</div>
-                <div>TP1<br><b>{r['tp1']:.2f}</b></div>
-                <div>TP2<br><b style="color:#ffd700;">{r['tp2']:.2f}</b></div>
+        <div class="{card_class}">
+            <div class="{title_class}">{direction_emoji} 信號 @ {r['time']}</div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; text-align: center;">
+                <div>
+                    <div class="label">進場價格</div>
+                    <div class="big-number">{r['price']:.2f}</div>
+                </div>
+                <div>
+                    <div class="label">目前盈虧</div>
+                    <div class="big-number {pnl_class}">{pnl_sign}{pnl_pct:.2f}%</div>
+                </div>
+                <div>
+                    <div class="label">風險 / 距離止損</div>
+                    <div class="big-number" style="color:{risk_color}">{dist_sl:.2f} ({dist_sl_pct:.2f}%)</div>
+                </div>
             </div>
-            <div style="display:flex;gap:10px;margin-top:10px;">
-                <div>EMA快 {r['ema_fast']:.2f}</div>
-                <div>EMA慢 {r['ema_slow']:.2f}</div>
-                <div>RSI {r['rsi']:.1f}</div>
-                <div>ATR {r['atr']:.2f}</div>
+            
+            <div style="margin: 20px 0;">
+                <div class="label">止損 / TP1 / TP2</div>
+                <div style="display: flex; justify-content: space-between; font-size: 1.1rem; margin-top: 8px;">
+                    <span style="color:#ff4d88;">SL {r['sl']:.2f}</span>
+                    <span style="color:#4dff88;">TP1 {r['tp1']:.2f}</span>
+                    <span style="color:#ffd700;">TP2 {r['tp2']:.2f}</span>
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar" style="width: {progress*100:.1f}%;"></div>
+                </div>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; font-size: 1rem; color: #ccd6e0;">
+                <div>EMA快 {r['ema_fast']:.2f} | EMA慢 {r['ema_slow']:.2f}</div>
+                <div>RSI {r['rsi']:.1f} | ATR {r['atr']:.2f}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown('<div class="waiting-card">⏳ 等待新信号...</div>', unsafe_allow_html=True)
+        total_score, _ = get_score('BUY' if last['ema_fast'] > last['ema_slow'] else 'SELL', df)
+        st.markdown(f"""
+        <div class="waiting-card">
+            <h3 style="color:#4da9ff;">等待下一個高質量信號...</h3>
+            <div style="font-size:1.1rem; margin-top:12px;">目前綜合評分：{total_score}/100</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ---------- 图表 ----------
     plot_df = df.tail(200)
@@ -321,11 +498,17 @@ else:
     colors = ['#00ff9d' if c>=o else '#ff4d4d' for c,o in zip(plot_df['close'], plot_df['open'])]
     fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], marker_color=colors, showlegend=False), row=2, col=1)
     fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", annotation_text=f"{cp:.2f}", row=1, col=1)
+    if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
+        r = st.session_state.history[0]
+        fig.add_hline(y=r['price'], line_dash="dot", line_color="#ffffff", annotation_text="進場", row=1,col=1)
+        fig.add_hline(y=r['sl'],    line_dash="dash", line_color="#ff4d4d", annotation_text="SL")
+        fig.add_hline(y=r['tp1'],   line_dash="dash", line_color="#4dff88", annotation_text="TP1")
+        fig.add_hline(y=r['tp2'],   line_dash="dash", line_color="#ffd700", annotation_text="TP2")
     fig.update_layout(height=600, template="plotly_dark", showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
     # ---------- 增强版市场诊断 ----------
-    with st.expander("🔍 当前市场诊断 (详细分析)", expanded=True):
+    with st.expander("🔍 当前市场诊断 (详细分析)", expanded=False):
         last = df.iloc[-1]
         spread = abs(last['ema_fast']-last['ema_slow'])/last['close']*100
         slope = (last['ema_fast']-df['ema_fast'].iloc[-5])/5/last['close'] if len(df)>=5 else 0
@@ -395,11 +578,11 @@ else:
             st.markdown(f"- 评分达标: {'✅' if total_score >= score_thresh else '❌'} 当前 {total_score} ≥ {score_thresh}")
 
     # ---------- 最近K线表格 ----------
-    st.subheader("最近10根K线")
-    show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
-    show.index = show.index.strftime('%Y-%m-%d %H:%M')
-    show.columns = ['开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
-    st.dataframe(show, use_container_width=True)
+    with st.expander("📊 最近10根K线（含指标）", expanded=False):
+        show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
+        show.index = show.index.strftime('%Y-%m-%d %H:%M')
+        show.columns = ['开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
+        st.dataframe(show, use_container_width=True)
 
     # ---------- 历史信号记录 ----------
     if st.session_state.history:
@@ -407,7 +590,15 @@ else:
         hist = pd.DataFrame(list(st.session_state.history)[:5])
         hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
-        st.dataframe(hist_display, use_container_width=True)
+
+        def style_result(val):
+            if val == 'win': return 'background-color: #1a3c34; color: #00ff9d'
+            if val == 'loss': return 'background-color: #3c1a1a; color: #ff4d4d'
+            if val == 'pending': return 'background-color: #1e3a5f; color: #ffd700'
+            return ''
+
+        hist_styled = hist_display.style.applymap(style_result, subset=['结果'])
+        st.dataframe(hist_styled, use_container_width=True)
     else:
         st.info("暂无历史信号")
 
