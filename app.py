@@ -350,6 +350,32 @@ else:
         else:
             st.info("评分系统未启用，信号基于RSI范围触发")
 
+        # ---------- 触发条件检查 ----------
+        st.markdown("---")
+        st.markdown("**信号触发条件检查**")
+        prev_close = df['close'].iloc[-2] if len(df) >= 2 else last['close']
+        ema_f, ema_s = last['ema_fast'], last['ema_slow']
+        price = last['close']
+
+        is_bull = ema_f > ema_s
+        is_bear = ema_f < ema_s
+        if is_bull:
+            st.markdown(f"- EMA方向: ✅ 多头 (快线 {ema_f:.2f} > 慢线 {ema_s:.2f})")
+        elif is_bear:
+            st.markdown(f"- EMA方向: ✅ 空头 (快线 {ema_f:.2f} < 慢线 {ema_s:.2f})")
+        else:
+            st.markdown("- EMA方向: ❌ 粘合")
+
+        if is_bull and price > prev_close:
+            st.markdown(f"- 价格突破: ✅ 收盘 {price:.2f} > 前收 {prev_close:.2f}")
+        elif is_bear and price < prev_close:
+            st.markdown(f"- 价格突破: ✅ 收盘 {price:.2f} < 前收 {prev_close:.2f}")
+        else:
+            st.markdown(f"- 价格突破: ❌ 收盘 {price:.2f} {'>' if is_bull else '<'} 前收 {prev_close:.2f} 未满足")
+
+        if use_score:
+            st.markdown(f"- 评分达标: {'✅' if total_score >= score_thresh else '❌'} 当前 {total_score} ≥ {score_thresh}")
+
     # ---------- 最近K线表格 ----------
     st.subheader("最近10根K线")
     show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
@@ -361,6 +387,7 @@ else:
     if st.session_state.history:
         st.subheader("📜 最近信号")
         hist = pd.DataFrame(list(st.session_state.history)[:5])
+        # 修正列名：exit_reason 而不是 exit_region
         hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
         st.dataframe(hist_display, use_container_width=True)
@@ -368,4 +395,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 终极版 v2.0 • CryptoCompare数据源 • 趋势指示器 • 详细诊断 • 祝你交易顺利！💰")
+st.caption("🔥 终极版 v2.2 • 修复历史信号列名错误 • 祝你交易顺利！💰")
