@@ -14,16 +14,9 @@ LIMIT = 200
 INTERVAL_MINUTES = 5
 
 # ---------- Session State ----------
-if 'history' not in st.session_state:
-    st.session_state.history = deque(maxlen=200)
-if 'candles' not in st.session_state:
-    st.session_state.candles = deque(maxlen=500)
-if 'last_signal_time' not in st.session_state:
-    st.session_state.last_signal_time = None
-if 'api_fail' not in st.session_state:
-    st.session_state.api_fail = 0
-if 'last_error' not in st.session_state:
-    st.session_state.last_error = ""
+for key in ['history', 'candles', 'last_signal_time', 'api_fail', 'last_error']:
+    if key not in st.session_state:
+        st.session_state[key] = deque(maxlen=200) if key == 'history' else deque(maxlen=500) if key == 'candles' else None if key == 'last_signal_time' else 0 if key == 'api_fail' else ""
 
 # ---------- 数据获取 ----------
 @st.cache_data(ttl=10, show_spinner=False)
@@ -49,7 +42,7 @@ def _fetch_klines_impl():
             st.session_state.last_error = ""
             return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in data]
         except Exception as e2:
-            st.session_state.last_error += f" | Binance 也失败: {str(e2)[:50]}"
+            st.session_state.last_error += f" | Binance 失败: {str(e2)[:50]}"
             return []
 
 def fetch_latest():
@@ -127,13 +120,10 @@ def sltp(price, side, atr, use_atr, mult_sl=2.2, mult_tp1=0.8, mult_tp2=1.6):
         risk = atr * mult_sl
         if side == 'BUY':
             return price - risk, price + risk * mult_tp1, price + risk * mult_tp2
-        else:
-            return price + risk, price - risk * mult_tp1, price - risk * mult_tp2
-    else:
-        if side == 'BUY':
-            return price*0.994, price*1.006, price*1.012
-        else:
-            return price*1.006, price*0.994, price*0.988
+        return price + risk, price - risk * mult_tp1, price - risk * mult_tp2
+    if side == 'BUY':
+        return price*0.994, price*1.006, price*1.012
+    return price*1.006, price*0.994, price*0.988
 
 # ---------- 补K线 ----------
 def fill_missing(buf, new):
@@ -165,26 +155,22 @@ st.markdown("""
 <style>
     .stApp { background: #0a0e17; }
     .stApp .block-container { max-width: 100% !important; padding: 1rem 2rem; }
-    .signal-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 2px solid #00ff9d; border-radius: 16px; padding: 24px; margin: 16px 0; box-shadow: 0 0 20px rgba(0,255,157,0.25); animation: pulse-glow 3s ease-in-out infinite alternate; }
-    @keyframes pulse-glow { 0% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; } 50% { box-shadow: 0 0 35px rgba(0,255,157,0.6), inset 0 0 20px rgba(0,255,157,0.3); border-color:#00ff9d; } 100% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; } }
-    .signal-card.buy-active { animation: pulse-glow-buy 2.8s ease-in-out infinite alternate; }
-    @keyframes pulse-glow-buy { 0%{box-shadow:0 0 20px #00ff9d80;border-color:#00ff9d} 50%{box-shadow:0 0 45px #00ff9dc0;border-color:#4dff88} 100%{box-shadow:0 0 20px #00ff9d80;border-color:#00ff9d} }
-    .signal-card.sell-active { animation: pulse-glow-sell 2.8s ease-in-out infinite alternate; }
-    @keyframes pulse-glow-sell { 0%{box-shadow:0 0 20px #ff4d8880;border-color:#ff4d88} 50%{box-shadow:0 0 45px #ff4d88c0;border-color:#ff6699} 100%{box-shadow:0 0 20px #ff4d8880;border-color:#ff4d88} }
-    .blink-title { animation: subtle-blink 4s infinite ease-in-out; }
-    @keyframes subtle-blink { 0%,100%{opacity:1} 50%{opacity:0.75} }
-    .signal-title { color:#00ff9d; font-size:1.6rem; margin-bottom:16px; font-weight:bold; }
-    .big-number { font-size:2.2rem; font-weight:bold; margin:4px 0; }
+    .signal-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 3px solid; border-radius: 18px; padding: 26px; margin: 16px 0; box-shadow: 0 0 30px rgba(0,255,157,0.3); animation: pulse-glow 2.8s ease-in-out infinite alternate; }
+    @keyframes pulse-glow { 0% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); } 50% { box-shadow: 0 0 45px rgba(0,255,157,0.7), inset 0 0 25px rgba(0,255,157,0.4); } 100% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); } }
+    .signal-card.sell-active { border-color: #ff4d88; animation: pulse-glow-sell 2.6s ease-in-out infinite alternate; }
+    @keyframes pulse-glow-sell { 0% { box-shadow: 0 0 20px #ff4d8880; } 50% { box-shadow: 0 0 55px #ff4d88c0; } 100% { box-shadow: 0 0 20px #ff4d8880; } }
+    .signal-title { font-size:1.65rem; margin-bottom:18px; font-weight:bold; }
+    .big-number { font-size:2.35rem; font-weight:bold; margin:6px 0; }
     .positive { color:#00ff9d; }
     .negative { color:#ff4d88; }
-    .label { color:#a0b0c0; font-size:0.9rem; margin-bottom:4px; }
-    .progress-container { background:#1e293b; border-radius:8px; height:12px; margin:12px 0; overflow:hidden; }
-    .progress-bar { height:100%; background:linear-gradient(to right, #00ff9d, #00bfff); transition:width 0.4s ease; }
-    .waiting-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 2px solid #4da9ff; border-radius: 16px; padding: 40px; text-align: center; color: #ccd6e0; animation: pulse-wait 3s ease-in-out infinite alternate; }
-    @keyframes pulse-wait { 0%{box-shadow:0 0 10px #4da9ff80;border-color:#4da9ff} 50%{box-shadow:0 0 30px #4da9ffc0;border-color:#80b4ff} 100%{box-shadow:0 0 10px #4da9ff80;border-color:#4da9ff} }
-    .trend-big { font-size:1.9rem; font-weight:bold; text-align:center; margin:8px 0; }
-    .api-error { color:#ffaa00; font-size:0.9rem; margin-top:4px; }
-    .stButton > button { width:100%; margin-bottom:6px; }
+    .label { color:#a0b0c0; font-size:0.92rem; margin-bottom:6px; }
+    .progress-container { background:#1e293b; border-radius:10px; height:14px; margin:14px 0; overflow:hidden; }
+    .progress-bar { height:100%; background:linear-gradient(to right, #00ff9d, #00bfff); transition:width 0.5s ease; }
+    .waiting-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 3px solid #4da9ff; border-radius: 18px; padding: 42px; text-align: center; color: #ccd6e0; animation: pulse-wait 3s ease-in-out infinite alternate; }
+    @keyframes pulse-wait { 0% { box-shadow: 0 0 12px #4da9ff80; } 50% { box-shadow: 0 0 35px #4da9ffc0; } 100% { box-shadow: 0 0 12px #4da9ff80; } }
+    .trend-big { font-size:2rem; font-weight:bold; text-align:center; margin:10px 0; }
+    .api-error { color:#ffaa00; font-size:0.9rem; margin-top:6px; }
+    .stButton > button { width:100%; margin-bottom:8px; font-weight:600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -224,9 +210,9 @@ with st.sidebar:
 
     if st.session_state.history:
         total = len(st.session_state.history)
-        wins = sum(1 for s in st.session_state.history if s['result'] == 'win')
-        losses = sum(1 for s in st.session_state.history if s['result'] == 'loss')
-        pending = sum(1 for s in st.session_state.history if s['result'] == 'pending')
+        wins = sum(1 for s in st.session_state.history if s.get('result') == 'win')
+        losses = sum(1 for s in st.session_state.history if s.get('result') == 'loss')
+        pending = sum(1 for s in st.session_state.history if s.get('result') == 'pending')
         win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
         st.sidebar.markdown("---")
         st.sidebar.markdown("**📈 信号统计**")
@@ -299,7 +285,7 @@ else:
     signal = detect_signal(df, fast, slow, (buy_min, buy_max), (sell_min, sell_max), use_score, score_thresh)
 
     for rec in st.session_state.history:
-        if rec['result'] != 'pending': continue
+        if rec.get('result') != 'pending': continue
         if rec['side'] == 'BUY':
             if cp <= rec['sl']:
                 rec['result'] = 'loss'; rec['exit_price'] = cp; rec['exit_reason'] = '止损'
@@ -321,7 +307,7 @@ else:
         st.session_state.last_signal_time = df.index[-1]
 
     # ---------- 信号卡片 / 等待卡片 ----------
-    if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
+    if st.session_state.history and st.session_state.history[0].get('result') == 'pending':
         r = st.session_state.history[0]
         cp = df['close'].iloc[-1]
         if r['side'] == 'BUY':
@@ -330,18 +316,19 @@ else:
             pnl_sign = "+" if pnl_pct >= 0 else ""
             direction_emoji = "🟢 多头"
             risk_color = "#ff4d88"
+            card_class = "signal-card buy-active"
         else:
             pnl_pct = (r['price'] - cp) / r['price'] * 100
             pnl_class = "positive" if pnl_pct >= 0 else "negative"
             pnl_sign = "+" if pnl_pct >= 0 else ""
             direction_emoji = "🔴 空头"
             risk_color = "#ff4d88"
+            card_class = "signal-card sell-active"
 
         progress = max(0, min(1, (cp - r['price']) / (r['tp2'] - r['price']))) if r['side']=='BUY' else max(0, min(1, (r['price'] - cp) / (r['price'] - r['tp2'])))
         dist_sl = abs(cp - r['sl'])
         dist_sl_pct = dist_sl / r['price'] * 100
 
-        card_class = "signal-card" + (" buy-active" if r['side']=='BUY' else " sell-active")
         title_class = "signal-title" + (" blink-title" if abs(pnl_pct)>3 else "")
 
         st.markdown(f"""
@@ -352,9 +339,9 @@ else:
                 <div><div class="label">目前盈亏</div><div class="big-number {pnl_class}">{pnl_sign}{pnl_pct:.2f}%</div></div>
                 <div><div class="label">风险 / 距离止损</div><div class="big-number" style="color:{risk_color}">{dist_sl:.2f} ({dist_sl_pct:.2f}%)</div></div>
             </div>
-            <div style="margin:20px 0">
+            <div style="margin:22px 0">
                 <div class="label">止损 / TP1 / TP2</div>
-                <div style="display:flex;justify-content:space-between;font-size:1.1rem;margin-top:8px">
+                <div style="display:flex;justify-content:space-between;font-size:1.12rem;margin-top:10px">
                     <span style="color:#ff4d88">SL {r['sl']:.2f}</span>
                     <span style="color:#4dff88">TP1 {r['tp1']:.2f}</span>
                     <span style="color:#ffd700">TP2 {r['tp2']:.2f}</span>
@@ -373,8 +360,8 @@ else:
         title_color = trend_color if '多头' in trend else '#ff4d88' if '空头' in trend else '#aaa'
         st.markdown(f"""
         <div class="waiting-card">
-            <h3 style="color:{title_color}; margin:0 0 16px 0; font-size:1.6rem;">等待下一个高质量信号...</h3>
-            <div style="font-size:1.15rem; line-height:1.6;">
+            <h3 style="color:{title_color}; margin:0 0 18px 0; font-size:1.65rem;">等待下一个高质量信号...</h3>
+            <div style="font-size:1.18rem; line-height:1.65;">
                 <strong>当前趋势：</strong> {trend}<br>
                 <strong>综合评分：</strong> {total_score}/100 （阈值 {score_thresh if use_score else '未启用'}）
             </div>
@@ -391,7 +378,7 @@ else:
     fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], marker_color=colors, showlegend=False), row=2, col=1)
     fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", annotation_text=f"{cp:.2f}", annotation_position="top right", row=1, col=1)
 
-    if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
+    if st.session_state.history and st.session_state.history[0].get('result') == 'pending':
         r = st.session_state.history[0]
         fig.add_hline(y=r['price'], line_dash="dot", line_color="#ffffff", annotation_text="进场", annotation_position="top right", row=1, col=1)
         fig.add_hline(y=r['sl'], line_dash="dash", line_color="#ff4d88", annotation_text="SL", annotation_position="top right", annotation_font_color="#ff4d88", row=1, col=1)
@@ -399,7 +386,7 @@ else:
         fig.add_hline(y=r['tp2'], line_dash="dash", line_color="#ffd700", annotation_text="TP2", annotation_position="top right", annotation_font_color="#ffd700", row=1, col=1)
 
     fig.update_xaxes(tickformat='%H:%M', tickangle=-45, nticks=10, tickfont_size=11, showgrid=True, gridcolor='rgba(80,80,80,0.3)', rangeslider_visible=False)
-    fig.update_layout(height=700, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(l=40,r=40,t=40,b=100))
+    fig.update_layout(height=720, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(l=40,r=40,t=40,b=110))
     st.plotly_chart(fig)
 
     # ---------- 最近K线 & 历史信号 ----------
@@ -412,14 +399,11 @@ else:
     if st.session_state.history:
         st.subheader("📜 最近信号")
         hist = pd.DataFrame(list(st.session_state.history)[:10])
-        # 安全处理列
-        cols = ['time','side','price','result']
         if not hist.empty:
-            if 'exit_price' not in hist.columns:
-                hist['exit_price'] = None
-            if 'exit_reason' not in hist.columns:
-                hist['exit_reason'] = None
-        hist_display = hist[cols + ['exit_price','exit_reason']].copy()
+            for col in ['exit_price', 'exit_reason']:
+                if col not in hist.columns:
+                    hist[col] = None
+        hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
 
         def calc_pnl(row):
@@ -444,4 +428,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 顶级完美终极版 v4.2 • 零警告 • 极致稳定 • 双数据源 • 顶级动效 • 祝你交易大赚！💰")
+st.caption("🔥 顶级完美终极版 v4.3 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
