@@ -147,9 +147,6 @@ def fetch_klines():
         resp.raise_for_status()
         result = resp.json()
         
-        # 调试：可在日志中查看返回状态（Streamlit Cloud中查看Logs）
-        # st.write("OKX API 返回码:", result.get('code'))  # 调试时可取消注释
-        
         if result.get('code') == '0':
             data = result.get('data', [])
             if not data:
@@ -196,7 +193,7 @@ def fetch_latest_candle():
     except:
         return None
 
-# ---------- 高周期趋势 (仍使用 CryptoCompare，可保留) ----------
+# ---------- 高周期趋势 (使用 CryptoCompare) ----------
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
     try:
