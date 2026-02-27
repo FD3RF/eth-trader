@@ -1,37 +1,51 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import deque
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import sqlite3
-import re
+import ccxt
 
 # ---------- 配置 ----------
-SYMBOL = "ETH"
-CURRENCY = "USD"
-INTERVAL = "5"
-LIMIT = 200
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+SYMBOL = "ETH/USDT"
+TIMEFRAME = "5m"          # 5分钟K线（可改为1h、4h等）
+LIMIT = 200               # 获取K线数量
 DB_FILE = "signals.db"
-INTERVAL_MINUTES = 5
+
+# ---------- 初始化币安交易所（只读） ----------
+@st.cache_resource
+def get_exchange():
+    return ccxt.binance({
+        'apiKey': st.secrets["BINANCE_API_KEY"],
+        'secret': st.secrets["BINANCE_API_SECRET"],
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
+
+# ---------- 获取K线数据 ----------
+def fetch_klines():
+    exchange = get_exchange()
+    try:
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=LIMIT)
+        # ohlcv格式: [[timestamp, open, high, low, close, volume], ...]
+        return ohlcv
+    except Exception as e:
+        st.error(f"获取币安K线失败: {e}")
+        return []
 
 # ---------- SQLite ----------
 def get_db_conn():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
     return conn
 
 def init_db():
-    conn = get_db_conn()
-    try:
-        c = conn.cursor()
-        c.execute("""
+    with get_db_conn() as conn:
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             record_time TEXT, signal_time TEXT, side TEXT, price REAL,
@@ -39,88 +53,65 @@ def init_db():
             sl REAL, tp1 REAL, tp2 REAL, result TEXT,
             exit_price REAL, exit_time TEXT, exit_reason TEXT,
             peak REAL, note TEXT
-        )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
+        )""")
 
 def save_signal_to_db(record):
-    conn = get_db_conn()
-    try:
-        c = conn.cursor()
-        c.execute("""
+    with get_db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
         INSERT INTO signals (record_time, signal_time, side, price, ema_fast, ema_slow, rsi, atr, sl, tp1, tp2, result, peak, note)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (record.get('record_time'), record.get('signal_time'), record.get('side'), record.get('price'),
-              record.get('ema_fast'), record.get('ema_slow'), record.get('rsi'), record.get('atr'),
-              record.get('sl'), record.get('tp1'), record.get('tp2'), record.get('result'), record.get('peak'), record.get('note', '')))
-        return c.lastrowid
-    finally:
-        conn.close()
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (record['record_time'], record['signal_time'], record['side'], record['price'],
+         record['ema_fast'], record['ema_slow'], record['rsi'], record['atr'],
+         record['sl'], record['tp1'], record['tp2'], record['result'], record['peak'], record.get('note','')))
+        return cur.lastrowid
 
 def update_signal_in_db(signal_id, result=None, exit_price=None, exit_time=None, exit_reason=None, peak=None, note=None):
-    conn = get_db_conn()
-    try:
-        c = conn.cursor()
-        fields, values = [], []
-        if result is not None: fields.append("result=?"); values.append(result)
-        if exit_price is not None: fields.append("exit_price=?"); values.append(exit_price)
-        if exit_time is not None: fields.append("exit_time=?"); values.append(exit_time)
-        if exit_reason is not None: fields.append("exit_reason=?"); values.append(exit_reason)
-        if peak is not None: fields.append("peak=?"); values.append(peak)
-        if note is not None: fields.append("note=?"); values.append(note)
-        if not fields: return
-        values.append(signal_id)
-        c.execute(f"UPDATE signals SET {', '.join(fields)} WHERE id=?", values)
-        conn.commit()
-    finally:
-        conn.close()
+    with get_db_conn() as conn:
+        fields = []
+        params = []
+        if result is not None:
+            fields.append("result=?")
+            params.append(result)
+        if exit_price is not None:
+            fields.append("exit_price=?")
+            params.append(exit_price)
+        if exit_time is not None:
+            fields.append("exit_time=?")
+            params.append(exit_time)
+        if exit_reason is not None:
+            fields.append("exit_reason=?")
+            params.append(exit_reason)
+        if peak is not None:
+            fields.append("peak=?")
+            params.append(peak)
+        if note is not None:
+            fields.append("note=?")
+            params.append(note)
+        if not fields:
+            return
+        params.append(signal_id)
+        conn.execute(f"UPDATE signals SET {', '.join(fields)} WHERE id=?", params)
 
 def fetch_recent_signals(limit=50, as_dict=False):
-    conn = get_db_conn()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,))
-        rows = c.fetchall()
+    with get_db_conn() as conn:
+        df = pd.read_sql("SELECT * FROM signals ORDER BY id DESC LIMIT ?", conn, params=(limit,))
         if as_dict:
-            columns = [desc[0] for desc in c.description]
-            return [dict(zip(columns, row)) for row in rows]
-        return rows
-    except:
-        return [] if not as_dict else []
-    finally:
-        conn.close()
+            return df.to_dict('records')
+        return df.values.tolist()
 
 def load_recent_to_deque(limit=200):
     try:
         rows = fetch_recent_signals(limit, as_dict=True)
-        valid = [r for r in rows if re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', r.get('record_time','')) and re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}', r.get('signal_time',''))]
-        return deque(valid, maxlen=limit)
+        return deque(rows, maxlen=limit)
     except:
         return deque(maxlen=limit)
 
-def auto_clean_invalid_signals():
-    conn = get_db_conn()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM signals WHERE record_time NOT LIKE '____-__-__ __:__:__' OR signal_time NOT LIKE '____-__-__ __:__'")
-        conn.commit()
-    finally:
-        conn.close()
-
 def clear_all_signals():
-    conn = get_db_conn()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM signals")
-        conn.commit()
-    finally:
-        conn.close()
+    with get_db_conn() as conn:
+        conn.execute("DELETE FROM signals")
 
-# ---------- 立即初始化 ----------
 init_db()
-auto_clean_invalid_signals()
 
 # ---------- Session ----------
 if 'api_fail_count' not in st.session_state: st.session_state.api_fail_count = 0
@@ -128,56 +119,6 @@ if 'signal_history' not in st.session_state: st.session_state.signal_history = l
 if 'candle_buffer' not in st.session_state: st.session_state.candle_buffer = deque(maxlen=500)
 if 'signal_stats' not in st.session_state: st.session_state.signal_stats = {'total':0,'win':0,'loss':0,'exit':0,'pending':0,'win_rate':0}
 if 'last_signal_time' not in st.session_state: st.session_state.last_signal_time = None
-if 'last_refresh_time' not in st.session_state: st.session_state.last_refresh_time = time.time()
-
-# ---------- 数据获取 ----------
-@st.cache_data(ttl=5, show_spinner=False)
-def fetch_klines():
-    try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit={LIMIT}&aggregate={INTERVAL}"
-        resp = requests.get(url, timeout=10, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        result = resp.json()
-        if result and result.get('Response') == 'Success':
-            data = result['Data']['Data']
-            return [[item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']] for item in data]
-        else:
-            st.warning("API返回异常，稍后重试")
-            return []
-    except Exception as e:
-        st.session_state.api_fail_count += 1
-        st.error(f"获取K线失败: {e}")
-        return []
-
-@st.cache_data(ttl=5, show_spinner=False)
-def fetch_latest_candle():
-    try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit=1&aggregate={INTERVAL}"
-        resp = requests.get(url, timeout=5, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        result = resp.json()
-        if result and result.get('Response') == 'Success':
-            item = result['Data']['Data'][0]
-            return [item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']]
-        return None
-    except:
-        return None
-
-@st.cache_data(ttl=60, show_spinner=False)
-def get_higher_trend():
-    try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={SYMBOL}&tsym={CURRENCY}&limit=200"
-        resp = requests.get(url, timeout=5, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        result = resp.json()
-        if result and result.get('Response') == 'Success':
-            closes = [d['close'] for d in result['Data']['Data']]
-            if len(closes) >= 200:
-                ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
-                return 'up' if closes[-1] > ema200 else 'down'
-        return 'neutral'
-    except:
-        return 'neutral'
 
 # ---------- 指标 ----------
 def calculate_ema(series, period):
@@ -229,17 +170,14 @@ def calculate_signal_score(side, df, idx=-1):
         avg_vol = volume
     vol_ratio = volume / avg_vol if avg_vol > 0 else 1.0
 
-    # EMA扩散强度 (%)
     ema_spread = abs(ema_f - ema_s) / close * 100
 
-    # 斜率强度 (% 每根K线)
     if len(df) >= 5 and idx >= 4:
         slope = (ema_f - df['ema_fast'].iloc[idx-4]) / 5 / close * 100
         slope_abs = abs(slope)
     else:
         slope_abs = 0
 
-    # ATR强度 (%)
     atr_pct = (atr / close * 100) if atr > 0 else 0
 
     def score_by_threshold(value, thresholds):
@@ -248,15 +186,13 @@ def calculate_signal_score(side, df, idx=-1):
                 return s
         return 0
 
-    # EMA扩散得分
     ema_thresholds = [(0.2, 100, 20), (0.15, 0.2, 15), (0.1, 0.15, 10), (0.05, 0.1, 5), (0, 0.05, 0)]
     score_ema = score_by_threshold(ema_spread, ema_thresholds)
 
-    # 斜率得分
     slope_thresholds = [(0.04, 100, 20), (0.03, 0.04, 15), (0.02, 0.03, 10), (0.01, 0.02, 5), (0, 0.01, 0)]
     score_slope = score_by_threshold(slope_abs, slope_thresholds)
 
-    # ===== 量能得分改为双档触发 =====
+    # 量能双档触发
     if vol_ratio >= 1.3:
         score_vol = 20
     elif vol_ratio >= 0.8:
@@ -264,11 +200,9 @@ def calculate_signal_score(side, df, idx=-1):
     else:
         score_vol = 0
 
-    # ATR强度得分
     atr_thresholds = [(0.2, 100, 20), (0.16, 0.2, 15), (0.12, 0.16, 10), (0.08, 0.12, 5), (0, 0.08, 0)]
     score_atr = score_by_threshold(atr_pct, atr_thresholds)
 
-    # RSI位置得分（方向自适应）
     if side == 'BUY':
         if 55 <= rsi <= 70:
             score_rsi = 20
@@ -286,7 +220,7 @@ def calculate_signal_score(side, df, idx=-1):
             score_rsi = 5
         else:
             score_rsi = 0
-    else:  # SELL
+    else:
         if 30 <= rsi <= 45:
             score_rsi = 20
         elif 25 <= rsi < 30:
@@ -305,13 +239,7 @@ def calculate_signal_score(side, df, idx=-1):
             score_rsi = 0
 
     total = score_ema + score_slope + score_vol + score_atr + score_rsi
-    return total, {
-        'EMA': score_ema,
-        '斜率': score_slope,
-        '量能': score_vol,
-        'ATR': score_atr,
-        'RSI': score_rsi
-    }
+    return total, {'EMA': score_ema, '斜率': score_slope, '量能': score_vol, 'ATR': score_atr, 'RSI': score_rsi}
 
 # ---------- 核心信号检测（方向优先） ----------
 def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, sell_max,
@@ -324,7 +252,7 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
     rsi_now = df['rsi'].iloc[-1]
     atr_now = df['atr'].iloc[-1]
 
-    # 保留基本的波动范围检查（可以保留或去除，此处保留原样）
+    # 保留基本的波动范围检查
     if len(df) >= 20:
         range_pct = (df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()) / last['close']
         if range_pct < 0.003: return None
@@ -333,12 +261,8 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
         if ema_f_now > ema_s_now and last['close'] <= prev_high: return None
         if ema_f_now < ema_s_now and last['close'] >= prev_low: return None
 
-    # 取消严格的EMA扩散递增要求，改为方向优先（在下面分支中处理）
-    # 但仍保留一个非常基础的扩散检查（避免价格完全粘合）
-    if abs(ema_f_now - ema_s_now) / last['close'] < 0.0005:
-        return None
+    if abs(ema_f_now - ema_s_now) / last['close'] < 0.0005: return None
 
-    # 计算斜率（用于方向判断）
     lookback = min(5, len(df)-1)
     slope = (ema_f_now - df['ema_fast'].iloc[-lookback]) / lookback / last['close']
 
@@ -347,13 +271,9 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
     is_bearish = (ema_f_now < ema_s_now) and (last['close'] < ema_f_now * 1.001)
 
     if is_bullish:
-        # 方向优先：斜率必须为正
-        if slope <= 0:
-            return None
-        if last['close'] <= prev_close:
-            return None
-        if higher_trend == 'down':
-            return None
+        if slope <= 0: return None
+        if last['close'] <= prev_close: return None
+        if higher_trend == 'down': return None
         if use_scoring:
             total_score, subscores = calculate_signal_score('BUY', df)
             if total_score >= score_threshold:
@@ -369,13 +289,9 @@ def detect_signal_pro(df, fast, slow, rsi_period, buy_min, buy_max, sell_min, se
             return ('BUY', last['close'], ema_f_now, ema_s_now, rsi_now, atr_now)
 
     if is_bearish:
-        # 方向优先：斜率必须为负
-        if slope >= 0:
-            return None
-        if last['close'] >= prev_close:
-            return None
-        if higher_trend == 'up':
-            return None
+        if slope >= 0: return None
+        if last['close'] >= prev_close: return None
+        if higher_trend == 'up': return None
         if use_scoring:
             total_score, subscores = calculate_signal_score('SELL', df)
             if total_score >= score_threshold:
@@ -402,33 +318,6 @@ def calculate_sltp(entry_price, side, atr=None, use_atr=False, atr_mult_sl=2.2, 
     if side == 'BUY':
         return entry_price*0.994, entry_price*1.006, entry_price*1.012
     return entry_price*1.006, entry_price*0.994, entry_price*0.988
-
-def check_trailing_stop(record, current_price, trailing_dist):
-    if record.get('result') != 'pending': return False, None, None, None
-    peak = record.get('peak')
-    side = record.get('side')
-    if side == 'BUY':
-        if current_price <= peak * (1 - trailing_dist/100):
-            return True, 'exit', peak * (1 - trailing_dist/100), '移动止损'
-    else:
-        if current_price >= peak * (1 + trailing_dist/100):
-            return True, 'exit', peak * (1 + trailing_dist/100), '移动止损'
-    return False, None, None, None
-
-# ---------- 补K线 ----------
-def fill_missing_candles(buffer, new_candle):
-    if not buffer: return [new_candle]
-    last_ts = buffer[-1][0]
-    new_ts = new_candle[0]
-    expected = last_ts + INTERVAL_MINUTES * 60 * 1000
-    if new_ts > expected:
-        missing = []
-        ts = expected
-        while ts < new_ts:
-            missing.append([ts] + [buffer[-1][4]]*4 + [0])
-            ts += INTERVAL_MINUTES * 60 * 1000
-        return missing + [new_candle]
-    return [new_candle]
 
 # ---------- 信号管理 ----------
 def update_signal_stats():
@@ -472,7 +361,7 @@ def clear_signal_history(clear_db=False):
     update_signal_stats()
 
 # ---------- Streamlit UI ----------
-st.set_page_config(page_title="ETH 5分钟极致版", layout="wide")
+st.set_page_config(page_title="ETH 5分钟极致版 (币安数据)", layout="wide")
 
 st.markdown("""
 <style>
@@ -487,13 +376,11 @@ st.markdown("""
     .score-badge {display:flex;justify-content:space-around;background:rgba(0,255,157,0.1);padding:12px;border-radius:12px;margin:12px 0;}
     .score-item {text-align:center;}
     .score-value {font-size:24px;font-weight:bold;color:#00ff9d;}
-    .diagnostic-container {display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:15px 0;background:#1e293b;padding:15px;border-radius:12px;}
-    .diagnostic-item {background:#0f172a;padding:10px;border-radius:8px;}
     .stat-row {display:flex;justify-content:space-between;background:#1e293b;padding:10px 15px;border-radius:12px;margin:10px 0;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (极致版)")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (币安数据·三层松绑)")
 
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
@@ -519,7 +406,6 @@ with st.sidebar:
         st.caption("空头上限")
         sell_max = st.number_input("空头上限", 0, 100, 43, 1, label_visibility="collapsed")
     refresh_interval = st.number_input("刷新间隔(秒)", 5, 300, 60, 5)
-    
     st.caption(f"⏳ 下次刷新: {refresh_interval} 秒后")
 
     with st.expander("📊 信号分析系统", expanded=True):
@@ -539,44 +425,25 @@ with st.sidebar:
         atr_mult_tp1 = st.slider("ATR TP1倍数", 0.2, 3.0, 0.8, 0.05) if use_atr_sl else 0.8
         atr_mult_tp2 = st.slider("ATR TP2倍数", 0.5, 5.0, 1.6, 0.05) if use_atr_sl else 1.6
 
-    with st.expander("✨ 移动止损", expanded=False):
-        use_trailing = st.checkbox("启用移动止损", value=False)
-        trailing_distance = st.slider("回调距离 (%)", 0.1, 2.0, 0.3, 0.1) if use_trailing else 0.3
-
-    use_aggressive = st.checkbox("🔥 激进测试模式（降低所有门槛）", value=False)
-
     with st.expander("💰 风险仓位计算器（含分级）", expanded=True):
         account = st.number_input("账户余额 (USDT)", value=10000.0, step=100.0)
         risk_pct = st.slider("单笔风险 (%)", 0.5, 5.0, 1.0, 0.1) / 100
         
-        # 显示分级仓位建议（基于第一条pending信号的评分）
         if signal_history and signal_history[0]['result'] == 'pending':
             r = signal_history[0]
-            # 从note中提取评分
             score = None
             note = r.get('note', '')
             if '评分:' in note:
                 try:
                     score = int(note.split('评分:')[1].split()[0])
-                except:
-                    pass
+                except: pass
             if score is not None:
-                if score >= 85:
-                    level = "🔴 强信号"
-                    factor = 1.0
-                elif score >= 75:
-                    level = "🟡 普通信号"
-                    factor = 0.7
-                elif score >= 65:
-                    level = "🟢 轻仓试单"
-                    factor = 0.4
-                else:
-                    level = "⚪ 信号偏弱"
-                    factor = 0
+                if score >= 85: level, factor = "🔴 强信号", 1.0
+                elif score >= 75: level, factor = "🟡 普通信号", 0.7
+                elif score >= 65: level, factor = "🟢 轻仓试单", 0.4
+                else: level, factor = "⚪ 信号偏弱", 0
             else:
-                level = "信号（无评分）"
-                factor = 1.0
-
+                level, factor = "信号（无评分）", 1.0
             risk_points = abs(r['price'] - r['sl'])
             if risk_points > 0 and factor > 0:
                 base_qty = (account * risk_pct) / risk_points
@@ -588,7 +455,6 @@ with st.sidebar:
             st.info("无待处理信号")
 
     sound_enabled = st.checkbox("🔊 启用信号声音提醒", value=True)
-
     st.metric("📡 API 失败次数", st.session_state.api_fail_count)
 
     if st.button("立即刷新数据", width='stretch'):
@@ -599,31 +465,38 @@ with st.sidebar:
         clear_signal_history(clear_db=st.checkbox("同时清空数据库", value=False))
         st.rerun()
 
-# ---------- 数据 ----------
-candles = fetch_klines()
-if candles:
-    if not candle_buffer:
-        for c in candles: candle_buffer.append(c)
-    else:
-        for c in candles:
-            if c[0] > candle_buffer[-1][0]:
-                for mc in fill_missing_candles(candle_buffer, c):
-                    candle_buffer.append(mc)
-
-latest = fetch_latest_candle()
-if latest and (not candle_buffer or latest[0] > candle_buffer[-1][0]):
-    for mc in fill_missing_candles(candle_buffer, latest):
-        candle_buffer.append(mc)
+# ---------- 数据获取 ----------
+klines = fetch_klines()
+if klines:
+    # 更新candle_buffer
+    for k in klines:
+        st.session_state.candle_buffer.append(k)
 
 st_autorefresh(interval=refresh_interval * 1000, key="final")
+
+# 高周期趋势（仍使用CryptoCompare，也可改用币安日线数据，为保持简单，保留原函数但可替换）
+def get_higher_trend():
+    try:
+        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym=ETH&tsym=USD&limit=200"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get('Response') == 'Success':
+            closes = [d['close'] for d in result['Data']['Data']]
+            if len(closes) >= 200:
+                ema200 = pd.Series(closes).ewm(span=200).mean().iloc[-1]
+                return 'up' if closes[-1] > ema200 else 'down'
+        return 'neutral'
+    except:
+        return 'neutral'
 
 higher_trend = get_higher_trend() if use_higher_tf_filter else 'neutral'
 st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 长线: {slow_ema} | 周期: {higher_trend.upper()}")
 
-if len(candle_buffer) < 30:
-    st.warning(f"⏳ 数据积累中... {len(candle_buffer)}/30 根")
+if len(st.session_state.candle_buffer) < 30:
+    st.warning(f"⏳ 数据积累中... {len(st.session_state.candle_buffer)}/30 根")
 else:
-    df = pd.DataFrame(list(candle_buffer), columns=['ts','open','high','low','close','volume'])
+    df = pd.DataFrame(list(st.session_state.candle_buffer), columns=['ts','open','high','low','close','volume'])
     df['time'] = pd.to_datetime(df['ts'], unit='ms')
     df.set_index('time', inplace=True)
     df['ema_fast'] = calculate_ema(df['close'], fast_ema)
@@ -631,39 +504,16 @@ else:
     df['rsi'] = calculate_rsi_wilder(df['close'], rsi_period)
     df['atr'] = calculate_atr(df, 14)
 
-    slope_th = 0.00015 if use_aggressive else 0.00022
-    atr_th = 0.0008 if use_aggressive else atr_threshold
+    slope_th = 0.00015 if False else 0.00022  # 激进模式已移除
+    atr_th = atr_threshold
 
     signal = detect_signal_pro(df, fast_ema, slow_ema, rsi_period, buy_min, buy_max, sell_min, sell_max,
                                higher_trend, use_volume_filter, use_slope_filter, use_atr_filter, atr_th, slope_th,
                                use_scoring, score_threshold)
 
-    show_signal = signal
-    if not show_signal and signal_history and signal_history[0]['result'] == 'pending':
-        rec = signal_history[0]
-        show_signal = (rec['side'], rec['price'], rec['ema_fast'], rec['ema_slow'], rec['rsi'], rec['atr'])
-
-    if signal:
-        if len(signal) > 6:
-            side, price, ema_f, ema_s, rsi, atr_val, total_score, subscores = signal
-        else:
-            side, price, ema_f, ema_s, rsi, atr_val = signal
-            total_score, subscores = None, None
-
-        sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
-        signal_time_str = df.index[-1].strftime('%Y-%m-%d %H:%M')
-        if st.session_state.last_signal_time != df.index[-1]:
-            st.session_state.last_signal_time = df.index[-1]
-            add_signal_to_history(signal, sl, tp1, tp2, signal_time_str)
-            if sound_enabled:
-                st.markdown("""<script>var ctx=new(window.AudioContext||window.webkitAudioContext)();var o=ctx.createOscillator();o.type="sine";o.frequency.value=880;var g=ctx.createGain();g.gain.value=0.4;o.connect(g);g.connect(ctx.destination);o.start();setTimeout(()=>o.stop(),180);</script>""", unsafe_allow_html=True)
-
     cp = df['close'].iloc[-1]
-    if signal_history and signal_history[0]['result'] == 'pending':
-        rec = signal_history[0]
-        if (rec['side']=='BUY' and cp > rec['peak']) or (rec['side']=='SELL' and cp < rec['peak']):
-            rec['peak'] = cp
-            update_signal_in_db(rec['id'], peak=cp)
+
+    # 处理历史pending信号的止损止盈
     for i, r in enumerate(signal_history):
         if r['result'] != 'pending': continue
         if r['side'] == 'BUY':
@@ -672,11 +522,26 @@ else:
         else:
             if cp >= r['sl']: update_signal_result(i, 'loss', cp, '止损触发')
             elif cp <= r['tp2']: update_signal_result(i, 'win', cp, 'TP2触发')
-        if use_trailing:
-            flag, res, ep, reason = check_trailing_stop(r, cp, trailing_distance)
-            if flag: update_signal_result(i, res, ep, reason)
 
-    # ========== 信号卡片 ==========
+    # 新信号处理
+    show_signal = signal
+    if not show_signal and signal_history and signal_history[0]['result'] == 'pending':
+        rec = signal_history[0]
+        show_signal = (rec['side'], rec['price'], rec['ema_fast'], rec['ema_slow'], rec['rsi'], rec['atr'])
+
+    if signal and st.session_state.last_signal_time != df.index[-1]:
+        if len(signal) > 6:
+            side, price, ema_f, ema_s, rsi, atr_val, total_score, subscores = signal
+        else:
+            side, price, ema_f, ema_s, rsi, atr_val = signal
+        sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
+        signal_time_str = df.index[-1].strftime('%Y-%m-%d %H:%M')
+        st.session_state.last_signal_time = df.index[-1]
+        add_signal_to_history(signal, sl, tp1, tp2, signal_time_str)
+        if sound_enabled:
+            st.markdown("""<script>var ctx=new AudioContext();var o=ctx.createOscillator();o.type="sine";o.frequency.value=880;o.connect(ctx.destination);o.start();o.stop(0.2);</script>""", unsafe_allow_html=True)
+
+    # 显示信号卡片
     if show_signal:
         if len(show_signal) > 6:
             side, price, ema_f, ema_s, rsi, atr_val, total_score, subscores = show_signal
@@ -687,9 +552,7 @@ else:
         sl, tp1, tp2 = calculate_sltp(price, side, atr_val, use_atr_sl, atr_mult_sl, atr_mult_tp1, atr_mult_tp2)
         signal_time = df.index[-1].strftime('%Y-%m-%d %H:%M')
         risk_pts = abs(price - sl)
-        risk_pct = risk_pts / price * 100
         profit_pts = abs(tp2 - price)
-        profit_pct = profit_pts / price * 100
 
         st.markdown('<div class="signal-card">', unsafe_allow_html=True)
         if side == 'BUY':
@@ -698,16 +561,10 @@ else:
             st.markdown(f'<div class="header-red">● 空头信号 @ {signal_time}</div>', unsafe_allow_html=True)
 
         if total_score is not None:
-            # 根据总分显示级别
-            if total_score >= 85:
-                level_tag = "🔴 强信号"
-            elif total_score >= 75:
-                level_tag = "🟡 普通信号"
-            elif total_score >= 65:
-                level_tag = "🟢 轻仓试单"
-            else:
-                level_tag = "⚪ 偏弱"
-
+            if total_score >= 85: level_tag = "🔴 强信号"
+            elif total_score >= 75: level_tag = "🟡 普通信号"
+            elif total_score >= 65: level_tag = "🟢 轻仓试单"
+            else: level_tag = "⚪ 偏弱"
             st.markdown(f"""
             <div class="score-badge">
                 <div class="score-item"><span>总分</span><br><span class="score-value">{total_score}</span><br><span style="font-size:14px;">{level_tag}</span></div>
@@ -722,116 +579,78 @@ else:
         st.markdown(f'''
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;">
             <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:12px;text-align:center;"><div style="color:#ff4d4d;font-size:15px;">进场价格</div><div style="font-size:29px;font-weight:700;">{price:.2f}</div></div>
-            <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:12px;text-align:center;"><div style="color:#ff99cc;font-size:15px;">止损</div><div style="font-size:29px;font-weight:700;color:#ff99cc;">{sl:.2f}</div><div style="font-size:13px;color:#ff99cc;">风险 {risk_pts:.2f}点 ({risk_pct:.2f}%)</div></div>
+            <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:12px;text-align:center;"><div style="color:#ff99cc;font-size:15px;">止损</div><div style="font-size:29px;font-weight:700;color:#ff99cc;">{sl:.2f}</div><div style="font-size:13px;color:#ff99cc;">风险 {risk_pts:.2f}点</div></div>
             <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:12px;text-align:center;"><div style="color:#ff99cc;font-size:15px;">TP1</div><div style="font-size:29px;font-weight:700;color:#ff99cc;">{tp1:.2f}</div></div>
-            <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:12px;text-align:center;border:1px solid #4a90ff;"><div style="color:#4a90ff;font-size:15px;">ATR</div><div style="font-size:29px;font-weight:700;color:#4a90ff;">{atr_val:.2f if atr_val else "N/A"}</div></div>
+            <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:12px;text-align:center;border:1px solid #4a90ff;"><div style="color:#4a90ff;font-size:15px;">ATR</div><div style="font-size:29px;font-weight:700;color:#4a90ff;">{atr_val:.2f}</div></div>
         </div>
         ''', unsafe_allow_html=True)
 
-        st.markdown(f'''
-        <div class="tp2-container">
-            <div style="font-size:48px;font-weight:900;background:linear-gradient(90deg,#ffe066,#ffd700,#ffeb3b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">{tp2:.2f}</div>
-            <div style="margin-top:8px;color:#a0ff9d;font-size:18px;">RR <strong>2:1</strong> +{profit_pts:.2f}点 (+{profit_pct:.1f}%)</div>
-        </div>
-        ''', unsafe_allow_html=True)
-
-        st.markdown(f'''
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
-            <div style="background:rgba(30,58,95,0.65);padding:14px;border-radius:12px;text-align:center;"><div>EMA快线</div><div style="font-size:23px;color:#ffa500;">{ema_f:.2f}</div></div>
-            <div style="background:rgba(30,58,95,0.65);padding:14px;border-radius:12px;text-align:center;"><div>EMA慢线</div><div style="font-size:23px;color:#4a90ff;">{ema_s:.2f}</div></div>
-            <div style="background:rgba(30,58,95,0.65);padding:14px;border-radius:12px;text-align:center;"><div>RSI</div><div style="font-size:23px;color:#00ff9d;">{rsi:.1f}</div></div>
-            <div style="background:rgba(30,58,95,0.65);padding:14px;border-radius:12px;text-align:center;"><div>当前价</div><div style="font-size:23px;color:#ffffff;">{cp:.2f}</div></div>
-        </div>
-        ''', unsafe_allow_html=True)
-
-        signal_text = f"🟢 多头 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f}" if side=='BUY' else f"🔴 空头 @ {signal_time} 进场{price:.2f} SL{sl:.2f} TP1{tp1:.2f} TP2{tp2:.2f}"
-        if st.button("📋 一键复制交易信号", width='stretch'):
-            st.markdown(f'<script>navigator.clipboard.writeText(`{signal_text}`);</script>', unsafe_allow_html=True)
-            st.success("✅ 已复制！")
+        st.markdown(f'<div class="tp2-container"><div style="font-size:48px;font-weight:900;">{tp2:.2f}</div><div>RR 目标</div></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
-
     else:
-        st.markdown('<div class="waiting-card">⏳ 等待新信号出现...<br><span style="font-size:16px;">系统正在实时扫描 5分钟K线</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="waiting-card">⏳ 等待新信号出现...</div>', unsafe_allow_html=True)
 
-    # ========== 图表 (占满宽度) ==========
+    # 图表
     plot_df = df.tail(200)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.72, 0.28])
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3])
     fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['open'], high=plot_df['high'], low=plot_df['low'], close=plot_df['close'], name='K线', increasing_line_color='#00ff9d', decreasing_line_color='#ff4d4d'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA快线 ({fast_ema})', line=dict(color='#ffd700', width=3.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA慢线 ({slow_ema})', line=dict(color='#4da9ff', width=3.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA{fast_ema}', line=dict(color='#ffd700')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA{slow_ema}', line=dict(color='#4da9ff')), row=1, col=1)
     colors = np.where(plot_df['close'] >= plot_df['open'], '#00ff9d', '#ff4d4d')
-    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], marker_color=colors, opacity=0.85, showlegend=False), row=2, col=1)
-    fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", annotation_text=f"当前价 {cp:.2f}", annotation_position="top right", row=1, col=1)
-    fig.update_layout(height=680, template="plotly_dark", plot_bgcolor="#0e1621", paper_bgcolor="#0e1621", legend=dict(orientation="h", y=1.02))
+    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], marker_color=colors, showlegend=False), row=2, col=1)
+    fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", annotation_text=f"{cp:.2f}", row=1, col=1)
+    fig.update_layout(height=600, template="plotly_dark", showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ========== 当前市场诊断 ==========
-    with st.expander("🔍 当前市场诊断 (为什么还没出货信号)", expanded=True):
-        if not df.empty:
-            last = df.iloc[-1]
-            ema_spread_pct = abs(last['ema_fast'] - last['ema_slow']) / last['close'] * 100
-            slope_val = (last['ema_fast'] - df['ema_fast'].iloc[-5]) / 5 / last['close'] if len(df) >=5 else 0
-            range_pct = (df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()) / last['close'] * 100
-            avg_vol = df['volume'].rolling(20).mean().iloc[-1]
-            vol_ratio = last['volume'] / avg_vol if avg_vol > 0 else 0.0
+    # 市场诊断
+    with st.expander("🔍 当前市场诊断", expanded=True):
+        last = df.iloc[-1]
+        ema_spread = abs(last['ema_fast']-last['ema_slow'])/last['close']*100
+        slope_val = (last['ema_fast']-df['ema_fast'].iloc[-5])/5/last['close'] if len(df)>=5 else 0
+        range_pct = (df['high'].iloc[-20:].max()-df['low'].iloc[-20:].min())/last['close']*100
+        avg_vol = df['volume'].rolling(20).mean().iloc[-1]
+        vol_ratio = last['volume']/avg_vol if avg_vol>0 else 0
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**EMA扩散度** {ema_spread:.3f}% {'✅' if ema_spread>=0.1 else '❌'}")
+            st.markdown(f"**EMA斜率** {slope_val:.5f} {'✅' if abs(slope_val)>=0.00022 else '❌'}")
+        with col2:
+            st.markdown(f"**20根波动率** {range_pct:.2f}% {'✅' if range_pct>=0.3 else '❌'}")
+            st.markdown(f"**成交量倍数** {vol_ratio:.2f}x {'✅' if vol_ratio>1.3 else '⏳'}")
 
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                st.markdown(f"**EMA扩散度**  {ema_spread_pct:.3f}%  {'✅' if ema_spread_pct>=0.1 else '❌'} {'达标' if ema_spread_pct>=0.1 else '未达标'}")
-                st.markdown(f"**EMA斜率**  {slope_val:.5f}  {'✅' if abs(slope_val)>=slope_th else '❌'} {'达标' if abs(slope_val)>=slope_th else '未达标'}")
-            with col_d2:
-                st.markdown(f"**20根波动率**  {range_pct:.2f}%  {'✅' if range_pct>=0.3 else '❌'} {'达标' if range_pct>=0.3 else '未达标'}")
-                vol_status = "爆发" if vol_ratio>1.3 else "等待"
-                st.markdown(f"**成交量倍数**  {vol_ratio:.2f}x {vol_ratio:.2f}倍  {'✅' if vol_ratio>1.3 else '⏳'} {vol_status}")
-
-    # ========== 价格与统计 (安全处理24h变化) ==========
+    # 价格统计
     if len(df) >= 288:
         change_24h = cp - df['close'].iloc[-288]
-        change_pct_24h = change_24h / df['close'].iloc[-288] * 100
-        change_display = f"{change_24h:+.2f} ({change_pct_24h:+.2f}%)"
-        color = '#00ff9d' if change_24h >= 0 else '#ff4d4d'
+        change_pct = change_24h / df['close'].iloc[-288] * 100
+        change_display = f"{change_24h:+.2f} ({change_pct:+.2f}%)"
+        color = '#00ff9d' if change_24h>=0 else '#ff4d4d'
     else:
-        change_display = "N/A"
-        color = '#888'
+        change_display, color = "N/A", "#888"
 
     st.markdown(f"""
     <div class="stat-row">
-        <span style="font-size:28px; font-weight:bold;">{cp:.2f}</span>
+        <span style="font-size:28px;">{cp:.2f}</span>
         <span>24h涨跌: <span style="color:{color}">{change_display}</span></span>
-        <span>总盈亏: {st.session_state.signal_stats['win'] - st.session_state.signal_stats['loss']}</span>
         <span>盈利: {st.session_state.signal_stats['win']}</span>
         <span>亏损: {st.session_state.signal_stats['loss']}</span>
         <span>胜率: {st.session_state.signal_stats['win_rate']}%</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # ========== 最近K线表格 ==========
-    st.subheader("最近 10 根K线")
+    # 最近K线表格
+    st.subheader("最近10根K线")
     display_df = df.reset_index()[['time','open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10)
     display_df['time'] = display_df['time'].dt.strftime('%Y-%m-%d %H:%M')
-    display_df = display_df.rename(columns={'time':'时间','open':'开盘','high':'最高','low':'最低','close':'收盘','volume':'成交量','ema_fast':'EMA快线','ema_slow':'EMA慢线','rsi':'RSI','atr':'ATR'})
+    display_df.columns = ['时间','开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
     st.dataframe(display_df.round(2), use_container_width=True, hide_index=True)
 
-    # ========== 历史信号记录 ==========
-    st.subheader("📜 历史信号记录")
+    # 历史信号记录
+    st.subheader("📜 历史信号")
     if signal_history:
-        hist_data = []
-        for s in list(signal_history)[:50]:
-            res_emoji = "✅ 赢" if s['result']=='win' else "❌ 亏" if s['result']=='loss' else "⏹️ 退" if s['result']=='exit' else "⏳ 待"
-            hist_data.append({
-                "记录时间": s['record_time'], "信号时间": s['signal_time'],
-                "方向": "🟢 多头" if s['side']=='BUY' else "🔴 空头",
-                "进场价": f"{s['price']:.2f}", "止损": f"{s['sl']:.2f}",
-                "TP1": f"{s['tp1']:.2f}", "TP2": f"{s['tp2']:.2f}",
-                "结果": res_emoji,
-                "出场价": f"{s.get('exit_price','—'):.2f}" if s.get('exit_price') else "—",
-                "出场原因": s.get('exit_reason','—'),
-                "备注": s.get('note','')
-            })
-        hist_df = pd.DataFrame(hist_data)
-        st.dataframe(hist_df, use_container_width=True, height=400)
-        csv = hist_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
+        hist_df = pd.DataFrame(list(signal_history)[:50])
+        st.dataframe(hist_df[['signal_time','side','price','result','exit_price','exit_reason','note']], use_container_width=True, height=400)
+        csv = hist_df.to_csv(index=False).encode()
+        st.download_button("导出CSV", csv, "signals.csv")
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.26 • 三层松绑法 • 分级仓位 • 祝你交易顺利！💰🚀")
+st.caption("🔥 策略基于币安实时数据 · 请确保API仅开启读取权限 · 已暴露的密钥请立即删除")
