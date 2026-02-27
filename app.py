@@ -7,7 +7,6 @@ from datetime import datetime
 from collections import deque
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from streamlit_autorefresh import st_autorefresh
 
 # ---------- 配置 ----------
 SYMBOL = "ETH"
@@ -164,7 +163,7 @@ with st.sidebar:
         sell_min = st.number_input("空头下限", 0, 100, 30, key='smin')
         sell_max = st.number_input("空头上限", 0, 100, 43, key='smax')
     refresh = st.number_input("刷新秒数", 5, 300, 30)
-    st.caption(f"⏳ 下次刷新: {refresh}秒后")
+    st.caption(f"⏳ 下次刷新: {refresh}秒后 (手动)")
 
     use_score = st.checkbox("启用评分系统", True)
     score_thresh = st.slider("评分阈值", 0, 100, 70, disabled=not use_score)
@@ -175,8 +174,11 @@ with st.sidebar:
         tp2_m = st.slider("TP2倍数", 0.5, 5.0, 1.6, 0.1)
 
     st.metric("📡 API失败", st.session_state.api_fail)
-    if st.button("🗑 清空历史"):
-        st.session_state.history.clear()
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        st.button("🗑 清空历史", on_click=lambda: st.session_state.history.clear())
+    with col_btn2:
+        st.button("🔄 立即刷新", on_click=lambda: st.rerun())
 
 # ---------- 数据加载 ----------
 klines = fetch_klines()
@@ -194,7 +196,8 @@ if latest and (not st.session_state.candles or latest[0] > st.session_state.cand
     for m in fill_missing(st.session_state.candles, latest):
         st.session_state.candles.append(m)
 
-st_autorefresh(interval=refresh*1000, key='auto')
+# 已删除自动刷新，改为手动刷新按钮
+
 st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线: {len(st.session_state.candles)}")
 
 if len(st.session_state.candles) < 30:
@@ -387,7 +390,6 @@ else:
     if st.session_state.history:
         st.subheader("📜 最近信号")
         hist = pd.DataFrame(list(st.session_state.history)[:5])
-        # 修正列名：exit_reason 而不是 exit_region
         hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
         st.dataframe(hist_display, use_container_width=True)
@@ -395,4 +397,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 终极版 v2.2 • 修复历史信号列名错误 • 祝你交易顺利！💰")
+st.caption("🔥 终极版 v2.3 • 手动刷新替代自动刷新 • 祝你交易顺利！💰")
