@@ -1,63 +1,104 @@
-# ==================== 1. 计算器核心逻辑 ====================
-def calculate_position_size(account_balance, risk_pct, entry_price, stop_loss):
-    """
-    根据风险百分比计算头寸大小
-    """
-    if entry_price == stop_loss: return 0, 0, 0
-    
-    # 每笔风险金额 (Risk Per Trade)
-    risk_amount = account_balance * (risk_pct / 100)
-    # 点位风险距离
-    risk_per_eth = abs(entry_price - stop_loss)
-    # 应开仓数量 (ETH)
-    pos_size = risk_amount / risk_per_eth
-    # 名义价值
-    notional_value = pos_size * entry_price
-    # 杠杆倍数参考 (假设账户全额作为保证金)
-    leverage = notional_value / account_balance
-    
-    return pos_size, risk_amount, leverage
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime
 
-# ==================== 2. UI 渲染：交互式风控侧边栏 ====================
-with st.sidebar:
-    st.header("🧮 盈亏比与仓位助手")
+# ==================== 1. 配置与数据引擎 ====================
+st.set_page_config(page_title="ETH V55.0 终极统一指挥部", layout="wide")
+
+def fetch_okx(endpoint, params=""):
+    url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
+    try:
+        with requests.Session() as s:
+            s.trust_env = True # 穿透 LetsVPN
+            return s.get(url, timeout=5).json()
+    except: return None
+
+# ==================== 2. AI 行情自动分类算法 ====================
+def get_market_context(df):
+    # 计算 ATR (波动率)
+    tr = pd.concat([df['h']-df['l'], (df['h']-df['c'].shift()).abs(), (df['l']-df['c'].shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(12).mean().iloc[-1]
     
-    with st.form("calc_form"):
-        acc_bal = st.number_input("账户总余额 ($)", value=1000.0, step=100.0)
-        risk_p = st.slider("每笔愿意亏损总资金的 (%)", 0.5, 5.0, 1.0, 0.5)
-        
+    # 判定模式
+    if atr < 8.5: # 针对 1920 横盘的阈值
+        return "🌀 震荡模式", "低波动，建议高抛低吸", 1.6
+    else:
+        return "📊 趋势模式", "动能爆发，建议顺势而为", 3.0
+
+# ==================== 3. 核心计算层 ====================
+def process_signals(k_data, d_raw, mode_factor):
+    df = pd.DataFrame(k_data['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
+    df[['o','h','l','c','v']] = df[['o','h','l','c','v']].astype(float)
+    df = df[::-1].reset_index(drop=True)
+    df['ema21'] = df['c'].ewm(span=21).mean()
+    
+    # 动态支撑压力
+    asks = pd.DataFrame(d_raw['data'][0]['asks']).iloc[:, :2].astype(float)
+    bids = pd.DataFrame(d_raw['data'][0]['bids']).iloc[:, :2].astype(float)
+    
+    res = asks[asks[1] > asks[1].mean() * mode_factor].iloc[0, 0] if not asks.empty else None
+    sup = bids[bids[1] > bids[1].mean() * mode_factor].iloc[0, 0] if not bids.empty else None
+    
+    # 净流入
+    t_raw = fetch_okx("market/trades", "&limit=100")
+    if t_raw:
+        tdf = pd.DataFrame(t_raw['data'])
+        tdf['sz'] = tdf['sz'].astype(float)
+        net_flow = tdf[tdf['side']=='buy']['sz'].sum() - tdf[tdf['side']=='sell']['sz'].sum()
+    else: net_flow = 0
+    
+    return df, res, sup, net_flow, asks[1].sum(), bids[1].sum()
+
+# ==================== 4. UI 渲染层 ====================
+# 获取原始数据
+k_raw = fetch_okx("market/candles", "&bar=5m&limit=100")
+d_raw = fetch_okx("market/books", "&sz=20")
+
+if k_raw and d_raw:
+    # A. 预处理判断行情
+    temp_df = pd.DataFrame(k_raw['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm']).astype({'h':float,'l':float,'c':float})
+    suggested_mode, reason, m_factor = get_market_context(temp_df[::-1])
+    
+    # B. 侧边栏控制
+    with st.sidebar:
+        st.header("🧠 自动识别系统")
+        st.info(f"**建议模式:** {suggested_mode}\n\n{reason}")
+        use_auto = st.checkbox("跟随 AI 建议", value=True)
+        final_mode = suggested_mode if use_auto else st.radio("手动模式", ["🌀 震荡模式", "📊 趋势模式"])
+        final_factor = 1.6 if "震荡" in final_mode else 3.0
+
         st.divider()
-        # 默认从拦截位或现价填入
-        entry_p = st.number_input("拟买入位", value=curr_p)
-        sl_p = st.number_input("拟止损位", value=levels["support"] if levels["support"] else curr_p * 0.99)
-        tp_p = st.number_input("拟止盈位", value=levels["resistance"] if levels["resistance"] else curr_p * 1.02)
-        
-        submitted = st.form_submit_button("🔥 计算执行方案")
+        st.header("🧮 仓位计算器")
+        bal = st.number_input("余额", 1000.0)
+        risk = st.slider("风险 %", 0.5, 5.0, 1.0)
 
-    if submitted:
-        # 计算盈亏比
-        reward = abs(tp_p - entry_p)
-        risk = abs(entry_p - sl_p)
-        rr_ratio = reward / risk if risk > 0 else 0
-        
-        pos_size, r_amt, lev = calculate_position_size(acc_bal, risk_p, entry_p, sl_p)
-        
-        # 结果展示
-        st.subheader("📊 执行建议")
-        if rr_ratio < 1.5:
-            st.error(f"盈亏比太低: {rr_ratio:.2f} (不值得博)")
-        elif rr_ratio >= 3.0:
-            st.success(f"极佳盈亏比: {rr_ratio:.2f}")
-        else:
-            st.warning(f"中等盈亏比: {rr_ratio:.2f}")
-            
-        st.write(f"🔹 **风险金额**: ${r_amt:.2f}")
-        st.write(f"🔹 **建议开仓**: {pos_size:.3f} ETH")
-        st.write(f"🔹 **参考杠杆**: {lev:.2f} x")
-        
-        # 存入执行笔记
-        if st.button("📝 将此方案写入快照"):
-            st.session_state.saved_notes.insert(0, {
-                'time': datetime.now().strftime("%H:%M:%S"),
-                'note': f"计划：在{entry_p}入场，RR比{rr_ratio:.2f}，仓位{pos_size:.3f}ETH"
-            })
+    # C. 计算最终指标
+    df, res, sup, net_flow, ask_v, bid_v = process_signals(k_raw, d_raw, final_factor)
+    curr_p = df.iloc[-1]['c']
+    
+    # D. 顶部看板
+    st.title(f"🛡️ ETH V55.0 {final_mode} 终端")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("现价", f"${curr_p}")
+    c2.metric("1min 净流入", f"{net_flow:+.2f} ETH")
+    c3.metric("买压占比", f"{(bid_v/(ask_v+bid_v)*100):.1f}%")
+    
+    # 实时动能条
+    momentum = np.clip((net_flow + 50) / 100, 0.0, 1.0)
+    c4.write("🚀 突破动能")
+    c4.progress(momentum)
+
+    # E. 图表渲染
+    fig = make_subplots(rows=1, cols=1)
+    fig.add_trace(go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="K线"))
+    if res: fig.add_hline(y=res, line_dash="dash", line_color="red", annotation_text="拦截压力")
+    if sup: fig.add_hline(y=sup, line_dash="dash", line_color="green", annotation_text="支撑防御")
+    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.error("数据引擎连接失败，请检查 LetsVPN...")
