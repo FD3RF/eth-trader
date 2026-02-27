@@ -156,7 +156,7 @@ def fetch_klines():
             converted = []
             for item in data:
                 # OKX 返回格式: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
-                # 我们只需要前6个字段
+                # 前6个字段: 时间戳(毫秒), 开, 高, 低, 收, 成交量(币)
                 converted.append([
                     int(item[0]),           # 时间戳(毫秒)
                     float(item[1]),          # 开盘价
@@ -619,6 +619,13 @@ candles = fetch_klines()
 if candles:
     # 检查获取的数据是否有效（至少有一根K线且价格合理）
     if len(candles) > 0 and candles[0][1] > 0:  # 开盘价>0
+        # 数据新鲜度检查：最新K线时间戳与当前时间比较
+        latest_ts = candles[-1][0]
+        now_ts = int(time.time() * 1000)
+        expected_ts = now_ts - (now_ts % (INTERVAL_MINUTES*60*1000))  # 当前周期起始时间
+        if latest_ts < expected_ts - INTERVAL_MINUTES*60*1000:
+            st.warning("数据可能延迟，最新K线时间戳落后超过一个周期")
+
         if not candle_buffer:
             for c in candles: candle_buffer.append(c)
         else:
