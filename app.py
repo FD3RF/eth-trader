@@ -13,20 +13,22 @@ INTERVAL = "5"
 LIMIT = 200
 INTERVAL_MINUTES = 5
 
-# ---------- Session State 初始化（彻底解决 Warning） ----------
-for key, default in {
-    'history': deque(maxlen=200),
-    'candles': deque(maxlen=500),
-    'last_signal_time': None,
-    'api_fail': 0,
-    'last_error': "",
-    'fast': 8, 'slow': 21, 'rsi_period': 14,
-    'buy_min': 57, 'buy_max': 70, 'sell_min': 30, 'sell_max': 43,
-    'refresh': 30, 'use_score': True, 'score_thresh': 70,
-    'use_atr_sl': True, 'sl_m': 2.2, 'tp1_m': 0.8, 'tp2_m': 1.6
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
+# ---------- Session State 初始化（彻底零警告） ----------
+if 'initialized' not in st.session_state:
+    defaults = {
+        'fast': 8, 'slow': 21, 'rsi_period': 14,
+        'buy_min': 57, 'buy_max': 70, 'sell_min': 30, 'sell_max': 43,
+        'refresh': 30, 'use_score': True, 'score_thresh': 70,
+        'use_atr_sl': True, 'sl_m': 2.2, 'tp1_m': 0.8, 'tp2_m': 1.6
+    }
+    for k, v in defaults.items():
+        st.session_state[k] = v
+    st.session_state.history = deque(maxlen=200)
+    st.session_state.candles = deque(maxlen=500)
+    st.session_state.last_signal_time = None
+    st.session_state.api_fail = 0
+    st.session_state.last_error = ""
+    st.session_state.initialized = True
 
 # ---------- 数据获取 ----------
 @st.cache_data(ttl=10, show_spinner=False)
@@ -440,4 +442,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 顶级完美终极版 v5.1 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
+st.caption("🔥 顶级完美终极版 v6.0 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
