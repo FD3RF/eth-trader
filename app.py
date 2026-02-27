@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import time
 from datetime import datetime, timedelta
 from collections import deque
@@ -10,7 +9,9 @@ from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 import sqlite3
 import re
-import random
+import threading
+import websocket
+import json
 
 # ---------- 配置 ----------
 SYMBOL = "ETH"
@@ -20,6 +21,7 @@ LIMIT = 200
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 DB_FILE = "signals.db"
 INTERVAL_MINUTES = 5                # 必须与INTERVAL一致（单位分钟）
+OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 
 # ---------- SQLite ----------
 def get_db_conn():
@@ -130,80 +132,46 @@ if 'candle_buffer' not in st.session_state: st.session_state.candle_buffer = deq
 if 'signal_stats' not in st.session_state: st.session_state.signal_stats = {'total':0,'win':0,'loss':0,'exit':0,'pending':0,'win_rate':0}
 if 'last_signal_time' not in st.session_state: st.session_state.last_signal_time = None
 if 'last_refresh_time' not in st.session_state: st.session_state.last_refresh_time = time.time()
+if 'ws_connected' not in st.session_state: st.session_state.ws_connected = False
+if 'ws_data_queue' not in st.session_state: st.session_state.ws_data_queue = deque()
 
-# ---------- 数据获取 (OKX) ----------
-@st.cache_data(ttl=45, show_spinner=False)
-def fetch_klines_cached():
-    return fetch_klines_with_retry()
+# ---------- WebSocket 实时 K线 ----------
+def on_ws_message(ws, message):
+    data = json.loads(message)
+    if 'data' in data:
+        for candle in data['data']:
+            ts = int(candle[0])
+            o, h, l, c, v = map(float, candle[1:6])
+            st.session_state.ws_data_queue.append([ts, o, h, l, c, v])
 
-def fetch_klines_with_retry(max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            url = "https://www.okx.com/api/v5/market/candles"
-            params = {
-                'instId': 'ETH-USDT',
-                'bar': '5m',
-                'limit': LIMIT
-            }
-            resp = requests.get(url, params=params, timeout=10)
-            resp.raise_for_status()
-            result = resp.json()
-            
-            if result.get('code') == '0':
-                data = result.get('data', [])
-                if not data:
-                    st.warning("OKX 返回空数据")
-                    return []
-                
-                converted = []
-                for item in data:
-                    converted.append([
-                        int(item[0]),
-                        float(item[1]),
-                        float(item[2]),
-                        float(item[3]),
-                        float(item[4]),
-                        float(item[5])
-                    ])
-                return converted
-            else:
-                st.warning(f"OKX API 返回错误: {result.get('msg')} (code: {result.get('code')})")
-                return []
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code in (429, 50011):
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                time.sleep(wait)
-                st.warning(f"OKX 限流，等待 {wait:.1f} 秒重试 ({attempt+1}/{max_retries})")
-                continue
-            raise
-        except Exception as e:
-            st.session_state.api_fail_count += 1
-            st.error(f"获取 OKX K线失败: {e}")
-            return []
-    st.error("达到最大重试次数，API 持续限流")
-    return []
+def on_ws_open(ws):
+    ws.send(json.dumps({
+        "op": "subscribe",
+        "args": [{"channel": "candle5M", "instId": "ETH-USDT"}]
+    }))
+    st.session_state.ws_connected = True
 
-@st.cache_data(ttl=20, show_spinner=False)
-def fetch_latest_candle_cached():
-    return fetch_latest_candle()
+def on_ws_error(ws, error):
+    st.error(f"WebSocket 错误: {error}")
+    st.session_state.ws_connected = False
 
-def fetch_latest_candle():
-    try:
-        url = "https://www.okx.com/api/v5/market/candles"
-        params = {
-            'instId': 'ETH-USDT',
-            'bar': '5m',
-            'limit': 1
-        }
-        resp = requests.get(url, params=params, timeout=5)
-        resp.raise_for_status()
-        result = resp.json()
-        if result.get('code') == '0':
-            item = result['data'][0]
-            return [int(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4]), float(item[5])]
-        return None
-    except:
-        return None
+def on_ws_close(ws, close_status_code, close_msg):
+    st.warning("WebSocket 关闭，尝试重连...")
+    st.session_state.ws_connected = False
+
+def ws_thread():
+    ws = websocket.WebSocketApp(
+        OKX_WS_URL,
+        on_open=on_ws_open,
+        on_message=on_ws_message,
+        on_error=on_ws_error,
+        on_close=on_ws_close
+    )
+    ws.run_forever(ping_interval=30, ping_timeout=5)
+
+# 启动 WebSocket 线程（如果未连接）
+if not st.session_state.ws_connected:
+    threading.Thread(target=ws_thread, daemon=True).start()
 
 # ---------- 高周期趋势 (使用 CryptoCompare) ----------
 @st.cache_data(ttl=60, show_spinner=False)
@@ -638,35 +606,15 @@ with st.sidebar:
         clear_signal_history(clear_db=st.checkbox("同时清空数据库", value=False))
         st.rerun()
 
-# ---------- 数据 ----------
-candles = fetch_klines_cached()
-if candles:
-    # 检查获取的数据是否有效（至少有一根K线且价格合理）
-    if len(candles) > 0 and candles[0][1] > 0:  # 开盘价>0
-        # 数据新鲜度检查：最新K线时间戳与当前时间比较
-        latest_ts = candles[-1][0]
-        now_ts = int(time.time() * 1000)
-        expected_ts = now_ts - (now_ts % (INTERVAL_MINUTES*60*1000))  # 当前周期起始时间
-        if latest_ts < expected_ts - INTERVAL_MINUTES*60*1000:
-            st.warning("数据可能延迟，最新K线时间戳落后超过一个周期")
-
-        if not candle_buffer:
-            for c in candles: candle_buffer.append(c)
-        else:
-            for c in candles:
-                if c[0] > candle_buffer[-1][0]:
-                    for mc in fill_missing_candles(candle_buffer, c):
-                        candle_buffer.append(mc)
-    else:
-        st.warning("获取到的K线数据无效，请检查网络或API")
-else:
-    st.warning("无法获取K线数据，请稍后重试")
-
-latest = fetch_latest_candle_cached()
-if latest and latest[1] > 0:
-    if not candle_buffer or latest[0] > candle_buffer[-1][0]:
-        for mc in fill_missing_candles(candle_buffer, latest):
+# ---------- 处理 WebSocket 数据 ----------
+while st.session_state.ws_data_queue:
+    new_candle = st.session_state.ws_data_queue.popleft()
+    if not candle_buffer or new_candle[0] > candle_buffer[-1][0]:
+        for mc in fill_missing_candles(candle_buffer, new_candle):
             candle_buffer.append(mc)
+    else:
+        # 更新当前 K 线
+        candle_buffer[-1] = new_candle
 
 st_autorefresh(interval=refresh_interval * 1000, key="final")
 
@@ -886,4 +834,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.27 • OKX真实数据 • 三层松绑法 • 分级仓位 • 祝你交易顺利！💰🚀")
+st.caption("🔥 极致版 v2026.02.27 • OKX实时数据 (WebSocket) • 三层松绑法 • 分级仓位 • 祝你交易顺利！💰🚀")
