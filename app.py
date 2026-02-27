@@ -164,26 +164,28 @@ def fill_missing(buf, new):
 
 # ---------- 重置默认参数 ----------
 def reset_defaults():
-    st.session_state.fast = 8
-    st.session_state.slow = 21
-    st.session_state.rsi_period = 14
-    st.session_state.buy_min = 57
-    st.session_state.buy_max = 70
-    st.session_state.sell_min = 30
-    st.session_state.sell_max = 43
-    st.session_state.refresh = 30
-    st.session_state.use_score = True
-    st.session_state.score_thresh = 70
-    st.session_state.use_atr_sl = True
-    st.session_state.sl_m = 2.2
-    st.session_state.tp1_m = 0.8
-    st.session_state.tp2_m = 1.6
+    st.session_state['fast'] = 8
+    st.session_state['slow'] = 21
+    st.session_state['rsi_period'] = 14
+    st.session_state['buy_min'] = 57
+    st.session_state['buy_max'] = 70
+    st.session_state['sell_min'] = 30
+    st.session_state['sell_max'] = 43
+    st.session_state['refresh'] = 30
+    st.session_state['use_score'] = True
+    st.session_state['score_thresh'] = 70
+    st.session_state['use_atr_sl'] = True
+    st.session_state['sl_m'] = 2.2
+    st.session_state['tp1_m'] = 0.8
+    st.session_state['tp2_m'] = 1.6
+    st.rerun()
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="ETH 5分钟终极版", layout="wide")
 st.markdown("""
 <style>
     .stApp { background: #0a0e17; }
+    .stApp .block-container { max-width: 100% !important; padding: 1rem 2rem; }
     .signal-card {
         background: linear-gradient(135deg, #0f2a1f, #0a1f33);
         border: 2px solid #00ff9d;
@@ -246,28 +248,28 @@ with st.sidebar:
     # 使用 session_state 存储参数，便于重置
     if 'fast' not in st.session_state:
         reset_defaults()
-    fast = st.number_input("快线EMA", 1, 50, st.session_state.fast, key='fast')
-    slow = st.number_input("慢线EMA", 2, 100, st.session_state.slow, key='slow')
-    rsi_period = st.number_input("RSI周期", 2, 50, st.session_state.rsi_period, key='rsi_period')
+    fast = st.number_input("快线EMA", 1, 50, value=st.session_state.get('fast', 8), key='fast')
+    slow = st.number_input("慢线EMA", 2, 100, value=st.session_state.get('slow', 21), key='slow')
+    rsi_period = st.number_input("RSI周期", 2, 50, value=st.session_state.get('rsi_period', 14), key='rsi_period')
     col1, col2 = st.columns(2)
     with col1:
         st.caption("多头RSI")
-        buy_min = st.number_input("多头下限", 0, 100, st.session_state.buy_min, key='buy_min')
-        buy_max = st.number_input("多头上限", 0, 100, st.session_state.buy_max, key='buy_max')
+        buy_min = st.number_input("多头下限", 0, 100, value=st.session_state.get('buy_min', 57), key='buy_min')
+        buy_max = st.number_input("多头上限", 0, 100, value=st.session_state.get('buy_max', 70), key='buy_max')
     with col2:
         st.caption("空头RSI")
-        sell_min = st.number_input("空头下限", 0, 100, st.session_state.sell_min, key='sell_min')
-        sell_max = st.number_input("空头上限", 0, 100, st.session_state.sell_max, key='sell_max')
-    refresh = st.number_input("刷新秒数", 5, 300, st.session_state.refresh, key='refresh')
+        sell_min = st.number_input("空头下限", 0, 100, value=st.session_state.get('sell_min', 30), key='sell_min')
+        sell_max = st.number_input("空头上限", 0, 100, value=st.session_state.get('sell_max', 43), key='sell_max')
+    refresh = st.number_input("刷新秒数", 5, 300, value=st.session_state.get('refresh', 30), key='refresh')
     st.caption(f"⏳ 下次刷新: {refresh}秒后 (手动)")
 
-    use_score = st.checkbox("启用评分系统", value=st.session_state.use_score, key='use_score')
-    score_thresh = st.slider("评分阈值", 0, 100, st.session_state.score_thresh, disabled=not use_score, key='score_thresh')
-    use_atr_sl = st.checkbox("ATR动态止损", value=st.session_state.use_atr_sl, key='use_atr_sl')
+    use_score = st.checkbox("启用评分系统", value=st.session_state.get('use_score', True), key='use_score')
+    score_thresh = st.slider("评分阈值", 0, 100, value=st.session_state.get('score_thresh', 70), disabled=not use_score, key='score_thresh')
+    use_atr_sl = st.checkbox("ATR动态止损", value=st.session_state.get('use_atr_sl', True), key='use_atr_sl')
     if use_atr_sl:
-        sl_m = st.slider("止损倍数", 1.0, 5.0, st.session_state.sl_m, 0.1, key='sl_m')
-        tp1_m = st.slider("TP1倍数", 0.2, 3.0, st.session_state.tp1_m, 0.1, key='tp1_m')
-        tp2_m = st.slider("TP2倍数", 0.5, 5.0, st.session_state.tp2_m, 0.1, key='tp2_m')
+        sl_m = st.slider("止损倍数", 1.0, 5.0, value=st.session_state.get('sl_m', 2.2), step=0.1, key='sl_m')
+        tp1_m = st.slider("TP1倍数", 0.2, 3.0, value=st.session_state.get('tp1_m', 0.8), step=0.1, key='tp1_m')
+        tp2_m = st.slider("TP2倍数", 0.5, 5.0, value=st.session_state.get('tp2_m', 1.6), step=0.1, key='tp2_m')
     else:
         sl_m = tp1_m = tp2_m = None
 
@@ -301,7 +303,6 @@ with st.sidebar:
     with col_btn3:
         if st.button("⚙️ 重置默认"):
             reset_defaults()
-            st.rerun()
 
 # ---------- 数据加载 ----------
 # 使用缓存版本获取K线，手动刷新时会清除缓存
@@ -484,10 +485,12 @@ else:
         total_score, _ = get_score(side_guess, df)
         st.markdown(f"""
         <div class="waiting-card">
-            <h3 style="color:#4da9ff; margin-bottom: 12px;">等待下一个高质量信号...</h3>
-            <div style="font-size:1.2rem; color:#ccd6e0;">
-                目前趋势：{trend}<br>
-                综合评分：{total_score}/100 （阈值 {score_thresh if use_score else 'N/A'}）
+            <h3 style="color:#4da9ff; margin:0 0 16px 0; font-size:1.6rem;">
+                等待下一個高質量信號...
+            </h3>
+            <div style="font-size:1.15rem; line-height:1.6;">
+                <strong>當前趨勢：</strong> {trend}<br>
+                <strong>綜合評分：</strong> {total_score}/100 （閾值 {score_thresh if use_score else '未啟用'}）
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -515,15 +518,21 @@ else:
     fig.update_xaxes(
         tickformat='%H:%M',
         tickangle=-45,
+        nticks=10,
+        tickfont_size=11,
+        showgrid=True,
+        gridwidth=1,
+        gridcolor='rgba(80,80,80,0.3)',
         rangeslider_visible=False
     )
     fig.update_layout(
-        height=650,
+        height=680,
         template="plotly_dark",
         showlegend=False,
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        margin=dict(b=80)
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig)
 
     # ---------- 增强版市场诊断 ----------
     with st.expander("🔍 当前市场诊断 (详细分析)", expanded=False):
@@ -600,7 +609,7 @@ else:
         show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
         show.index = show.index.strftime('%Y-%m-%d %H:%M')
         show.columns = ['开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
-        st.dataframe(show, use_container_width=True)
+        st.dataframe(show)
 
     # ---------- 历史信号记录（加盈亏%及导出） ----------
     if st.session_state.history:
@@ -633,8 +642,8 @@ else:
                 return 'background-color: #1e3a5f; color: #ffd700'
             return ''
 
-        styled = hist_display.style.applymap(style_result, subset=['结果'])
-        st.dataframe(styled, use_container_width=True)
+        styled = hist_display.style.map(style_result, subset=['结果'])
+        st.dataframe(styled)
 
         # 导出CSV按钮
         csv = hist_display.to_csv(index=False).encode('utf-8')
