@@ -133,26 +133,33 @@ if 'last_refresh_time' not in st.session_state: st.session_state.last_refresh_ti
 # ---------- 数据获取 (OKX) ----------
 def fetch_klines():
     """
-    从 OKX 获取 ETH/USDT 5分钟K线数据
-    OKX 公开 API，无需密钥，返回格式兼容原有代码
+    从 OKX 获取 ETH/USDT 5分钟K线数据（公开API，无需密钥）
+    返回格式：[[timestamp, open, high, low, close, volume], ...]
     """
     try:
         url = "https://www.okx.com/api/v5/market/candles"
         params = {
             'instId': 'ETH-USDT',
-            'bar': '5m',          # 5分钟K线，如需1小时可改为 '1H'
+            'bar': '5m',          # 5分钟K线，支持1m/3m/5m/15m/30m/1H/2H/4H/6H/12H/1D
             'limit': LIMIT
         }
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         result = resp.json()
         
+        # 调试：可在日志中查看返回状态（Streamlit Cloud中查看Logs）
+        # st.write("OKX API 返回码:", result.get('code'))  # 调试时可取消注释
+        
         if result.get('code') == '0':
-            data = result['data']
-            # OKX 返回格式: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
-            # 我们需要前6个字段: [timestamp, open, high, low, close, volume]
+            data = result.get('data', [])
+            if not data:
+                st.warning("OKX 返回空数据")
+                return []
+            
             converted = []
             for item in data:
+                # OKX 返回格式: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+                # 我们只需要前6个字段
                 converted.append([
                     int(item[0]),           # 时间戳(毫秒)
                     float(item[1]),          # 开盘价
@@ -163,15 +170,13 @@ def fetch_klines():
                 ])
             return converted
         else:
-            st.warning(f"OKX API 返回异常: {result.get('msg')}")
+            st.warning(f"OKX API 返回错误: {result.get('msg')} (code: {result.get('code')})")
             return []
     except Exception as e:
         st.session_state.api_fail_count += 1
         st.error(f"获取 OKX K线失败: {e}")
         return []
 
-# 保留原 latest_candle 函数，但使用相同的数据源
-@st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
     """获取最新一根K线（OKX）"""
     try:
@@ -615,18 +620,25 @@ with st.sidebar:
 # ---------- 数据 ----------
 candles = fetch_klines()
 if candles:
-    if not candle_buffer:
-        for c in candles: candle_buffer.append(c)
+    # 检查获取的数据是否有效（至少有一根K线且价格合理）
+    if len(candles) > 0 and candles[0][1] > 0:  # 开盘价>0
+        if not candle_buffer:
+            for c in candles: candle_buffer.append(c)
+        else:
+            for c in candles:
+                if c[0] > candle_buffer[-1][0]:
+                    for mc in fill_missing_candles(candle_buffer, c):
+                        candle_buffer.append(mc)
     else:
-        for c in candles:
-            if c[0] > candle_buffer[-1][0]:
-                for mc in fill_missing_candles(candle_buffer, c):
-                    candle_buffer.append(mc)
+        st.warning("获取到的K线数据无效，请检查网络或API")
+else:
+    st.warning("无法获取K线数据，请稍后重试")
 
 latest = fetch_latest_candle()
-if latest and (not candle_buffer or latest[0] > candle_buffer[-1][0]):
-    for mc in fill_missing_candles(candle_buffer, latest):
-        candle_buffer.append(mc)
+if latest and latest[1] > 0:
+    if not candle_buffer or latest[0] > candle_buffer[-1][0]:
+        for mc in fill_missing_candles(candle_buffer, latest):
+            candle_buffer.append(mc)
 
 st_autorefresh(interval=refresh_interval * 1000, key="final")
 
@@ -711,7 +723,6 @@ else:
             st.markdown(f'<div class="header-red">● 空头信号 @ {signal_time}</div>', unsafe_allow_html=True)
 
         if total_score is not None:
-            # 根据总分显示级别
             if total_score >= 85:
                 level_tag = "🔴 强信号"
             elif total_score >= 75:
@@ -847,4 +858,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.27 • OKX真实数据 • 三层松绑法 • 分级仓位 • 安全只读 • 祝你交易顺利！💰🚀")
+st.caption("🔥 极致版 v2026.02.27 • OKX真实数据 • 三层松绑法 • 分级仓位 • 祝你交易顺利！💰🚀")
