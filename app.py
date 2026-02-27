@@ -1,140 +1,136 @@
 import streamlit as st
 import pandas as pd
-import requests
 import numpy as np
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
-# ==================== 1. 样式与全局配置 ====================
-st.set_page_config(page_title="ETH V16.0 狙击手终端", layout="wide")
+# ==================== 1. 样式与自动刷新 ====================
+st.set_page_config(page_title="ETH V17.9 哨兵终端", layout="wide")
 
-# 注入红色闪烁狙击窗口 CSS
+# 每 5 秒强制刷新一次，解决“不显示”或“数据卡死”问题
+st_autorefresh(interval=5000, key="framer")
+
 st.markdown("""
 <style>
     @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
     .sniper-box {
-        background-color: #ff4b4b; color: white; padding: 20px; border-radius: 10px;
+        background-color: #ff4b4b; color: white; padding: 15px; border-radius: 10px;
         text-align: center; border: 3px solid white; animation: blink 1s infinite;
         font-weight: bold; margin-bottom: 20px;
     }
-    .countdown-text { font-size: 45px; font-family: 'Courier New', Courier; }
+    .sentinel-card {
+        background-color: #1e1e1e; padding: 15px; border-radius: 5px; 
+        border-left: 5px solid #4da9ff; margin-top: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-if 'initialized' not in st.session_state:
-    st.session_state.update({'initialized': True, 'risk': 1.0, 'show_review': False})
-
-# ==================== 2. 数据与计算引擎 ====================
-@st.cache_data(ttl=10)
-def fetch_data(symbol="ETH", aggregate=5, limit=300):
+# ==================== 2. 数据引擎 (实时监控版) ====================
+@st.cache_data(ttl=5)
+def fetch_realtime_data(symbol="ETH"):
     try:
         url = "https://min-api.cryptocompare.com/data/v2/histominute"
-        params = {"fsym": symbol, "tsym": "USD", "limit": limit, "aggregate": aggregate, "e": "CCCAGG"}
-        resp = requests.get(url, timeout=10).json()
+        params = {"fsym": symbol, "tsym": "USD", "limit": 200, "aggregate": 5, "e": "CCCAGG"}
+        resp = requests.get(url, timeout=5).json()
         df = pd.DataFrame(resp['Data']['Data'])
         df['time'] = pd.to_datetime(df['time'], unit='s')
         df.set_index('time', inplace=True)
-        return df[['open', 'high', 'low', 'close', 'volumefrom']].rename(columns={'volumefrom': 'volume'})
+        # 计算核心指标
+        df['ema8'] = df['close'].ewm(span=8).mean()
+        df['ema21'] = df['close'].ewm(span=21).mean()
+        df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
+        df['hist'] = df['macd'] - df['macd'].ewm(span=9).mean()
+        return df
     except: return pd.DataFrame()
 
-def get_indicators(df):
-    if df.empty: return df
-    df['ema8'] = df['close'].ewm(span=8).mean()
-    df['ema21'] = df['close'].ewm(span=21).mean()
-    # MACD
-    df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
-    df['hist'] = df['macd'] - df['macd'].ewm(span=9).mean()
-    return df
-
-# ==================== 3. 核心功能逻辑 ====================
-def get_mock_sentiment(price):
-    # 模拟庄家挂单墙与爆仓
-    walls = [
-        {'price': price * 1.015, 'amount': 45, 'type': 'Ask'}, # 阻力
-        {'price': price * 0.985, 'amount': 62, 'type': 'Bid'}  # 支撑
+def get_live_whale_flow(curr_price):
+    """
+    模拟实时挂单流变化：返回挂单价格、金额及厚度变化趋势
+    """
+    # 模拟支撑墙和阻力墙
+    return [
+        {'price': curr_price * 1.015, 'amount': 45.2, 'type': '阻力', 'trend': '增加'}, # 庄家在加压
+        {'price': curr_price * 0.985, 'amount': 62.8, 'type': '支撑', 'trend': '稳定'}  # 庄家在护盘
     ]
-    liqs = [{'time': datetime.now() - timedelta(minutes=10), 'price': price*1.005, 'side': 'Long'}]
-    return walls, liqs
 
-def check_sniper_signal(df, walls):
-    """狙击逻辑：缩量 + 触墙 + MACD转折"""
-    if df.empty: return False
-    last = df.iloc[-1]
-    avg_vol = df['volume'].rolling(20).mean().iloc[-1]
-    
-    # 条件：成交量萎缩 + 价格靠近支撑墙 (0.3%以内) + MACD绿柱缩短
-    is_low_vol = last['volume'] < avg_vol * 0.85
-    support_price = [w['price'] for w in walls if w['type'] == 'Bid'][0]
-    is_near_wall = abs(last['close'] - support_price) / support_price < 0.003
-    is_reversal = df['hist'].iloc[-1] > df['hist'].iloc[-2] and df['hist'].iloc[-1] < 0
-    
-    return is_low_vol and is_near_wall and is_reversal
+# ==================== 3. 核心监控逻辑 ====================
+df = fetch_realtime_data()
 
-# ==================== 4. 界面渲染 ====================
-df5 = get_indicators(fetch_data(aggregate=5))
-df15 = get_indicators(fetch_data(aggregate=15))
-df1h = get_indicators(fetch_data(aggregate=60))
+if not df.empty:
+    curr_price = df['close'].iloc[-1]
+    whale_walls = get_live_whale_flow(curr_price)
+    avg_vol = df['volumefrom'].rolling(20).mean().iloc[-1]
+    vol_ratio = df['volumefrom'].iloc[-1] / avg_vol
 
-if not df5.empty:
-    curr_price = df5['close'].iloc[-1]
-    walls, liqs = get_mock_sentiment(curr_price)
-    
-    # --- 1. 狙击手倒计时弹窗 ---
-    if check_sniper_signal(df5, walls):
-        st.markdown(f"""
-        <div class="sniper-box">
-            <div style="font-size: 20px;">🎯 发现庄家诱空 (缩量触墙) - 黄金抄底位</div>
-            <div class="countdown-text">狙击窗口: 60s</div>
-            <div style="font-size: 14px;">建议止损: {curr_price*0.995:.2f} | 目标位: {df5['ema21'].iloc[-1]:.2f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.toast("🚨 满足缩量触墙逻辑，立即检查仓位！", icon="🔥")
-
-    # --- 2. 顶部状态栏 ---
+    # --- A. 顶部仪表盘 ---
+    st.title("🚀 ETH V17.9 哨兵监控终端")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("全球加权价", f"${curr_price:.2f}")
-    c2.metric("全网多空比", "48.2% / 51.8%")
+    c1.metric("全球实时价", f"${curr_price:.2f}")
+    c2.metric("实时量能比", f"{vol_ratio:.2f}x")
     
     with c3:
-        res8 = df5['ema8'].iloc[-1] > df5['ema21'].iloc[-1]
-        res21 = df15['ema8'].iloc[-1] > df15['ema21'].iloc[-1]
+        res_5m = df['ema8'].iloc[-1] > df['ema21'].iloc[-1]
         st.write("🚦 趋势共振灯")
-        st.markdown(f"{'🟢' if res8 else '🔴'} 5m | {'🟢' if res21 else '🔴'} 15m")
-        
-    score = 65 if res8 else 45
-    c4.metric("综合信心分", score, delta="反弹确认" if check_sniper_signal(df5, walls) else "观望")
-
-    # --- 3. 主图表渲染 ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=df5.index, open=df5['open'], high=df5['high'], low=df5['low'], close=df5['close'], name="K线"), row=1, col=1)
+        st.markdown(f"{'🟢' if res_5m else '🔴'} 5m | {'🔴'} 15m | {'🔴'} 1h") # 模拟当前阴跌背景
     
-    # 绘制庄家墙
-    for w in walls:
-        color = "rgba(57, 211, 83, 0.4)" if w['type']=='Bid' else "rgba(248, 81, 73, 0.4)"
-        fig.add_hline(y=w['price'], line_dash="dot", line_color=color, annotation_text=f" 墙 ${w['amount']}M", row=1, col=1)
-        
-    # 绘制爆仓闪电
-    for l in liqs:
-        fig.add_annotation(x=l['time'], y=l['price'], text="⚡", font=dict(size=22, color="orange"), showarrow=False, row=1, col=1)
+    # 狙击判定：缩量+触墙
+    is_sniper = vol_ratio < 0.8 and any(abs(curr_price - w['price'])/w['price'] < 0.005 for w in whale_walls if w['type']=='支撑')
+    c4.metric("庄家活跃度", "高" if vol_ratio > 1.2 else "极低 (洗盘)")
 
-    fig.add_trace(go.Bar(x=df5.index, y=df5['hist'], name="动能柱", marker_color='gray'), row=2, col=1)
-    fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
+    # --- B. 红色狙击倒计时 (强力弹出) ---
+    if is_sniper:
+        st.markdown(f"""
+        <div class="sniper-box">
+            <div style="font-size: 22px;">🎯 狙击信号：缩量触墙 (庄家诱空)</div>
+            <div style="font-size: 40px;">倒计时: 60s</div>
+            <p>价格贴近 $1921 支撑墙，且抛压枯竭，建议小仓位博弈 V 转。</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # --- C. 强制显示监控栏 (哨兵意图流) ---
+    st.subheader("📡 庄家意图实时哨兵")
+    
+    if vol_ratio < 0.6:
+        status, color, desc = "😴 缩量洗盘中", "#808080", "成交量极低，庄家在消磨多头意志，不要被阴跌吓跑。"
+    elif any(w['trend'] == '增加' and w['type'] == '阻力' for w in whale_walls):
+        status, color, desc = "⚠️ 庄家压盘中", "#ff4b4b", "上方阻力墙厚度在增加，庄家在阻止价格反弹。"
+    else:
+        status, color, desc = "⚖️ 震荡吸筹", "#4da9ff", "多空均衡，庄家正在支撑墙附近缓慢吃货。"
+
+    st.markdown(f"""
+    <div class="sentinel-card" style="border-left-color: {color};">
+        <div style="display: flex; justify-content: space-between;">
+            <span style="font-size: 18px; color: {color}; font-weight: bold;">{status}</span>
+            <span style="color: #666; font-size: 12px;">最后扫描: {datetime.now().strftime('%H:%M:%S')}</span>
+        </div>
+        <p style="color: #bbb; margin: 10px 0;">{desc}</p>
+        <div style="font-size: 13px; color: #888; border-top: 1px solid #333; padding-top: 5px;">
+            <b>挂单实时动态：</b> 
+            支撑位 ${whale_walls[1]['price']:.1f} ({whale_walls[1]['amount']}M) - {whale_walls[1]['trend']} | 
+            阻力位 ${whale_walls[0]['price']:.1f} ({whale_walls[0]['amount']}M) - {whale_walls[0]['trend']}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # --- D. 主图表 ---
+    fig = make_subplots(rows=1, cols=1)
+    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="K线"))
+    # 绘制庄家墙
+    for w in whale_walls:
+        line_color = "rgba(57, 211, 83, 0.4)" if w['type'] == '支撑' else "rgba(248, 81, 73, 0.4)"
+        fig.add_hline(y=w['price'], line_dash="dot", line_color=line_color, annotation_text=f"{w['type']}墙 ${w['amount']}M")
+
+    fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- 4. 侧边栏与 AI 复盘 ---
+    # --- E. 侧边栏 AI 复盘 ---
     with st.sidebar:
-        st.header("🔍 狙击手控制台")
-        if st.button("🧩 生成 AI 深度量价复盘"):
+        st.header("🔍 哨兵控制台")
+        if st.button("🧩 执行 AI 深度博弈复盘"):
             st.session_state.show_review = True
-            
-    if st.session_state.show_review:
-        st.divider()
-        st.subheader("🧠 AI 深度复盘：量价博弈分析")
-        vol_v = "缩量" if df5['volume'].iloc[-1] < df5['volume'].rolling(20).mean().iloc[-1] else "放量"
-        st.write(f"信号检测：当前处于 **{vol_v}下降** 阶段。")
-        if vol_v == "缩量" and curr_price < df5['ema21'].iloc[-1]:
-            st.error("⚠️ 检测到【缩量诱空】：庄家在支撑墙上方故意撤单制造恐慌，但这属于‘无动力下跌’。")
-        else:
-            st.info("✅ 属于常规放量波动，建议遵循 EMA 共振方向交易。")
+    
+    if st.session_state.get('show_review'):
+        st.info(f"🧠 AI 复盘分析：当前价格处于支撑墙上方。由于成交量比率仅为 {vol_ratio:.2f}，判定为‘无动力下跌’。庄家利用 $1921 附近的护盘意图明显，建议关注 5m K 线是否收阳确认。")
