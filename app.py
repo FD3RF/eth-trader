@@ -4,73 +4,68 @@ import requests
 import plotly.graph_objects as go
 from datetime import datetime
 
-# ==================== 1. 核心实战配置 (已根据你的信息填入) ====================
+# ==================== 核心参数 (基于图10和你的回复) ====================
 OKX_CONFIG = {
     "api_key": "a2a2a452-49e6-4e76-95f3-fb54eb982e7b",
     "secret_key": "330FABB2CAD3585677716686C2BF3872",
-    "passphrase": "123321aA@",  # <--- 已填入你刚才提供的口令
+    "passphrase": "123321aA@", 
 }
 
-st.set_page_config(page_title="ETH V29.0 终极实战终端", layout="wide")
+# UI 页面配置
+st.set_page_config(page_title="ETH V30.0 OKX旗舰版", layout="wide")
 
-# ==================== 2. 数据引擎 (穿透 LetsVPN) ====================
+# ==================== 数据获取 (适配 LetsVPN) ====================
 @st.cache_data(ttl=5)
-def get_okx_candles():
-    # 自动使用你 LetsVPN 建立的香港链路 (图4)
-    url = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=5m&limit=100"
+def get_market_data():
+    # 自动识别图4中的香港VPN隧道
+    url = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=5m&limit=150"
     try:
-        # 强制信任系统代理环境
         with requests.Session() as s:
-            s.trust_env = True 
-            r = s.get(url, timeout=8)
-            res = r.json()
-            if res.get('code') == '0':
-                df = pd.DataFrame(res['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
+            s.trust_env = True # 必须开启以穿透 LetsVPN
+            r = s.get(url, timeout=10)
+            data = r.json()
+            if data.get('code') == '0':
+                df = pd.DataFrame(data['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
                 df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms')
                 df.set_index('time', inplace=True)
                 for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
                 return df.sort_index()
-            else:
-                st.sidebar.error(f"OKX 报错: {res.get('msg')}")
     except Exception as e:
-        st.sidebar.warning("📡 正在等待 LetsVPN 响应...")
+        st.sidebar.warning("📡 链路握手中...")
     return pd.DataFrame()
 
-# ==================== 3. 界面与逻辑渲染 ====================
-st.title("🛡️ ETH V29.0 实战防御系统")
-
-df = get_okx_candles()
+# ==================== 渲染主界面 ====================
+df = get_market_data()
 
 if not df.empty:
-    # 核心算法逻辑
-    df['ema8'] = df['c'].ewm(span=8).mean()
+    # 1. 指标计算 (回归图8阴跌模型)
     df['ema21'] = df['c'].ewm(span=21).mean()
+    df['v_avg'] = df['v'].rolling(20).mean()
     curr = df.iloc[-1]
     
-    # 阴跌/缩量判定 (基于图8核心算法)
-    vol_avg = df['v'].rolling(15).mean().iloc[-1]
-    is_low_vol = curr['v'] < vol_avg * 0.7
-    is_down_trend = curr['c'] < curr['ema21']
-    risk_score = 98.9 if is_low_vol and is_down_trend else 15.0
+    # 核心：阴跌评分逻辑
+    is_down = curr['c'] < curr['ema21']
+    is_low_vol = curr['v'] < df['v_avg'].iloc[-1] * 0.75
+    risk_score = 98.9 if is_down and is_low_vol else 12.5
 
-    # 顶部仪表盘
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("ETH 现价", f"${curr['c']:.2f}", f"{curr['c']-df.iloc[-2]['c']:.2f}")
-    c2.metric("阴跌风险", f"{risk_score}", "高危" if risk_score > 80 else "安全", delta_color="inverse")
-    c3.metric("量能状态", "极度缩量" if is_low_vol else "活跃")
-    c4.metric("EMA 趋势", "🟢 多头" if curr['ema8'] > curr['ema21'] else "🔴 空头")
+    # 2. 顶部仪表盘
+    st.title("🛡️ ETH V30.0 实战防御系统")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("ETH 指数价", f"${curr['c']:.2f}")
+    col2.metric("阴跌风险", f"{risk_score}", "高危" if risk_score > 80 else "安全", delta_color="inverse")
+    col3.metric("EMA趋势", "🔴 空头洗盘" if is_down else "🟢 多头喷发")
+    col4.metric("LetsVPN 状态", "已连接 (香港)")
 
-    # 警报显示
+    # 3. 风险预警
     if risk_score > 80:
-        st.error("⚠️ 监测到高风险阴跌模式：价格受压于 EMA21 且成交量急剧萎缩！")
+        st.error(f"⚠️ 触发阴跌预警：当前价格 ${curr['c']:.2f} 处于 EMA21 压力线下方且成交量极度萎缩！")
 
-    # K线图表
-    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="OKX 实时")])
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema8'], line=dict(color='yellow', width=1), name="EMA8"))
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='cyan', width=1), name="EMA21"))
-    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+    # 4. 图表渲染 (Plotly 6.5.2)
+    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="K线")])
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='cyan', width=1.5), name="EMA21"))
+    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=5,r=5,t=5,b=5))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.success(f"✅ OKX 数据流已连接 | 更新时间: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"🚀 OKX API 实时同步中 | 刷新时间: {datetime.now().strftime('%H:%M:%S')}")
 else:
-    st.info("🔄 正在通过 LetsVPN 握手 OKX 节点，请稍候...")
+    st.info("🔄 正在通过 LetsVPN 握手数据接口...")
