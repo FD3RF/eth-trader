@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
-import time
 from datetime import datetime
 from collections import deque
 import plotly.graph_objects as go
@@ -11,15 +9,15 @@ from plotly.subplots import make_subplots
 # ---------- 配置 ----------
 SYMBOL = "ETH"
 CURRENCY = "USD"
-INTERVAL = "5"                     # 5分钟K线（可改为60做1小时）
+INTERVAL = "5"
 LIMIT = 200
-INTERVAL_MINUTES = 5                # 必须与INTERVAL一致（分钟）
+INTERVAL_MINUTES = 5
 
-# ---------- 初始化 Session ----------
+# ---------- Session State ----------
 if 'history' not in st.session_state:
-    st.session_state.history = deque(maxlen=200)   # 历史信号（内存）
+    st.session_state.history = deque(maxlen=200)
 if 'candles' not in st.session_state:
-    st.session_state.candles = deque(maxlen=500)   # K线缓存
+    st.session_state.candles = deque(maxlen=500)
 if 'last_signal_time' not in st.session_state:
     st.session_state.last_signal_time = None
 if 'api_fail' not in st.session_state:
@@ -27,15 +25,12 @@ if 'api_fail' not in st.session_state:
 if 'last_error' not in st.session_state:
     st.session_state.last_error = ""
 
-# ---------- 数据获取 (带缓存和备用源) ----------
+# ---------- 数据获取 ----------
 @st.cache_data(ttl=10, show_spinner=False)
 def fetch_klines_cached():
-    """缓存版本，每次调用会检查缓存"""
     return _fetch_klines_impl()
 
 def _fetch_klines_impl():
-    """实际获取K线，先尝试 CryptoCompare，失败后切 Binance"""
-    # CryptoCompare 主源
     try:
         url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit={LIMIT}&aggregate={INTERVAL}"
         resp = requests.get(url, timeout=10)
@@ -46,7 +41,6 @@ def _fetch_klines_impl():
     except Exception as e:
         st.session_state.api_fail += 1
         st.session_state.last_error = f"CryptoCompare 失败: {str(e)[:50]}"
-        # Binance 备用
         try:
             url = f"https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit={LIMIT}"
             resp = requests.get(url, timeout=8)
@@ -55,11 +49,10 @@ def _fetch_klines_impl():
             st.session_state.last_error = ""
             return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in data]
         except Exception as e2:
-            st.session_state.last_error += f" Binance 备用也失败: {str(e2)[:50]}"
+            st.session_state.last_error += f" | Binance 也失败: {str(e2)[:50]}"
             return []
 
 def fetch_latest():
-    """获取最新一根K线（无缓存，实时）"""
     try:
         url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit=1&aggregate={INTERVAL}"
         resp = requests.get(url, timeout=5)
@@ -82,14 +75,11 @@ def rsi(s, n=14):
     loss = (-d.clip(upper=0)).ewm(alpha=1/n).mean()
     return 100 - 100/(1+gain/loss)
 def atr(df, n=14):
-    tr = pd.concat([df['high']-df['low'],
-                    (df['high']-df['close'].shift()).abs(),
-                    (df['low']-df['close'].shift()).abs()], axis=1).max(1)
+    tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(1)
     return tr.ewm(alpha=1/n).mean()
 
-# ---------- 评分函数 ----------
+# ---------- 评分 ----------
 def get_score(side, df):
-    """五维评分，返回总分和各项得分字典"""
     last = df.iloc[-1]
     c, ef, es, r, a, v = last['close'], last['ema_fast'], last['ema_slow'], last['rsi'], last['atr'], last['volume']
     avg_v = df['volume'].rolling(20).mean().iloc[-1] if len(df)>=20 else v
@@ -120,8 +110,6 @@ def detect_signal(df, fast, slow, buy_range, sell_range, use_score, score_thresh
     is_bull = ef > es and last['close'] > ef*0.999
     is_bear = ef < es and last['close'] < ef*1.001
     if not (is_bull or is_bear): return None
-
-    # 价格必须突破前一根收盘
     if is_bull and last['close'] <= df['close'].iloc[-2]: return None
     if is_bear and last['close'] >= df['close'].iloc[-2]: return None
 
@@ -162,25 +150,15 @@ def fill_missing(buf, new):
         return missing + [new]
     return [new]
 
-# ---------- 重置默认参数 ----------
+# ---------- 重置默认 ----------
 def reset_defaults():
-    st.session_state['fast'] = 8
-    st.session_state['slow'] = 21
-    st.session_state['rsi_period'] = 14
-    st.session_state['buy_min'] = 57
-    st.session_state['buy_max'] = 70
-    st.session_state['sell_min'] = 30
-    st.session_state['sell_max'] = 43
-    st.session_state['refresh'] = 30
-    st.session_state['use_score'] = True
-    st.session_state['score_thresh'] = 70
-    st.session_state['use_atr_sl'] = True
-    st.session_state['sl_m'] = 2.2
-    st.session_state['tp1_m'] = 0.8
-    st.session_state['tp2_m'] = 1.6
+    for k, v in {'fast':8, 'slow':21, 'rsi_period':14, 'buy_min':57, 'buy_max':70,
+                 'sell_min':30, 'sell_max':43, 'refresh':30, 'use_score':True,
+                 'score_thresh':70, 'use_atr_sl':True, 'sl_m':2.2, 'tp1_m':0.8, 'tp2_m':1.6}.items():
+        st.session_state[k] = v
     st.rerun()
 
-# ---------- Streamlit UI ----------
+# ---------- UI ----------
 st.set_page_config(page_title="ETH 5分钟终极版", layout="wide")
 st.markdown("""
 <style>
@@ -196,22 +174,14 @@ st.markdown("""
         animation: pulse-glow 3s ease-in-out infinite alternate;
     }
     @keyframes pulse-glow {
-        0% { box-shadow: 0 0 15px rgba(0, 255, 157, 0.3), inset 0 0 10px rgba(0, 255, 157, 0.15); border-color: #00ff9d; }
-        50% { box-shadow: 0 0 35px rgba(0, 255, 157, 0.6), inset 0 0 20px rgba(0, 255, 157, 0.3); border-color: #00ff9d; }
-        100% { box-shadow: 0 0 15px rgba(0, 255, 157, 0.3), inset 0 0 10px rgba(0, 255, 157, 0.15); border-color: #00ff9d; }
+        0% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; }
+        50% { box-shadow: 0 0 35px rgba(0,255,157,0.6), inset 0 0 20px rgba(0,255,157,0.3); border-color:#00ff9d; }
+        100% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; }
     }
     .signal-card.buy-active { animation: pulse-glow-buy 2.8s ease-in-out infinite alternate; }
-    @keyframes pulse-glow-buy {
-        0% { box-shadow: 0 0 20px #00ff9d80; border-color: #00ff9d; }
-        50% { box-shadow: 0 0 45px #00ff9dc0; border-color: #4dff88; }
-        100% { box-shadow: 0 0 20px #00ff9d80; border-color: #00ff9d; }
-    }
+    @keyframes pulse-glow-buy { 0%{box-shadow:0 0 20px #00ff9d80;border-color:#00ff9d} 50%{box-shadow:0 0 45px #00ff9dc0;border-color:#4dff88} 100%{box-shadow:0 0 20px #00ff9d80;border-color:#00ff9d} }
     .signal-card.sell-active { animation: pulse-glow-sell 2.8s ease-in-out infinite alternate; }
-    @keyframes pulse-glow-sell {
-        0% { box-shadow: 0 0 20px #ff4d8880; border-color: #ff4d88; }
-        50% { box-shadow: 0 0 45px #ff4d88c0; border-color: #ff6699; }
-        100% { box-shadow: 0 0 20px #ff4d8880; border-color: #ff4d88; }
-    }
+    @keyframes pulse-glow-sell { 0%{box-shadow:0 0 20px #ff4d8880;border-color:#ff4d88} 50%{box-shadow:0 0 45px #ff4d88c0;border-color:#ff6699} 100%{box-shadow:0 0 20px #ff4d8880;border-color:#ff4d88} }
     .blink-title { animation: subtle-blink 4s infinite ease-in-out; }
     @keyframes subtle-blink { 0%,100%{opacity:1} 50%{opacity:0.75} }
     .signal-title { color:#00ff9d; font-size:1.6rem; margin-bottom:16px; font-weight:bold; }
@@ -230,22 +200,18 @@ st.markdown("""
         color: #ccd6e0;
         animation: pulse-wait 3s ease-in-out infinite alternate;
     }
-    @keyframes pulse-wait {
-        0% { box-shadow: 0 0 10px #4da9ff80; border-color: #4da9ff; }
-        50% { box-shadow: 0 0 30px #4da9ffc0; border-color: #80b4ff; }
-        100% { box-shadow: 0 0 10px #4da9ff80; border-color: #4da9ff; }
-    }
-    .trend-big { font-size:1.8rem; font-weight:bold; text-align:center; margin-bottom:8px; }
+    @keyframes pulse-wait { 0%{box-shadow:0 0 10px #4da9ff80;border-color:#4da9ff} 50%{box-shadow:0 0 30px #4da9ffc0;border-color:#80b4ff} 100%{box-shadow:0 0 10px #4da9ff80;border-color:#4da9ff} }
+    .trend-big { font-size:1.9rem; font-weight:bold; text-align:center; margin:8px 0; }
     .api-error { color:#ffaa00; font-size:0.9rem; margin-top:4px; }
+    .stButton > button { width:100%; margin-bottom:6px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 ETH 5分钟 EMA 终极版 (双数据源 + 高级优化)")
+st.title("📈 ETH 5分钟 EMA 终极版 (双数据源 + 顶级优化)")
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
     st.header("参数")
-    # 使用 session_state 存储参数，便于重置
     if 'fast' not in st.session_state:
         reset_defaults()
     fast = st.number_input("快线EMA", 1, 50, value=st.session_state.get('fast', 8), key='fast')
@@ -270,14 +236,11 @@ with st.sidebar:
         sl_m = st.slider("止损倍数", 1.0, 5.0, value=st.session_state.get('sl_m', 2.2), step=0.1, key='sl_m')
         tp1_m = st.slider("TP1倍数", 0.2, 3.0, value=st.session_state.get('tp1_m', 0.8), step=0.1, key='tp1_m')
         tp2_m = st.slider("TP2倍数", 0.5, 5.0, value=st.session_state.get('tp2_m', 1.6), step=0.1, key='tp2_m')
-    else:
-        sl_m = tp1_m = tp2_m = None
 
     st.metric("📡 API失败", st.session_state.api_fail)
     if st.session_state.last_error:
         st.markdown(f'<div class="api-error">⚠️ {st.session_state.last_error}</div>', unsafe_allow_html=True)
 
-    # 信号统计面板
     if st.session_state.history:
         total = len(st.session_state.history)
         wins = sum(1 for s in st.session_state.history if s['result'] == 'win')
@@ -298,14 +261,13 @@ with st.sidebar:
             st.session_state.history.clear()
     with col_btn2:
         if st.button("🔄 立即刷新"):
-            st.cache_data.clear()   # 清除K线缓存
+            st.cache_data.clear()
             st.rerun()
     with col_btn3:
         if st.button("⚙️ 重置默认"):
             reset_defaults()
 
 # ---------- 数据加载 ----------
-# 使用缓存版本获取K线，手动刷新时会清除缓存
 klines = fetch_klines_cached()
 if klines:
     if not st.session_state.candles:
@@ -326,7 +288,6 @@ st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线
 if len(st.session_state.candles) < 30:
     st.warning(f"⏳ 数据积累中... {len(st.session_state.candles)}/30")
 else:
-    # 构建DataFrame
     df = pd.DataFrame(list(st.session_state.candles), columns=['ts','open','high','low','close','volume'])
     df['time'] = pd.to_datetime(df['ts'], unit='ms')
     df.set_index('time', inplace=True)
@@ -337,7 +298,7 @@ else:
 
     cp = df['close'].iloc[-1]
 
-    # ---------- 趋势指示器 ----------
+    # ---------- 趋势 ----------
     last = df.iloc[-1]
     ema_f, ema_s, price = last['ema_fast'], last['ema_slow'], last['close']
     if ema_f > ema_s and price > ema_f:
@@ -356,57 +317,37 @@ else:
         trend = "⚪ 震荡"
         trend_color = "#aaa"
     st.markdown(f'<div class="trend-big" style="color:{trend_color};">{trend}</div>', unsafe_allow_html=True)
-    st.markdown(f"快线 {ema_f:.2f} 慢线 {ema_s:.2f} 价格 {price:.2f}", unsafe_allow_html=True)
+    st.markdown(f"快线 {ema_f:.2f} 慢线 {ema_s:.2f} 价格 {price:.2f}")
 
-    # ---------- 信号检测 ----------
-    signal = detect_signal(df, fast, slow, (buy_min,buy_max), (sell_min,sell_max), use_score, score_thresh)
+    # ---------- 信号检测 & 处理 ----------
+    signal = detect_signal(df, fast, slow, (buy_min, buy_max), (sell_min, sell_max), use_score, score_thresh)
 
-    # 检查历史pending信号的止损止盈
-    for i, rec in enumerate(st.session_state.history):
+    for rec in st.session_state.history:
         if rec['result'] != 'pending': continue
         if rec['side'] == 'BUY':
             if cp <= rec['sl']:
-                rec['result'] = 'loss'
-                rec['exit_price'] = cp
-                rec['exit_reason'] = '止损'
+                rec['result'] = 'loss'; rec['exit_price'] = cp; rec['exit_reason'] = '止损'
             elif cp >= rec['tp2']:
-                rec['result'] = 'win'
-                rec['exit_price'] = cp
-                rec['exit_reason'] = 'TP2'
+                rec['result'] = 'win'; rec['exit_price'] = cp; rec['exit_reason'] = 'TP2'
         else:
             if cp >= rec['sl']:
-                rec['result'] = 'loss'
-                rec['exit_price'] = cp
-                rec['exit_reason'] = '止损'
+                rec['result'] = 'loss'; rec['exit_price'] = cp; rec['exit_reason'] = '止损'
             elif cp <= rec['tp2']:
-                rec['result'] = 'win'
-                rec['exit_price'] = cp
-                rec['exit_reason'] = 'TP2'
+                rec['result'] = 'win'; rec['exit_price'] = cp; rec['exit_reason'] = 'TP2'
 
-    # 新信号处理
     if signal and st.session_state.last_signal_time != df.index[-1]:
         side, price, ef, es, r, a = signal
-        sl, tp1, tp2 = sltp(price, side, a, use_atr_sl,
-                            sl_m if use_atr_sl else 2.2,
-                            tp1_m if use_atr_sl else 0.8,
-                            tp2_m if use_atr_sl else 1.6)
-        rec = {
-            'time': df.index[-1].strftime('%Y-%m-%d %H:%M'),
-            'side': side, 'price': price,
-            'ema_fast': ef, 'ema_slow': es,
-            'rsi': r, 'atr': a,
-            'sl': sl, 'tp1': tp1, 'tp2': tp2,
-            'result': 'pending', 'peak': price
-        }
+        sl, tp1, tp2 = sltp(price, side, a, use_atr_sl, sl_m if use_atr_sl else 2.2, tp1_m if use_atr_sl else 0.8, tp2_m if use_atr_sl else 1.6)
+        rec = {'time': df.index[-1].strftime('%Y-%m-%d %H:%M'), 'side': side, 'price': price,
+               'ema_fast': ef, 'ema_slow': es, 'rsi': r, 'atr': a,
+               'sl': sl, 'tp1': tp1, 'tp2': tp2, 'result': 'pending', 'peak': price}
         st.session_state.history.appendleft(rec)
         st.session_state.last_signal_time = df.index[-1]
 
-    # ---------- 信号卡片 ----------
+    # ---------- 信号卡片 / 等待卡片 ----------
     if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
         r = st.session_state.history[0]
         cp = df['close'].iloc[-1]
-        
-        # 计算盈亏 %
         if r['side'] == 'BUY':
             pnl_pct = (cp - r['price']) / r['price'] * 100
             pnl_class = "positive" if pnl_pct >= 0 else "negative"
@@ -420,77 +361,46 @@ else:
             direction_emoji = "🔴 空头"
             risk_color = "#ff4d88"
 
-        # 进度到 TP2（0~1）
-        if r['side'] == 'BUY':
-            progress = max(0, min(1, (cp - r['price']) / (r['tp2'] - r['price'])))
-        else:
-            progress = max(0, min(1, (r['price'] - cp) / (r['price'] - r['tp2'])))
-
-        # 距离 SL / TP1 / TP2
+        progress = max(0, min(1, (cp - r['price']) / (r['tp2'] - r['price']))) if r['side']=='BUY' else max(0, min(1, (r['price'] - cp) / (r['price'] - r['tp2'])))
         dist_sl = abs(cp - r['sl'])
         dist_sl_pct = dist_sl / r['price'] * 100
-        dist_tp1 = abs(r['tp1'] - cp)
-        dist_tp2 = abs(r['tp2'] - cp)
 
-        card_class = "signal-card"
-        if r['side'] == 'BUY':
-            card_class += " buy-active"
-        else:
-            card_class += " sell-active"
-
-        title_class = "signal-title"
-        if abs(pnl_pct) > 3:
-            title_class += " blink-title"
+        card_class = "signal-card" + (" buy-active" if r['side']=='BUY' else " sell-active")
+        title_class = "signal-title" + (" blink-title" if abs(pnl_pct)>3 else "")
 
         st.markdown(f"""
         <div class="{card_class}">
             <div class="{title_class}">{direction_emoji} 信号 @ {r['time']}</div>
-            
             <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; text-align: center;">
-                <div>
-                    <div class="label">进场价格</div>
-                    <div class="big-number">{r['price']:.2f}</div>
-                </div>
-                <div>
-                    <div class="label">目前盈亏</div>
-                    <div class="big-number {pnl_class}">{pnl_sign}{pnl_pct:.2f}%</div>
-                </div>
-                <div>
-                    <div class="label">风险 / 距离止损</div>
-                    <div class="big-number" style="color:{risk_color}">{dist_sl:.2f} ({dist_sl_pct:.2f}%)</div>
-                </div>
+                <div><div class="label">进场价格</div><div class="big-number">{r['price']:.2f}</div></div>
+                <div><div class="label">目前盈亏</div><div class="big-number {pnl_class}">{pnl_sign}{pnl_pct:.2f}%</div></div>
+                <div><div class="label">风险 / 距离止损</div><div class="big-number" style="color:{risk_color}">{dist_sl:.2f} ({dist_sl_pct:.2f}%)</div></div>
             </div>
-            
-            <div style="margin: 20px 0;">
+            <div style="margin:20px 0">
                 <div class="label">止损 / TP1 / TP2</div>
-                <div style="display: flex; justify-content: space-between; font-size: 1.1rem; margin-top: 8px;">
-                    <span style="color:#ff4d88;">SL {r['sl']:.2f}</span>
-                    <span style="color:#4dff88;">TP1 {r['tp1']:.2f}</span>
-                    <span style="color:#ffd700;">TP2 {r['tp2']:.2f}</span>
+                <div style="display:flex;justify-content:space-between;font-size:1.1rem;margin-top:8px">
+                    <span style="color:#ff4d88">SL {r['sl']:.2f}</span>
+                    <span style="color:#4dff88">TP1 {r['tp1']:.2f}</span>
+                    <span style="color:#ffd700">TP2 {r['tp2']:.2f}</span>
                 </div>
-                <div class="progress-container">
-                    <div class="progress-bar" style="width: {progress*100:.1f}%;"></div>
-                </div>
+                <div class="progress-container"><div class="progress-bar" style="width:{progress*100:.1f}%"></div></div>
             </div>
-            
-            <div style="display: flex; justify-content: space-between; font-size: 1rem; color: #ccd6e0;">
+            <div style="display:flex;justify-content:space-between;font-size:1rem;color:#ccd6e0">
                 <div>EMA快 {r['ema_fast']:.2f} | EMA慢 {r['ema_slow']:.2f}</div>
                 <div>RSI {r['rsi']:.1f} | ATR {r['atr']:.2f}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 等待卡片
         side_guess = 'BUY' if last['ema_fast'] > last['ema_slow'] else 'SELL'
         total_score, _ = get_score(side_guess, df)
+        title_color = trend_color if '多头' in trend else '#ff4d88' if '空头' in trend else '#aaa'
         st.markdown(f"""
         <div class="waiting-card">
-            <h3 style="color:#4da9ff; margin:0 0 16px 0; font-size:1.6rem;">
-                等待下一個高質量信號...
-            </h3>
+            <h3 style="color:{title_color}; margin:0 0 16px 0; font-size:1.6rem;">等待下一个高质量信号...</h3>
             <div style="font-size:1.15rem; line-height:1.6;">
-                <strong>當前趨勢：</strong> {trend}<br>
-                <strong>綜合評分：</strong> {total_score}/100 （閾值 {score_thresh if use_score else '未啟用'}）
+                <strong>当前趋势：</strong> {trend}<br>
+                <strong>综合评分：</strong> {total_score}/100 （阈值 {score_thresh if use_score else '未启用'}）
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -498,43 +408,25 @@ else:
     # ---------- 图表 ----------
     plot_df = df.tail(200)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3])
-    fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['open'], high=plot_df['high'],
-                                 low=plot_df['low'], close=plot_df['close'], name='K线'), row=1, col=1)
+    fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['open'], high=plot_df['high'], low=plot_df['low'], close=plot_df['close'], name='K线'), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_fast'], name=f'EMA{fast}', line=dict(color='#ffd700')), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['ema_slow'], name=f'EMA{slow}', line=dict(color='#4da9ff')), row=1, col=1)
-    colors = ['#00ff9d' if c>=o else '#ff4d4d' for c,o in zip(plot_df['close'], plot_df['open'])]
+    colors = ['#26de81' if c>=o else '#fc5c65' for c,o in zip(plot_df['close'], plot_df['open'])]
     fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['volume'], marker_color=colors, showlegend=False), row=2, col=1)
     fig.add_hline(y=cp, line_dash="dash", line_color="#00ff9d", annotation_text=f"{cp:.2f}", annotation_position="top right", row=1, col=1)
-    
-    # 添加持仓水平线（如果有pending信号）
+
     if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
         r = st.session_state.history[0]
         fig.add_hline(y=r['price'], line_dash="dot", line_color="#ffffff", annotation_text="进场", annotation_position="top right", row=1, col=1)
-        fig.add_hline(y=r['sl'], line_dash="dash", line_color="#ff4d88", annotation_text="SL", annotation_position="top right", annotation_font_color="#ff4d88")
-        fig.add_hline(y=r['tp1'], line_dash="dash", line_color="#4dff88", annotation_text="TP1", annotation_position="top right", annotation_font_color="#4dff88")
-        fig.add_hline(y=r['tp2'], line_dash="dash", line_color="#ffd700", annotation_text="TP2", annotation_position="top right", annotation_font_color="#ffd700")
-    
-    # 优化x轴显示
-    fig.update_xaxes(
-        tickformat='%H:%M',
-        tickangle=-45,
-        nticks=10,
-        tickfont_size=11,
-        showgrid=True,
-        gridwidth=1,
-        gridcolor='rgba(80,80,80,0.3)',
-        rangeslider_visible=False
-    )
-    fig.update_layout(
-        height=680,
-        template="plotly_dark",
-        showlegend=False,
-        xaxis_rangeslider_visible=False,
-        margin=dict(b=80)
-    )
+        fig.add_hline(y=r['sl'], line_dash="dash", line_color="#ff4d88", annotation_text="SL", annotation_position="top right", annotation_font_color="#ff4d88", row=1, col=1)
+        fig.add_hline(y=r['tp1'], line_dash="dash", line_color="#4dff88", annotation_text="TP1", annotation_position="top right", annotation_font_color="#4dff88", row=1, col=1)
+        fig.add_hline(y=r['tp2'], line_dash="dash", line_color="#ffd700", annotation_text="TP2", annotation_position="top right", annotation_font_color="#ffd700", row=1, col=1)
+
+    fig.update_xaxes(tickformat='%H:%M', tickangle=-45, nticks=10, tickfont_size=11, showgrid=True, gridcolor='rgba(80,80,80,0.3)', rangeslider_visible=False)
+    fig.update_layout(height=700, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(l=40,r=40,t=40,b=100))
     st.plotly_chart(fig)
 
-    # ---------- 增强版市场诊断 ----------
+    # ---------- 市场诊断 ----------
     with st.expander("🔍 当前市场诊断 (详细分析)", expanded=False):
         last = df.iloc[-1]
         spread = abs(last['ema_fast']-last['ema_slow'])/last['close']*100
@@ -563,98 +455,47 @@ else:
                 need = score_thresh - total_score
                 st.warning(f"❌ 距离阈值还差 {need} 分")
                 suggestions = []
-                if subs['EMA'] < 20:
-                    suggestions.append(f"EMA扩散需再增加 {max(0, 0.05-spread/100):.3f}% 可多得5分")
-                if subs['斜率'] < 20:
-                    suggestions.append(f"斜率需再增加 {max(0, 0.0001-abs(slope)):.5f} 可多得5分")
-                if subs['量能'] < 10:
-                    suggestions.append(f"成交量需放大至 {max(0.8, vol_ratio+0.1):.1f}倍 可得10分")
-                elif subs['量能'] < 20:
-                    suggestions.append("成交量需放大至 1.3倍 可得20分")
+                if subs['EMA'] < 20: suggestions.append(f"EMA扩散需再增加 {max(0, 0.05-spread/100):.3f}% 可多得5分")
+                if subs['斜率'] < 20: suggestions.append(f"斜率需再增加 {max(0, 0.0001-abs(slope)):.5f} 可多得5分")
+                if subs['量能'] < 10: suggestions.append(f"成交量需放大至 {max(0.8, vol_ratio+0.1):.1f}倍 可得10分")
+                elif subs['量能'] < 20: suggestions.append("成交量需放大至 1.3倍 可得20分")
                 if suggestions:
                     st.markdown("**改进方向:**")
-                    for s in suggestions[:3]:
-                        st.markdown(f"- {s}")
-        else:
-            st.info("评分系统未启用，信号基于RSI范围触发")
+                    for s in suggestions[:3]: st.markdown(f"- {s}")
 
-        # 触发条件检查
-        st.markdown("---")
-        st.markdown("**信号触发条件检查**")
-        prev_close = df['close'].iloc[-2] if len(df) >= 2 else last['close']
-        ema_f, ema_s = last['ema_fast'], last['ema_slow']
-        price = last['close']
-
-        is_bull = ema_f > ema_s
-        is_bear = ema_f < ema_s
-        if is_bull:
-            st.markdown(f"- EMA方向: ✅ 多头 (快线 {ema_f:.2f} > 慢线 {ema_s:.2f})")
-        elif is_bear:
-            st.markdown(f"- EMA方向: ✅ 空头 (快线 {ema_f:.2f} < 慢线 {ema_s:.2f})")
-        else:
-            st.markdown("- EMA方向: ❌ 粘合")
-
-        if is_bull and price > prev_close:
-            st.markdown(f"- 价格突破: ✅ 收盘 {price:.2f} > 前收 {prev_close:.2f}")
-        elif is_bear and price < prev_close:
-            st.markdown(f"- 价格突破: ✅ 收盘 {price:.2f} < 前收 {prev_close:.2f}")
-        else:
-            st.markdown(f"- 价格突破: ❌ 收盘 {price:.2f} {'>' if is_bull else '<'} 前收 {prev_close:.2f} 未满足")
-
-        if use_score:
-            st.markdown(f"- 评分达标: {'✅' if total_score >= score_thresh else '❌'} 当前 {total_score} ≥ {score_thresh}")
-
-    # ---------- 最近K线表格 ----------
+    # ---------- 最近K线 & 历史信号 ----------
     with st.expander("📊 最近10根K线（含指标）", expanded=False):
         show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
         show.index = show.index.strftime('%Y-%m-%d %H:%M')
         show.columns = ['开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
         st.dataframe(show)
 
-    # ---------- 历史信号记录（加盈亏%及导出） ----------
     if st.session_state.history:
         st.subheader("📜 最近信号")
         hist = pd.DataFrame(list(st.session_state.history)[:10])
         hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
-        
-        # 计算盈亏百分比列
+
         def calc_pnl(row):
-            if row['结果'] == 'pending':
-                return '待定'
-            if pd.isna(row['出场价']):
-                return '-'
+            if row['结果'] == 'pending': return '待定'
+            if pd.isna(row['出场价']): return '-'
             diff = row['出场价'] - row['进场价']
-            if row['方向'] == 'BUY':
-                pnl = (diff / row['进场价']) * 100
-            else:  # SELL
-                pnl = (-diff / row['进场价']) * 100
+            pnl = (diff / row['进场价']) * 100 if row['方向'] == 'BUY' else (-diff / row['进场价']) * 100
             return f"{pnl:+.2f}%"
         hist_display['盈亏%'] = hist_display.apply(calc_pnl, axis=1)
 
-        # 条件格式着色
         def style_result(val):
-            if val == 'win':
-                return 'background-color: #1a3c34; color: #00ff9d'
-            elif val == 'loss':
-                return 'background-color: #3c1a1a; color: #ff4d4d'
-            elif val == 'pending':
-                return 'background-color: #1e3a5f; color: #ffd700'
+            if val == 'win': return 'background-color: #1a3c34; color: #00ff9d'
+            if val == 'loss': return 'background-color: #3c1a1a; color: #ff4d4d'
+            if val == 'pending': return 'background-color: #1e3a5f; color: #ffd700'
             return ''
-
         styled = hist_display.style.map(style_result, subset=['结果'])
         st.dataframe(styled)
 
-        # 导出CSV按钮
         csv = hist_display.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 导出历史信号 (CSV)",
-            data=csv,
-            file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
-        )
+        st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
     else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 终极版 v4.0 • 双数据源 • 缓存优化 • 一键重置 • 导出功能 • 极致完美 • 祝你交易顺利！💰")
+st.caption("🔥 顶级完美终极版 v4.1 • 双数据源 • 零警告 • 极致美观 • 一键重置 • 导出功能 • 祝你交易大赚！💰")
