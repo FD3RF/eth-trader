@@ -13,10 +13,20 @@ INTERVAL = "5"
 LIMIT = 200
 INTERVAL_MINUTES = 5
 
-# ---------- Session State ----------
-for key in ['history', 'candles', 'last_signal_time', 'api_fail', 'last_error']:
+# ---------- Session State 初始化（彻底解决 Warning） ----------
+for key, default in {
+    'history': deque(maxlen=200),
+    'candles': deque(maxlen=500),
+    'last_signal_time': None,
+    'api_fail': 0,
+    'last_error': "",
+    'fast': 8, 'slow': 21, 'rsi_period': 14,
+    'buy_min': 57, 'buy_max': 70, 'sell_min': 30, 'sell_max': 43,
+    'refresh': 30, 'use_score': True, 'score_thresh': 70,
+    'use_atr_sl': True, 'sl_m': 2.2, 'tp1_m': 0.8, 'tp2_m': 1.6
+}.items():
     if key not in st.session_state:
-        st.session_state[key] = deque(maxlen=200) if key == 'history' else deque(maxlen=500) if key == 'candles' else None if key == 'last_signal_time' else 0 if key == 'api_fail' else ""
+        st.session_state[key] = default
 
 # ---------- 数据获取 ----------
 @st.cache_data(ttl=10, show_spinner=False)
@@ -181,30 +191,28 @@ st.title("📈 ETH 5分钟 EMA 终极版 (双数据源 + 顶级优化)")
 # ---------- 侧边栏 ----------
 with st.sidebar:
     st.header("参数")
-    if 'fast' not in st.session_state:
-        reset_defaults()
-    fast = st.number_input("快线EMA", 1, 50, value=st.session_state.get('fast', 8), key='fast')
-    slow = st.number_input("慢线EMA", 2, 100, value=st.session_state.get('slow', 21), key='slow')
-    rsi_period = st.number_input("RSI周期", 2, 50, value=st.session_state.get('rsi_period', 14), key='rsi_period')
+    fast = st.number_input("快线EMA", 1, 50, key='fast')
+    slow = st.number_input("慢线EMA", 2, 100, key='slow')
+    rsi_period = st.number_input("RSI周期", 2, 50, key='rsi_period')
     col1, col2 = st.columns(2)
     with col1:
         st.caption("多头RSI")
-        buy_min = st.number_input("多头下限", 0, 100, value=st.session_state.get('buy_min', 57), key='buy_min')
-        buy_max = st.number_input("多头上限", 0, 100, value=st.session_state.get('buy_max', 70), key='buy_max')
+        buy_min = st.number_input("多头下限", 0, 100, key='buy_min')
+        buy_max = st.number_input("多头上限", 0, 100, key='buy_max')
     with col2:
         st.caption("空头RSI")
-        sell_min = st.number_input("空头下限", 0, 100, value=st.session_state.get('sell_min', 30), key='sell_min')
-        sell_max = st.number_input("空头上限", 0, 100, value=st.session_state.get('sell_max', 43), key='sell_max')
-    refresh = st.number_input("刷新秒数", 5, 300, value=st.session_state.get('refresh', 30), key='refresh')
+        sell_min = st.number_input("空头下限", 0, 100, key='sell_min')
+        sell_max = st.number_input("空头上限", 0, 100, key='sell_max')
+    refresh = st.number_input("刷新秒数", 5, 300, key='refresh')
     st.caption(f"⏳ 下次刷新: {refresh}秒后 (手动)")
 
-    use_score = st.checkbox("启用评分系统", value=st.session_state.get('use_score', True), key='use_score')
-    score_thresh = st.slider("评分阈值", 0, 100, value=st.session_state.get('score_thresh', 70), disabled=not use_score, key='score_thresh')
-    use_atr_sl = st.checkbox("ATR动态止损", value=st.session_state.get('use_atr_sl', True), key='use_atr_sl')
+    use_score = st.checkbox("启用评分系统", key='use_score')
+    score_thresh = st.slider("评分阈值", 0, 100, key='score_thresh', disabled=not use_score)
+    use_atr_sl = st.checkbox("ATR动态止损", key='use_atr_sl')
     if use_atr_sl:
-        sl_m = st.slider("止损倍数", 1.0, 5.0, value=st.session_state.get('sl_m', 2.2), step=0.1, key='sl_m')
-        tp1_m = st.slider("TP1倍数", 0.2, 3.0, value=st.session_state.get('tp1_m', 0.8), step=0.1, key='tp1_m')
-        tp2_m = st.slider("TP2倍数", 0.5, 5.0, value=st.session_state.get('tp2_m', 1.6), step=0.1, key='tp2_m')
+        sl_m = st.slider("止损倍数", 1.0, 5.0, key='sl_m', step=0.1)
+        tp1_m = st.slider("TP1倍数", 0.2, 3.0, key='tp1_m', step=0.1)
+        tp2_m = st.slider("TP2倍数", 0.5, 5.0, key='tp2_m', step=0.1)
 
     st.metric("📡 API失败", st.session_state.api_fail)
     if st.session_state.last_error:
@@ -432,4 +440,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 顶级完美终极版 v5.0 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
+st.caption("🔥 顶级完美终极版 v5.1 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
