@@ -159,6 +159,8 @@ st.markdown("""
     @keyframes pulse-glow { 0% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); } 50% { box-shadow: 0 0 45px rgba(0,255,157,0.7), inset 0 0 25px rgba(0,255,157,0.4); } 100% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); } }
     .signal-card.sell-active { border-color: #ff4d88; animation: pulse-glow-sell 2.6s ease-in-out infinite alternate; }
     @keyframes pulse-glow-sell { 0% { box-shadow: 0 0 20px #ff4d8880; } 50% { box-shadow: 0 0 55px #ff4d88c0; } 100% { box-shadow: 0 0 20px #ff4d8880; } }
+    .blink-title { animation: subtle-blink 4s infinite ease-in-out; }
+    @keyframes subtle-blink { 0%,100%{opacity:1} 50%{opacity:0.75} }
     .signal-title { font-size:1.65rem; margin-bottom:18px; font-weight:bold; }
     .big-number { font-size:2.35rem; font-weight:bold; margin:6px 0; }
     .positive { color:#00ff9d; }
@@ -166,7 +168,7 @@ st.markdown("""
     .label { color:#a0b0c0; font-size:0.92rem; margin-bottom:6px; }
     .progress-container { background:#1e293b; border-radius:10px; height:14px; margin:14px 0; overflow:hidden; }
     .progress-bar { height:100%; background:linear-gradient(to right, #00ff9d, #00bfff); transition:width 0.5s ease; }
-    .waiting-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 3px solid #4da9ff; border-radius: 18px; padding: 42px; text-align: center; color: #ccd6e0; animation: pulse-wait 3s ease-in-out infinite alternate; }
+    .waiting-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 3px solid; border-radius: 18px; padding: 42px; text-align: center; color: #ccd6e0; animation: pulse-wait 3s ease-in-out infinite alternate; }
     @keyframes pulse-wait { 0% { box-shadow: 0 0 12px #4da9ff80; } 50% { box-shadow: 0 0 35px #4da9ffc0; } 100% { box-shadow: 0 0 12px #4da9ff80; } }
     .trend-big { font-size:2rem; font-weight:bold; text-align:center; margin:10px 0; }
     .api-error { color:#ffaa00; font-size:0.9rem; margin-top:6px; }
@@ -358,12 +360,14 @@ else:
         side_guess = 'BUY' if last['ema_fast'] > last['ema_slow'] else 'SELL'
         total_score, _ = get_score(side_guess, df)
         title_color = trend_color if '多头' in trend else '#ff4d88' if '空头' in trend else '#aaa'
+        high_score_hint = "✅ 评分已达标！等待EMA交叉与价格突破" if total_score >= score_thresh and use_score else ""
         st.markdown(f"""
         <div class="waiting-card">
             <h3 style="color:{title_color}; margin:0 0 18px 0; font-size:1.65rem;">等待下一个高质量信号...</h3>
             <div style="font-size:1.18rem; line-height:1.65;">
                 <strong>当前趋势：</strong> {trend}<br>
-                <strong>综合评分：</strong> {total_score}/100 （阈值 {score_thresh if use_score else '未启用'}）
+                <strong>综合评分：</strong> {total_score}/100 （阈值 {score_thresh if use_score else '未启用'}）<br>
+                <span style="color:#ffd700;font-weight:600;">{high_score_hint}</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -428,4 +432,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 顶级完美终极版 v4.3 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
+st.caption("🔥 顶级完美终极版 v5.0 • 零警告 • 双数据源 • 顶级动效 • 极致稳定 • 祝你交易大赚特赚！💰🚀")
