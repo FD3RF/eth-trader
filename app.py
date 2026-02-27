@@ -15,7 +15,7 @@ INTERVAL = "5"                     # 5分钟K线（可改为60做1小时）
 LIMIT = 200
 INTERVAL_MINUTES = 5                # 必须与INTERVAL一致（分钟）
 
-# ---------- Session ----------
+# ---------- 初始化 Session ----------
 if 'history' not in st.session_state:
     st.session_state.history = deque(maxlen=200)   # 历史信号（内存）
 if 'candles' not in st.session_state:
@@ -24,36 +24,47 @@ if 'last_signal_time' not in st.session_state:
     st.session_state.last_signal_time = None
 if 'api_fail' not in st.session_state:
     st.session_state.api_fail = 0
+if 'last_error' not in st.session_state:
+    st.session_state.last_error = ""
 
-# ---------- 数据获取 (CryptoCompare + Binance Fallback) ----------
-def fetch_klines():
-    """获取最近200根5分钟K线，主源 CryptoCompare，失败时切换 Binance"""
-    # 尝试 CryptoCompare
+# ---------- 数据获取 (带缓存和备用源) ----------
+@st.cache_data(ttl=10, show_spinner=False)
+def fetch_klines_cached():
+    """缓存版本，每次调用会检查缓存"""
+    return _fetch_klines_impl()
+
+def _fetch_klines_impl():
+    """实际获取K线，先尝试 CryptoCompare，失败后切 Binance"""
+    # CryptoCompare 主源
     try:
         url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit={LIMIT}&aggregate={INTERVAL}"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()['Data']['Data']
+        st.session_state.last_error = ""
         return [[x['time']*1000, x['open'], x['high'], x['low'], x['close'], x['volumefrom']] for x in data]
-    except:
+    except Exception as e:
         st.session_state.api_fail += 1
+        st.session_state.last_error = f"CryptoCompare 失败: {str(e)[:50]}"
         # Binance 备用
         try:
             url = f"https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit={LIMIT}"
             resp = requests.get(url, timeout=8)
             resp.raise_for_status()
             data = resp.json()
-            # Binance 返回格式: [openTime, open, high, low, close, volume, ...]
+            st.session_state.last_error = ""
             return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in data]
-        except:
+        except Exception as e2:
+            st.session_state.last_error += f" Binance 备用也失败: {str(e2)[:50]}"
             return []
 
 def fetch_latest():
-    """获取最新一根K线，主源 CryptoCompare，失败时切换 Binance"""
+    """获取最新一根K线（无缓存，实时）"""
     try:
         url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit=1&aggregate={INTERVAL}"
         resp = requests.get(url, timeout=5)
-        return [resp.json()['Data']['Data'][0][k] for k in ['time','open','high','low','close','volumefrom']]
+        data = resp.json()['Data']['Data'][0]
+        return [data['time']*1000, data['open'], data['high'], data['low'], data['close'], data['volumefrom']]
     except:
         try:
             url = "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=1"
@@ -151,14 +162,28 @@ def fill_missing(buf, new):
         return missing + [new]
     return [new]
 
+# ---------- 重置默认参数 ----------
+def reset_defaults():
+    st.session_state.fast = 8
+    st.session_state.slow = 21
+    st.session_state.rsi_period = 14
+    st.session_state.buy_min = 57
+    st.session_state.buy_max = 70
+    st.session_state.sell_min = 30
+    st.session_state.sell_max = 43
+    st.session_state.refresh = 30
+    st.session_state.use_score = True
+    st.session_state.score_thresh = 70
+    st.session_state.use_atr_sl = True
+    st.session_state.sl_m = 2.2
+    st.session_state.tp1_m = 0.8
+    st.session_state.tp2_m = 1.6
+
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="ETH 5分钟终极版", layout="wide")
 st.markdown("""
 <style>
-    /* 全局暗黑主題強化 */
     .stApp { background: #0a0e17; }
-    
-    /* 信號卡片主體 */
     .signal-card {
         background: linear-gradient(135deg, #0f2a1f, #0a1f33);
         border: 2px solid #00ff9d;
@@ -166,75 +191,34 @@ st.markdown("""
         padding: 24px;
         margin: 16px 0;
         box-shadow: 0 0 20px rgba(0, 255, 157, 0.25);
-        position: relative;
-        overflow: hidden;
         animation: pulse-glow 3s ease-in-out infinite alternate;
     }
-
     @keyframes pulse-glow {
         0% { box-shadow: 0 0 15px rgba(0, 255, 157, 0.3), inset 0 0 10px rgba(0, 255, 157, 0.15); border-color: #00ff9d; }
         50% { box-shadow: 0 0 35px rgba(0, 255, 157, 0.6), inset 0 0 20px rgba(0, 255, 157, 0.3); border-color: #00ff9d; }
         100% { box-shadow: 0 0 15px rgba(0, 255, 157, 0.3), inset 0 0 10px rgba(0, 255, 157, 0.15); border-color: #00ff9d; }
     }
-
-    .signal-card.buy-active {
-        animation: pulse-glow-buy 2.8s ease-in-out infinite alternate;
-    }
+    .signal-card.buy-active { animation: pulse-glow-buy 2.8s ease-in-out infinite alternate; }
     @keyframes pulse-glow-buy {
         0% { box-shadow: 0 0 20px #00ff9d80; border-color: #00ff9d; }
         50% { box-shadow: 0 0 45px #00ff9dc0; border-color: #4dff88; }
         100% { box-shadow: 0 0 20px #00ff9d80; border-color: #00ff9d; }
     }
-
-    .signal-card.sell-active {
-        animation: pulse-glow-sell 2.8s ease-in-out infinite alternate;
-    }
+    .signal-card.sell-active { animation: pulse-glow-sell 2.8s ease-in-out infinite alternate; }
     @keyframes pulse-glow-sell {
         0% { box-shadow: 0 0 20px #ff4d8880; border-color: #ff4d88; }
         50% { box-shadow: 0 0 45px #ff4d88c0; border-color: #ff6699; }
         100% { box-shadow: 0 0 20px #ff4d8880; border-color: #ff4d88; }
     }
-
-    .blink-title {
-        animation: subtle-blink 4s infinite ease-in-out;
-    }
-    @keyframes subtle-blink {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.75; }
-    }
-
-    .signal-title {
-        color: #00ff9d;
-        font-size: 1.6rem;
-        margin-bottom: 16px;
-        font-weight: bold;
-    }
-    
-    .big-number {
-        font-size: 2.2rem;
-        font-weight: bold;
-        margin: 4px 0;
-    }
-    
-    .positive { color: #00ff9d; }
-    .negative { color: #ff4d88; }
-    
-    .label { color: #a0b0c0; font-size: 0.9rem; margin-bottom: 4px; }
-    
-    .progress-container {
-        background: #1e293b;
-        border-radius: 8px;
-        height: 12px;
-        margin: 12px 0;
-        overflow: hidden;
-    }
-    .progress-bar {
-        height: 100%;
-        background: linear-gradient(to right, #00ff9d, #00bfff);
-        transition: width 0.4s ease;
-    }
-
-    /* 等待卡片优化：加入脈動動畫 */
+    .blink-title { animation: subtle-blink 4s infinite ease-in-out; }
+    @keyframes subtle-blink { 0%,100%{opacity:1} 50%{opacity:0.75} }
+    .signal-title { color:#00ff9d; font-size:1.6rem; margin-bottom:16px; font-weight:bold; }
+    .big-number { font-size:2.2rem; font-weight:bold; margin:4px 0; }
+    .positive { color:#00ff9d; }
+    .negative { color:#ff4d88; }
+    .label { color:#a0b0c0; font-size:0.9rem; margin-bottom:4px; }
+    .progress-container { background:#1e293b; border-radius:8px; height:12px; margin:12px 0; overflow:hidden; }
+    .progress-bar { height:100%; background:linear-gradient(to right, #00ff9d, #00bfff); transition:width 0.4s ease; }
     .waiting-card {
         background: linear-gradient(135deg, #0f2a1f, #0a1f33);
         border: 2px solid #4da9ff;
@@ -249,47 +233,48 @@ st.markdown("""
         50% { box-shadow: 0 0 30px #4da9ffc0; border-color: #80b4ff; }
         100% { box-shadow: 0 0 10px #4da9ff80; border-color: #4da9ff; }
     }
-
-    /* 趨勢標題加粗 */
-    .trend-big {
-        font-size: 1.8rem;
-        font-weight: bold;
-        text-align: center;
-        margin-bottom: 8px;
-    }
+    .trend-big { font-size:1.8rem; font-weight:bold; text-align:center; margin-bottom:8px; }
+    .api-error { color:#ffaa00; font-size:0.9rem; margin-top:4px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 ETH 5分钟 EMA 终极版 (CryptoCompare + Binance Fallback)")
+st.title("📈 ETH 5分钟 EMA 终极版 (双数据源 + 高级优化)")
 
 # ---------- 侧边栏 ----------
 with st.sidebar:
     st.header("参数")
-    fast = st.number_input("快线EMA", 1, 50, 8)
-    slow = st.number_input("慢线EMA", 2, 100, 21)
-    rsi_period = st.number_input("RSI周期", 2, 50, 14)
+    # 使用 session_state 存储参数，便于重置
+    if 'fast' not in st.session_state:
+        reset_defaults()
+    fast = st.number_input("快线EMA", 1, 50, st.session_state.fast, key='fast')
+    slow = st.number_input("慢线EMA", 2, 100, st.session_state.slow, key='slow')
+    rsi_period = st.number_input("RSI周期", 2, 50, st.session_state.rsi_period, key='rsi_period')
     col1, col2 = st.columns(2)
     with col1:
         st.caption("多头RSI")
-        buy_min = st.number_input("多头下限", 0, 100, 57, key='bmin')
-        buy_max = st.number_input("多头上限", 0, 100, 70, key='bmax')
+        buy_min = st.number_input("多头下限", 0, 100, st.session_state.buy_min, key='buy_min')
+        buy_max = st.number_input("多头上限", 0, 100, st.session_state.buy_max, key='buy_max')
     with col2:
         st.caption("空头RSI")
-        sell_min = st.number_input("空头下限", 0, 100, 30, key='smin')
-        sell_max = st.number_input("空头上限", 0, 100, 43, key='smax')
-    refresh = st.number_input("刷新秒数", 5, 300, 30)
+        sell_min = st.number_input("空头下限", 0, 100, st.session_state.sell_min, key='sell_min')
+        sell_max = st.number_input("空头上限", 0, 100, st.session_state.sell_max, key='sell_max')
+    refresh = st.number_input("刷新秒数", 5, 300, st.session_state.refresh, key='refresh')
     st.caption(f"⏳ 下次刷新: {refresh}秒后 (手动)")
 
-    use_score = st.checkbox("启用评分系统", True)
-    score_thresh = st.slider("评分阈值", 0, 100, 70, disabled=not use_score)
-    use_atr_sl = st.checkbox("ATR动态止损", True)
+    use_score = st.checkbox("启用评分系统", value=st.session_state.use_score, key='use_score')
+    score_thresh = st.slider("评分阈值", 0, 100, st.session_state.score_thresh, disabled=not use_score, key='score_thresh')
+    use_atr_sl = st.checkbox("ATR动态止损", value=st.session_state.use_atr_sl, key='use_atr_sl')
     if use_atr_sl:
-        sl_m = st.slider("止损倍数", 1.0, 5.0, 2.2, 0.1)
-        tp1_m = st.slider("TP1倍数", 0.2, 3.0, 0.8, 0.1)
-        tp2_m = st.slider("TP2倍数", 0.5, 5.0, 1.6, 0.1)
+        sl_m = st.slider("止损倍数", 1.0, 5.0, st.session_state.sl_m, 0.1, key='sl_m')
+        tp1_m = st.slider("TP1倍数", 0.2, 3.0, st.session_state.tp1_m, 0.1, key='tp1_m')
+        tp2_m = st.slider("TP2倍数", 0.5, 5.0, st.session_state.tp2_m, 0.1, key='tp2_m')
+    else:
+        sl_m = tp1_m = tp2_m = None
 
     st.metric("📡 API失败", st.session_state.api_fail)
-    
+    if st.session_state.last_error:
+        st.markdown(f'<div class="api-error">⚠️ {st.session_state.last_error}</div>', unsafe_allow_html=True)
+
     # 信号统计面板
     if st.session_state.history:
         total = len(st.session_state.history)
@@ -305,14 +290,22 @@ with st.sidebar:
         st.sidebar.markdown(f"⏳ 待定: {pending}")
         st.sidebar.markdown(f"🎯 胜率: {win_rate:.1f}%")
 
-    col_btn1, col_btn2 = st.columns(2)
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
     with col_btn1:
-        st.button("🗑 清空历史", on_click=lambda: st.session_state.history.clear())
+        if st.button("🗑 清空历史"):
+            st.session_state.history.clear()
     with col_btn2:
-        st.button("🔄 立即刷新", on_click=lambda: st.rerun())
+        if st.button("🔄 立即刷新"):
+            st.cache_data.clear()   # 清除K线缓存
+            st.rerun()
+    with col_btn3:
+        if st.button("⚙️ 重置默认"):
+            reset_defaults()
+            st.rerun()
 
 # ---------- 数据加载 ----------
-klines = fetch_klines()
+# 使用缓存版本获取K线，手动刷新时会清除缓存
+klines = fetch_klines_cached()
 if klines:
     if not st.session_state.candles:
         st.session_state.candles.extend(klines)
@@ -486,7 +479,7 @@ else:
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 修复等待卡片文字重复，并动态显示评分
+        # 等待卡片
         side_guess = 'BUY' if last['ema_fast'] > last['ema_slow'] else 'SELL'
         total_score, _ = get_score(side_guess, df)
         st.markdown(f"""
@@ -528,7 +521,7 @@ else:
         height=650,
         template="plotly_dark",
         showlegend=False,
-        xaxis_rangeslider_visible=False  # 隐藏下方缩放条
+        xaxis_rangeslider_visible=False
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -609,10 +602,10 @@ else:
         show.columns = ['开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
         st.dataframe(show, use_container_width=True)
 
-    # ---------- 历史信号记录（加盈亏%） ----------
+    # ---------- 历史信号记录（加盈亏%及导出） ----------
     if st.session_state.history:
         st.subheader("📜 最近信号")
-        hist = pd.DataFrame(list(st.session_state.history)[:5])
+        hist = pd.DataFrame(list(st.session_state.history)[:10])
         hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
         
@@ -640,11 +633,19 @@ else:
                 return 'background-color: #1e3a5f; color: #ffd700'
             return ''
 
-        # 对结果列应用样式，并保留盈亏%列的自然显示
         styled = hist_display.style.applymap(style_result, subset=['结果'])
         st.dataframe(styled, use_container_width=True)
+
+        # 导出CSV按钮
+        csv = hist_display.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 导出历史信号 (CSV)",
+            data=csv,
+            file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+        )
     else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 终极版 v3.0 • 含API备用 • 图表优化 • 盈亏列 • 等待卡片修复 • 祝你交易顺利！💰")
+st.caption("🔥 终极版 v4.0 • 双数据源 • 缓存优化 • 一键重置 • 导出功能 • 极致完美 • 祝你交易顺利！💰")
