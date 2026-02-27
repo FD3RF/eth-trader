@@ -1,71 +1,128 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 import plotly.graph_objects as go
+from scipy.signal import argrelextrema
 from datetime import datetime
 
-# ==================== 核心参数 (基于图10和你的回复) ====================
+# ==================== 1. 核心配置与实战引擎 ====================
 OKX_CONFIG = {
     "api_key": "a2a2a452-49e6-4e76-95f3-fb54eb982e7b",
     "secret_key": "330FABB2CAD3585677716686C2BF3872",
     "passphrase": "123321aA@", 
 }
 
-# UI 页面配置
-st.set_page_config(page_title="ETH V30.0 OKX旗舰版", layout="wide")
-
-# ==================== 数据获取 (适配 LetsVPN) ====================
-@st.cache_data(ttl=5)
-def get_market_data():
-    # 自动识别图4中的香港VPN隧道
-    url = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=5m&limit=150"
+def fetch_okx_data(bar='5m', limit=100):
+    url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit={limit}"
     try:
         with requests.Session() as s:
-            s.trust_env = True # 必须开启以穿透 LetsVPN
-            r = s.get(url, timeout=10)
-            data = r.json()
-            if data.get('code') == '0':
-                df = pd.DataFrame(data['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
-                df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms')
-                df.set_index('time', inplace=True)
-                for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
-                return df.sort_index()
-    except Exception as e:
-        st.sidebar.warning("📡 链路握手中...")
-    return pd.DataFrame()
+            s.trust_env = True # 穿透 LetsVPN
+            r = s.get(url, timeout=5)
+            df = pd.DataFrame(r.json()['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
+            df[['o','h','l','c','v']] = df[['o','h','l','c','v']].astype(float)
+            return df[::-1].reset_index(drop=True)
+    except: return pd.DataFrame()
 
-# ==================== 渲染主界面 ====================
-df = get_market_data()
-
-if not df.empty:
-    # 1. 指标计算 (回归图8阴跌模型)
-    df['ema21'] = df['c'].ewm(span=21).mean()
-    df['v_avg'] = df['v'].rolling(20).mean()
-    curr = df.iloc[-1]
+# ==================== 2. 核心算法逻辑 ====================
+def analyze_logic(df):
+    # EMA 与 MACD 计算
+    df['ema21'] = df['c'].ewm(span=21, adjust=False).mean()
+    exp1 = df['c'].ewm(span=12, adjust=False).mean()
+    exp2 = df['c'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp1 - exp2
+    df['sig'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['hist'] = df['macd'] - df['sig']
     
-    # 核心：阴跌评分逻辑
-    is_down = curr['c'] < curr['ema21']
-    is_low_vol = curr['v'] < df['v_avg'].iloc[-1] * 0.75
-    risk_score = 98.9 if is_down and is_low_vol else 12.5
+    # 底背离检测
+    df['p_min'] = df.iloc[argrelextrema(df['l'].values, np.less_indicator, order=5)[0]]['l']
+    df['m_min'] = df.iloc[argrelextrema(df['hist'].values, np.less_indicator, order=5)[0]]['hist']
+    pts = df.dropna(subset=['p_min']).tail(2)
+    mds = df.dropna(subset=['m_min']).tail(2)
+    div = False
+    if len(pts)==2 and len(mds)==2:
+        if pts.iloc[1]['l'] < pts.iloc[0]['l'] and mds.iloc[1]['hist'] > mds.iloc[0]['hist']:
+            div = True
+            
+    # 趋势灯状态
+    curr_c = df.iloc[-1]['c']
+    curr_ema = df.iloc[-1]['ema21']
+    status = "🟢" if curr_c > curr_ema else "🔴"
+    
+    return df, status, div
 
-    # 2. 顶部仪表盘
-    st.title("🛡️ ETH V30.0 实战防御系统")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("ETH 指数价", f"${curr['c']:.2f}")
-    col2.metric("阴跌风险", f"{risk_score}", "高危" if risk_score > 80 else "安全", delta_color="inverse")
-    col3.metric("EMA趋势", "🔴 空头洗盘" if is_down else "🟢 多头喷发")
-    col4.metric("LetsVPN 状态", "已连接 (香港)")
+# ==================== 3. 页面渲染 (全能面板) ====================
+st.set_page_config(page_title="ETH V34.0 全能指挥部", layout="wide")
 
-    # 3. 风险预警
-    if risk_score > 80:
-        st.error(f"⚠️ 触发阴跌预警：当前价格 ${curr['c']:.2f} 处于 EMA21 压力线下方且成交量极度萎缩！")
+# 执行数据抓取
+df_5m_raw = fetch_okx_data('5m')
+df_15m_raw = fetch_okx_data('15m')
+df_1h_raw = fetch_okx_data('1h')
 
-    # 4. 图表渲染 (Plotly 6.5.2)
-    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="K线")])
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='cyan', width=1.5), name="EMA21"))
+if not df_5m_raw.empty:
+    df_5m, s5, div5 = analyze_logic(df_5m_raw)
+    _, s15, _ = analyze_logic(df_15m_raw)
+    _, s1h, _ = analyze_logic(df_1h_raw)
+    
+    curr = df_5m.iloc[-1]
+    vol_avg = df_5m['v'].rolling(20).mean().iloc[-1]
+    
+    # 侧边栏
+    st.sidebar.title("🎮 参数调节")
+    yindie_limit = st.sidebar.slider("阴跌风险禁入线", 50, 100, 76)
+    
+    st.title("🛡️ ETH V34.0 全能报警面板")
+
+    # --- 第一行：核心指标与报警面板 ---
+    c1, c2, c3, c4 = st.columns([1, 1, 1.5, 1])
+    
+    with c1:
+        st.metric("ETH 实时价", f"${curr['c']:.2f}", f"{curr['c']-df_5m.iloc[-2]['c']:.2f}")
+    
+    with c2:
+        # 阴跌评分计算 (V15.3 增强公式)
+        risk = 98.9 if s5 == "🔴" and curr['v'] < vol_avg * 0.75 else 12.5
+        st.metric("阴跌风险评分", f"{risk}", "高危" if risk > yindie_limit else "安全", delta_color="inverse")
+
+    with c3:
+        # 【全能面板核心】：共振灯 + 背离监测 横向集成
+        st.write("🚦 综合态势监控 (5m/15m/1h | 信号)")
+        status_html = f"""
+        <div style="background:#161b22; padding:10px; border-radius:10px; border:1px solid #30363d; display:flex; justify-content:space-around; align-items:center;">
+            <div style="text-align:center;"><span style="font-size:20px;">{s5}</span><br><small>5m</small></div>
+            <div style="text-align:center;"><span style="font-size:20px;">{s15}</span><br><small>15m</small></div>
+            <div style="text-align:center;"><span style="font-size:20px;">{s1h}</span><br><small>1h</small></div>
+            <div style="border-left:1px solid #30363d; height:30px; margin:0 10px;"></div>
+            <div style="text-align:center;">
+                <span style="font-size:18px; color:{'#00ffcc' if div5 else '#888'}; font-weight:bold;">
+                    {'💎 底背离' if div5 else '⚪ 无背离'}
+                </span>
+            </div>
+        </div>
+        """
+        st.markdown(status_html, unsafe_allow_html=True)
+
+    with c4:
+        st.metric("量能比", f"{curr['v']/vol_avg:.2f}x", "缩量" if curr['v'] < vol_avg else "活跃")
+
+    # --- 第二行：实时预警提示 ---
+    if s5 == "🔴" and s15 == "🔴" and s1h == "🔴":
+        st.error("🚨 警告：三周期全红！大势已去，阴跌风险极高，严禁任何抄底行为！")
+    elif div5:
+        st.success("🎯 发现 5m 级别 MACD 底背离！如果 15m 灯转绿，可能是极佳的入场反弹点。")
+
+    # --- 第三行：K 线主图 ---
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=df_5m.index, open=df_5m['o'], high=df_5m['h'], low=df_5m['l'], close=df_5m['c'], name="5m K线"))
+    fig.add_trace(go.Scatter(x=df_5m.index, y=df_5m['ema21'], line=dict(color='cyan', width=1.5), name="EMA21压力线"))
+    
+    # 标记局部低点
+    low_pts = df_5m.dropna(subset=['p_min'])
+    fig.add_trace(go.Scatter(x=low_pts.index, y=low_pts['l'], mode='markers', marker=dict(color='yellow', size=10, symbol='triangle-up'), name="波谷支撑"))
+    
     fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=5,r=5,t=5,b=5))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.caption(f"🚀 OKX API 实时同步中 | 刷新时间: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"🚀 Sniper V34.0 | 节点: {OKX_CONFIG['api_key'][:8]}... | 更新: {datetime.now().strftime('%H:%M:%S')}")
 else:
-    st.info("🔄 正在通过 LetsVPN 握手数据接口...")
+    st.warning("🔄 正在穿透 LetsVPN 隧道... 请确保 VPN 软件处于‘已连接’状态。")
