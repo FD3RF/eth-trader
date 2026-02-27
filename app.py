@@ -174,6 +174,23 @@ with st.sidebar:
         tp2_m = st.slider("TP2倍数", 0.5, 5.0, 1.6, 0.1)
 
     st.metric("📡 API失败", st.session_state.api_fail)
+    
+    # ========== 新增信号统计面板 ==========
+    if st.session_state.history:
+        total = len(st.session_state.history)
+        wins = sum(1 for s in st.session_state.history if s['result'] == 'win')
+        losses = sum(1 for s in st.session_state.history if s['result'] == 'loss')
+        pending = sum(1 for s in st.session_state.history if s['result'] == 'pending')
+        win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**📈 信号统计**")
+        st.sidebar.markdown(f"总信号: {total}")
+        st.sidebar.markdown(f"✅ 盈利: {wins}")
+        st.sidebar.markdown(f"❌ 亏损: {losses}")
+        st.sidebar.markdown(f"⏳ 待定: {pending}")
+        st.sidebar.markdown(f"🎯 胜率: {win_rate:.1f}%")
+    # ====================================
+
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         st.button("🗑 清空历史", on_click=lambda: st.session_state.history.clear())
@@ -195,8 +212,6 @@ latest = fetch_latest()
 if latest and (not st.session_state.candles or latest[0] > st.session_state.candles[-1][0]):
     for m in fill_missing(st.session_state.candles, latest):
         st.session_state.candles.append(m)
-
-# 已删除自动刷新，改为手动刷新按钮
 
 st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线: {len(st.session_state.candles)}")
 
@@ -397,4 +412,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 终极版 v2.3 • 手动刷新替代自动刷新 • 祝你交易顺利！💰")
+st.caption("🔥 终极版 v2.4 • 新增信号统计面板 • 祝你交易顺利！💰")
