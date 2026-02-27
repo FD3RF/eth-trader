@@ -9,14 +9,20 @@ import numpy as np
 from scipy.signal import argrelextrema
 import time
 
-# ==================== v15.1 配置 ====================
+# 尝试导入自动刷新组件，若未安装则优雅降级
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
+
+# ==================== v15.2 配置 ====================
 SYMBOL = "ETH"
 CURRENCY = "USD"
 INTERVAL = "5"
 LIMIT = 400
 INTERVAL_MINUTES = 5
 
-# 评分权重
+# 评分权重（可调常量）
 SCORE_BASE = 45
 SCORE_SLOPE_MAX = 50
 SCORE_RSI_STRONG = 50
@@ -30,30 +36,33 @@ BLEED_PENALTY_FACTOR = 0.7
 # ==================== Session State ====================
 if 'initialized' not in st.session_state:
     st.session_state.update({
+        # 核心策略参数
         'fast': 8, 'slow': 21, 'rsi_period': 14,
-        'buy_min': 50, 'buy_max': 80,
-        'sell_min': 20, 'sell_max': 50,
-        'refresh': 20, 'use_score': True, 'score_thresh': 80,
-        'bleed_threshold': 76,
-        'divergence_lookback': 120,
-        'volume_confirm': True,
-        'enable_sound': True,
-        'auto_refresh': False,
-        'use_atr_sl': True, 'sl_m': 1.8, 'tp1_m': 1.2, 'tp2_m': 2.5,
+        'score_thresh': 80,                # 信号触发阈值
+        'bleed_threshold': 76,              # 阴跌禁入阈值
+        'volume_confirm': True,              # 成交量确认过滤
+        'enable_sound': True,                # 声音提示
+        'auto_refresh': False,               # 自动刷新
+        # 风控参数
+        'use_atr_sl': True,                  # 是否使用ATR动态止损（若False则使用固定比例）
+        'sl_m': 1.8, 'tp1_m': 1.2, 'tp2_m': 2.5,
+        'trailing_sl_pct': 0.5,              # 追踪止损百分比
+        'partial_tp_pct': 0.5,               # TP1分批平仓比例
+        'risk_per_trade': 1.0,                # 单笔风险百分比
+        'account_balance': 10000.0,           # 账户余额 (USD)
+        # 数据与历史
         'history': deque(maxlen=200),
         'candles': deque(maxlen=1500),
         'last_signal_time': None,
-        'api_fail': 0, 'last_error': "",
-        'initialized': True,
-        'risk_per_trade': 1.0,
-        'account_balance': 10000.0,
-        'trailing_sl_pct': 0.5,
-        'partial_tp_pct': 0.5
+        'api_fail': 0,
+        'last_error': "",
+        'initialized': True
     })
 
 # ==================== 数据获取 ====================
 @st.cache_data(ttl=12, show_spinner=False)
 def fetch_data(interval='5m', limit=LIMIT):
+    """从Binance获取K线数据，支持多周期"""
     url = f"https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval={interval}&limit={limit}"
     try:
         resp = requests.get(url, timeout=5).json()
@@ -68,8 +77,11 @@ def fetch_data(interval='5m', limit=LIMIT):
 
 # ==================== 指标计算 ====================
 def get_indicators(df):
-    if df.empty: return df
+    """计算所有技术指标"""
+    if df.empty:
+        return df
 
+    df = df.copy()
     df['ema_fast'] = df['close'].ewm(span=st.session_state.fast, adjust=False).mean()
     df['ema_slow'] = df['close'].ewm(span=st.session_state.slow, adjust=False).mean()
 
@@ -78,7 +90,9 @@ def get_indicators(df):
     loss = -delta.where(delta < 0, 0).ewm(alpha=1/st.session_state.rsi_period).mean()
     df['rsi'] = 100 - (100 / (1 + gain / (loss + 1e-9)))
 
-    tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(1)
+    tr = pd.concat([df['high']-df['low'],
+                    (df['high']-df['close'].shift()).abs(),
+                    (df['low']-df['close'].shift()).abs()], axis=1).max(1)
     df['atr'] = tr.ewm(alpha=1/14).mean()
 
     df['macd_line'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
@@ -92,8 +106,10 @@ def get_indicators(df):
 
 # ==================== 阴跌评分 ====================
 def calc_bleed_score(df, lookback=60):
+    """计算阴跌风险分数 (0-100)"""
     data = df.tail(lookback)
-    if len(data) < 15: return 0
+    if len(data) < 15:
+        return 0
 
     atr_ratio = data['atr'].iloc[-1] / (data['atr'].mean() + 1e-9)
     s_atr = max(0, (1 - atr_ratio)) * 50
@@ -115,8 +131,10 @@ def calc_bleed_score(df, lookback=60):
 
 # ==================== MACD 背离 ====================
 def detect_divergence(df, lookback=120, order=7):
+    """检测MACD背离，返回(多头背离, 空头背离)"""
     data = df.tail(lookback)
-    if len(data) < 20: return None, None
+    if len(data) < 20:
+        return None, None
 
     p_low = argrelextrema(data['close'].values, np.less, order=order)[0]
     m_low = argrelextrema(data['macd_line'].values, np.greater, order=order)[0]
@@ -147,17 +165,23 @@ def detect_divergence(df, lookback=120, order=7):
 
 # ==================== 多周期共振 ====================
 def multi_timeframe_resonance(df_5m, df_15m, df_1h, side):
+    """检查15分钟和1小时周期是否与5分钟方向一致"""
+    if df_15m.empty or df_1h.empty:
+        return False
     if side == 'BUY':
         res_15 = df_15m['ema_fast'].iloc[-1] > df_15m['ema_slow'].iloc[-1] and df_15m['close'].iloc[-1] > df_15m['ema_fast'].iloc[-1]
         res_1h = df_1h['ema_fast'].iloc[-1] > df_1h['ema_slow'].iloc[-1] and df_1h['close'].iloc[-1] > df_1h['ema_fast'].iloc[-1]
     else:
         res_15 = df_15m['ema_fast'].iloc[-1] < df_15m['ema_slow'].iloc[-1] and df_15m['close'].iloc[-1] < df_15m['ema_fast'].iloc[-1]
         res_1h = df_1h['ema_fast'].iloc[-1] < df_1h['ema_slow'].iloc[-1] and df_1h['close'].iloc[-1] < df_1h['ema_fast'].iloc[-1]
-
     return res_15 and res_1h
 
 # ==================== 综合信心评分 ====================
 def get_brain_score(side, df, bleed_score, bull_div, bear_div):
+    """计算综合信心分数 (0-150)"""
+    if len(df) < 10:  # 数据不足时返回基础分
+        return SCORE_BASE
+
     last = df.iloc[-1]
     score = SCORE_BASE
 
@@ -184,6 +208,7 @@ def get_brain_score(side, df, bleed_score, bull_div, bear_div):
 
 # ==================== 仓位建议 ====================
 def suggest_position_size(confidence, bleed_score):
+    """根据信心和阴跌分数计算建议仓位金额"""
     if bleed_score > st.session_state.bleed_threshold or confidence < 50:
         return 0.0
 
@@ -195,18 +220,28 @@ def suggest_position_size(confidence, bleed_score):
 
 # ==================== 止损止盈 ====================
 def sltp(price, side, atr):
-    risk = atr * st.session_state.sl_m
-    if side == 'BUY':
-        return price - risk, price + risk * st.session_state.tp1_m, price + risk * st.session_state.tp2_m
-    return price + risk, price - risk * st.session_state.tp1_m, price - risk * st.session_state.tp2_m
+    """计算止损、TP1、TP2价格，支持ATR动态或固定比例"""
+    if st.session_state.use_atr_sl and atr > 0:
+        risk = atr * st.session_state.sl_m
+        if side == 'BUY':
+            return price - risk, price + risk * st.session_state.tp1_m, price + risk * st.session_state.tp2_m
+        else:
+            return price + risk, price - risk * st.session_state.tp1_m, price - risk * st.session_state.tp2_m
+    else:
+        # 固定比例（0.5%止损，1.0% TP1，2.0% TP2）
+        if side == 'BUY':
+            return price * 0.995, price * 1.01, price * 1.02
+        else:
+            return price * 1.005, price * 0.99, price * 0.98
 
 # ==================== 追踪止损 & 分批止盈 ====================
 def update_position(rec, current_price):
+    """更新追踪止损、分批止盈状态，并记录出场信息"""
     if rec['result'] != 'pending':
         return rec
 
     if rec['side'] == 'BUY':
-        # 连续追踪止损
+        # 追踪止损：价格创新高时更新
         if current_price > rec.get('highest_price', rec['entry']):
             rec['highest_price'] = current_price
             new_sl = rec['highest_price'] * (1 - st.session_state.trailing_sl_pct / 100)
@@ -220,6 +255,7 @@ def update_position(rec, current_price):
         # 止损触发
         if current_price <= rec.get('trailing_sl', rec['sl']):
             rec['result'] = '止损出局'
+            rec['exit_price'] = current_price
             rec['exit_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
     else:
         if current_price < rec.get('lowest_price', rec['entry']):
@@ -233,30 +269,69 @@ def update_position(rec, current_price):
 
         if current_price >= rec.get('trailing_sl', rec['sl']):
             rec['result'] = '止损出局'
+            rec['exit_price'] = current_price
             rec['exit_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
 
     return rec
 
 # ==================== 计算统计指标 ====================
-def calculate_stats(hist_df):
-    closed = hist_df[hist_df['result'] != 'pending']
-    pending = hist_df[hist_df['result'] == 'pending']
+def calculate_stats(hist_df, current_price):
+    """计算最大盈利、最大回撤、平均持仓时长（基于实际/浮动盈亏）"""
+    if hist_df.empty:
+        return 0.0, 0.0, "无持仓"
 
-    max_pnl = closed['current_pnl_%'].max() if not closed.empty else 0.0
-    max_dd = closed['current_pnl_%'].min() if not closed.empty else 0.0
+    # 实际盈亏列
+    hist_df['actual_pnl_%'] = np.where(
+        hist_df['result'] != 'pending',
+        np.where(
+            hist_df['side'] == 'BUY',
+            (hist_df['exit_price'] - hist_df['entry']) / hist_df['entry'] * 100,
+            (hist_df['entry'] - hist_df['exit_price']) / hist_df['entry'] * 100
+        ),
+        np.nan
+    )
 
-    # 持仓时长
+    # 浮动盈亏列
+    hist_df['floating_pnl_%'] = np.where(
+        hist_df['side'] == 'BUY',
+        (current_price - hist_df['entry']) / hist_df['entry'] * 100,
+        (hist_df['entry'] - current_price) / hist_df['entry'] * 100
+    )
+
+    # 最大盈利（已平仓中取最大值，若无则取浮动最大值）
+    max_pnl_closed = hist_df.loc[hist_df['result'] != 'pending', 'actual_pnl_%'].max()
+    max_pnl_floating = hist_df.loc[hist_df['result'] == 'pending', 'floating_pnl_%'].max()
+    max_pnl = max(
+        max_pnl_closed if pd.notna(max_pnl_closed) else -np.inf,
+        max_pnl_floating if pd.notna(max_pnl_floating) else -np.inf
+    )
+    max_pnl = max_pnl if pd.notna(max_pnl) else 0.0
+
+    # 最大回撤（已平仓中取最小值）
+    min_pnl_closed = hist_df.loc[hist_df['result'] != 'pending', 'actual_pnl_%'].min()
+    min_pnl_floating = hist_df.loc[hist_df['result'] == 'pending', 'floating_pnl_%'].min()
+    max_dd = min(
+        min_pnl_closed if pd.notna(min_pnl_closed) else np.inf,
+        min_pnl_floating if pd.notna(min_pnl_floating) else np.inf
+    )
+    max_dd = max_dd if pd.notna(max_dd) else 0.0
+
+    # 平均持仓时长
     now = datetime.now()
-    if not pending.empty:
-        hold_times = [(now - pd.to_datetime(t)).total_seconds() / 60 for t in pending['time']]
-        avg_hold = f"{np.mean(hold_times):.0f} 分钟"
-    else:
-        avg_hold = "无持仓"
+    durations = []
+    for _, row in hist_df.iterrows():
+        entry_time = pd.to_datetime(row['time'])
+        if row['result'] != 'pending' and pd.notna(row.get('exit_time')):
+            exit_time = pd.to_datetime(row['exit_time'])
+            durations.append((exit_time - entry_time).total_seconds() / 60)
+        else:
+            durations.append((now - entry_time).total_seconds() / 60)
+    avg_hold = f"{np.mean(durations):.0f} 分钟" if durations else "无持仓"
 
     return max_pnl, max_dd, avg_hold
 
 # ==================== UI ====================
-st.set_page_config(page_title="ETH V15.0 Ultimate Deep Insight", layout="wide")
+st.set_page_config(page_title="ETH V15.2 Ultimate Deep Insight", layout="wide")
 
 st.markdown("""
 <style>
@@ -270,7 +345,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("ETH V15.0 Ultimate Deep Insight – 多周期共振 + 动态风控系统")
+st.title("ETH V15.2 Ultimate Deep Insight – 多周期共振 + 动态风控系统")
 
 # 侧边栏
 with st.sidebar:
@@ -283,11 +358,21 @@ with st.sidebar:
     st.session_state.enable_sound = st.checkbox("启用信号声音提示", value=True)
     st.session_state.auto_refresh = st.checkbox("自动刷新页面", value=False)
     st.divider()
-    st.session_state.sl_m = st.slider("ATR止损倍数", 1.0, 5.0, 1.8)
+
+    st.header("📊 风控参数")
+    st.session_state.use_atr_sl = st.checkbox("使用ATR动态止损", value=True)
+    if st.session_state.use_atr_sl:
+        st.session_state.sl_m = st.slider("ATR止损倍数", 1.0, 5.0, 1.8)
+        st.session_state.tp1_m = st.slider("TP1倍数", 0.5, 3.0, 1.2, step=0.1)
+        st.session_state.tp2_m = st.slider("TP2倍数", 1.0, 5.0, 2.5, step=0.1)
+    else:
+        st.info("将使用固定比例止损：止损0.5%，TP1 1.0%，TP2 2.0%")
     st.session_state.trailing_sl_pct = st.slider("追踪止损%", 0.1, 1.0, 0.5, step=0.1)
     st.session_state.partial_tp_pct = st.slider("TP1分批平仓%", 0.3, 0.8, 0.5, step=0.1)
     st.session_state.risk_per_trade = st.slider("单笔风险 %", 0.5, 5.0, 1.0, step=0.1)
     st.session_state.account_balance = st.number_input("账户余额 (USD)", 1000.0, 1000000.0, 10000.0, step=100.0)
+
+    st.divider()
     if st.button("🗑 清空历史信号"):
         st.session_state.history.clear()
         st.rerun()
@@ -298,9 +383,12 @@ with st.sidebar:
         with st.expander("⚠️ API 错误日志"):
             st.write(st.session_state.last_error)
 
-# 自动刷新（需安装 streamlit-autorefresh 组件）
+# 自动刷新处理
 if st.session_state.auto_refresh:
-    st_autorefresh(interval=st.session_state.refresh * 1000, key="auto_refresh")
+    if st_autorefresh is None:
+        st.warning("请安装 streamlit-autorefresh 以使用自动刷新功能：`pip install streamlit-autorefresh`")
+    else:
+        st_autorefresh(interval=st.session_state.get('refresh', 20) * 1000, key="auto_refresh")
 
 # 主逻辑
 raw_data_5m = fetch_data('5m')
@@ -351,6 +439,7 @@ if len(raw_data_5m) > 100:
         </div>
         """, unsafe_allow_html=True)
 
+    # 信号触发
     if can_trade and side and st.session_state.last_signal_time != df_5m.index[-1]:
         sl, tp1, tp2 = sltp(last['close'], side, last['atr'])
         st.session_state.history.appendleft({
@@ -370,6 +459,7 @@ if len(raw_data_5m) > 100:
             'trailing_sl': sl,
             'highest_price': last['close'] if side == 'BUY' else None,
             'lowest_price': last['close'] if side == 'SELL' else None,
+            'exit_price': None,
             'exit_time': None
         })
         st.session_state.last_signal_time = df_5m.index[-1]
@@ -386,13 +476,11 @@ if len(raw_data_5m) > 100:
         if rec['result'] == 'pending':
             current_price = df_5m['close'].iloc[-1]
             rec = update_position(rec, current_price)
-            # 计算持仓时长
-            rec['hold_duration'] = (datetime.now() - pd.to_datetime(rec['time'])).total_seconds() / 60
 
     # 信号统计汇总
     if st.session_state.history:
-        hist_df = pd.DataFrame(list(st.session_state.history))
-        max_pnl, max_dd, avg_hold = calculate_stats(hist_df)
+        hist_df_raw = pd.DataFrame(list(st.session_state.history))
+        max_pnl, max_dd, avg_hold = calculate_stats(hist_df_raw, df_5m['close'].iloc[-1])
 
         cols = st.columns(3)
         cols[0].metric("最大 PNL", f"{max_pnl:+.2f}%", delta_color="normal" if max_pnl >= 0 else "inverse")
@@ -425,30 +513,51 @@ if len(raw_data_5m) > 100:
     fig.update_layout(height=940, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-    # 信号记录
+    # 信号记录表格
     if st.session_state.history:
         st.subheader("📜 信号记录（含追踪止损 & 分批状态）")
         hist_df = pd.DataFrame(list(st.session_state.history))
         current_price = df_5m['close'].iloc[-1]
-        hist_df['current_pnl_%'] = np.where(
-            hist_df['side'] == 'BUY',
-            (current_price - hist_df['entry']) / hist_df['entry'] * 100,
-            (hist_df['entry'] - current_price) / hist_df['entry'] * 100
+
+        # 计算盈亏显示列
+        hist_df['盈亏%'] = np.where(
+            hist_df['result'] != 'pending',
+            np.where(
+                hist_df['side'] == 'BUY',
+                (hist_df['exit_price'] - hist_df['entry']) / hist_df['entry'] * 100,
+                (hist_df['entry'] - hist_df['exit_price']) / hist_df['entry'] * 100
+            ),
+            np.where(
+                hist_df['side'] == 'BUY',
+                (current_price - hist_df['entry']) / hist_df['entry'] * 100,
+                (hist_df['entry'] - current_price) / hist_df['entry'] * 100
+            )
         ).round(2)
-        hist_df['pnl_display'] = hist_df['current_pnl_%'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "待平仓")
+        hist_df['盈亏%'] = hist_df['盈亏%'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "待定")
+        hist_df['部分止盈'] = hist_df['partial_closed'].map({True: '✅', False: '❌'})
 
-        def status_color(x):
-            if x == 'pending': return 'background-color: #ffd70020; color: #ffd700'
-            if x == '止损出局': return 'background-color: #f8514920; color: #f85149'
-            return 'background-color: #39d35320; color: #39d353'
+        # 选择显示列
+        display_cols = ['time', 'side', 'entry', 'sl', 'tp1', 'tp2', '盈亏%', 'result', '部分止盈']
+        hist_display = hist_df[display_cols].copy()
 
-        st.dataframe(hist_df.style.applymap(status_color, subset=['result'])
-                     .applymap(lambda x: 'color: #39d353' if x == 'BUY' else 'color: #f85149', subset=['side']))
+        # 样式
+        def style_result(val):
+            if val == 'pending':
+                return 'background-color: #ffd70020; color: #ffd700'
+            elif val == '止损出局':
+                return 'background-color: #f8514920; color: #f85149'
+            else:
+                return 'background-color: #39d35320; color: #39d353'
+
+        styled = hist_display.style.applymap(style_result, subset=['result'])
+        styled = styled.applymap(lambda x: 'color: #39d353' if x == 'BUY' else 'color: #f85149', subset=['side'])
+
+        st.dataframe(styled)
 
         csv = hist_df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 导出全部记录", csv, "eth_v15_signals.csv", "text/csv")
 
 else:
-    st.info("⌛ 正在深度同步多周期行情数据...")
+    st.info("⌛ 正在深度同步多周期行情数据... (需要至少100根K线)")
 
-st.caption("ETH V15.0 Ultimate Deep Insight | 多周期共振 + 追踪止损 + 分批止盈 + 阴跌最强防御 + 实时PNL + 统计汇总 | 2026")
+st.caption("ETH V15.2 Ultimate Deep Insight | 多周期共振 + 追踪止损 + 分批止盈 + 阴跌最强防御 + 精确统计 | 2026")
