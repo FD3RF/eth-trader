@@ -18,7 +18,7 @@ INTERVAL_MINUTES = 5
 
 # ---------- Session ----------
 if 'history' not in st.session_state:
-    st.session_state.history = deque(maxlen=200)  # 仅内存记录
+    st.session_state.history = deque(maxlen=200)
 if 'candles' not in st.session_state:
     st.session_state.candles = deque(maxlen=500)
 if 'last_signal_time' not in st.session_state:
@@ -57,7 +57,7 @@ def atr(df, n=14):
     tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(1)
     return tr.ewm(alpha=1/n).mean()
 
-# ---------- 评分函数（简化版） ----------
+# ---------- 评分函数 ----------
 def get_score(side, df):
     last = df.iloc[-1]
     c, ef, es, r, a, v = last['close'], last['ema_fast'], last['ema_slow'], last['rsi'], last['atr'], last['volume']
@@ -67,7 +67,6 @@ def get_score(side, df):
     slope = abs((ef - df['ema_fast'].iloc[-5])/5/c*100) if len(df)>=5 else 0
     atr_pct = a/c*100 if a>0 else 0
 
-    # 各项得分 (0-20)
     s_ema = 20 if spread>=0.2 else 15 if spread>=0.15 else 10 if spread>=0.1 else 5 if spread>=0.05 else 0
     s_slope = 20 if slope>=0.04 else 15 if slope>=0.03 else 10 if slope>=0.02 else 5 if slope>=0.01 else 0
     s_vol = 20 if vr>=1.3 else 10 if vr>=0.8 else 0
@@ -87,11 +86,9 @@ def detect_signal(df, fast, slow, buy_range, sell_range, use_score, score_thresh
     is_bear = ef < es and last['close'] < ef*1.001
     if not (is_bull or is_bear): return None
 
-    # 价格必须突破前一根收盘
     if is_bull and last['close'] <= df['close'].iloc[-2]: return None
     if is_bear and last['close'] >= df['close'].iloc[-2]: return None
 
-    # 评分或RSI范围
     if use_score:
         score = get_score('BUY' if is_bull else 'SELL', df)
         if score < score_thresh: return None
@@ -141,7 +138,6 @@ st.markdown("""
 
 st.title("📈 ETH 5分钟 EMA 策略 (简化版)")
 
-# 侧边栏
 with st.sidebar:
     st.header("参数")
     fast = st.number_input("快线EMA", 1, 50, 8)
@@ -193,7 +189,6 @@ st.caption(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | K线
 if len(st.session_state.candles) < 30:
     st.warning(f"数据积累中... {len(st.session_state.candles)}/30")
 else:
-    # 构建DataFrame
     df = pd.DataFrame(list(st.session_state.candles), columns=['ts','open','high','low','close','volume'])
     df['time'] = pd.to_datetime(df['ts'], unit='ms')
     df.set_index('time', inplace=True)
@@ -205,7 +200,7 @@ else:
     cp = df['close'].iloc[-1]
     signal = detect_signal(df, fast, slow, (buy_min,buy_max), (sell_min,sell_max), use_score, score_thresh)
 
-    # 检查历史pending信号的止损止盈
+    # 检查历史pending信号
     for i, rec in enumerate(st.session_state.history):
         if rec['result'] != 'pending': continue
         if rec['side'] == 'BUY':
@@ -227,7 +222,7 @@ else:
                 rec['exit_price'] = cp
                 rec['exit_reason'] = 'TP2'
 
-    # 新信号处理
+    # 新信号
     if signal and st.session_state.last_signal_time != df.index[-1]:
         side, price, ef, es, r, a = signal
         sl, tp1, tp2 = sltp(price, side, a, use_atr_sl,
@@ -243,7 +238,7 @@ else:
         st.session_state.history.appendleft(rec)
         st.session_state.last_signal_time = df.index[-1]
 
-    # 显示信号卡片
+    # 显示信号卡片（修复重复显示）
     if st.session_state.history and st.session_state.history[0]['result'] == 'pending':
         r = st.session_state.history[0]
         risk = abs(r['price']-r['sl'])
@@ -295,17 +290,22 @@ else:
             st.markdown(f"**20根波动** {range_pct:.2f}% {'✅' if range_pct>=0.3 else '❌'}")
             st.markdown(f"**成交量比** {vol_ratio:.2f}x {'✅' if vol_ratio>1.3 else '⏳'}")
 
-    # 最近K线
+    # 最近10根K线（中文列名）
     st.subheader("最近10根K线")
     show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
     show.index = show.index.strftime('%Y-%m-%d %H:%M')
+    show.columns = ['开盘','最高','最低','收盘','成交量','EMA快线','EMA慢线','RSI','ATR']
     st.dataframe(show, use_container_width=True)
 
-    # 历史记录（仅显示最近5条）
+    # 历史信号记录（避免显示空白历史）
     if st.session_state.history:
         st.subheader("📜 最近信号")
         hist = pd.DataFrame(list(st.session_state.history)[:5])
-        st.dataframe(hist[['time','side','price','result','exit_price','exit_reason']], use_container_width=True)
+        hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
+        hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
+        st.dataframe(hist_display, use_container_width=True)
+    else:
+        st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 简化版 v1.0 • 保留核心策略 • 祝你交易顺利！")
+st.caption("🔥 简化版 v1.1 • 修复UI细节 • 祝你交易顺利！")
