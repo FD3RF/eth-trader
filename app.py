@@ -123,14 +123,14 @@ def detect_signal(df, fast, slow, buy_range, sell_range, use_score, score_thresh
 
 # ---------- 止损止盈 ----------
 def sltp(price, side, atr, use_atr, mult_sl=2.2, mult_tp1=0.8, mult_tp2=1.6):
-    if use_atr and atr>0:
+    if use_atr and atr > 0:
         risk = atr * mult_sl
-        if side=='BUY':
-            return price-risk, price+risk*mult_tp1, price+risk*mult_tp2
+        if side == 'BUY':
+            return price - risk, price + risk * mult_tp1, price + risk * mult_tp2
         else:
-            return price+risk, price-risk*mult_tp1, price-risk*mult_tp2
+            return price + risk, price - risk * mult_tp1, price - risk * mult_tp2
     else:
-        if side=='BUY':
+        if side == 'BUY':
             return price*0.994, price*1.006, price*1.012
         else:
             return price*1.006, price*0.994, price*0.988
@@ -152,9 +152,10 @@ def fill_missing(buf, new):
 
 # ---------- 重置默认 ----------
 def reset_defaults():
-    for k, v in {'fast':8, 'slow':21, 'rsi_period':14, 'buy_min':57, 'buy_max':70,
-                 'sell_min':30, 'sell_max':43, 'refresh':30, 'use_score':True,
-                 'score_thresh':70, 'use_atr_sl':True, 'sl_m':2.2, 'tp1_m':0.8, 'tp2_m':1.6}.items():
+    defaults = {'fast':8, 'slow':21, 'rsi_period':14, 'buy_min':57, 'buy_max':70,
+                'sell_min':30, 'sell_max':43, 'refresh':30, 'use_score':True,
+                'score_thresh':70, 'use_atr_sl':True, 'sl_m':2.2, 'tp1_m':0.8, 'tp2_m':1.6}
+    for k, v in defaults.items():
         st.session_state[k] = v
     st.rerun()
 
@@ -164,20 +165,8 @@ st.markdown("""
 <style>
     .stApp { background: #0a0e17; }
     .stApp .block-container { max-width: 100% !important; padding: 1rem 2rem; }
-    .signal-card {
-        background: linear-gradient(135deg, #0f2a1f, #0a1f33);
-        border: 2px solid #00ff9d;
-        border-radius: 16px;
-        padding: 24px;
-        margin: 16px 0;
-        box-shadow: 0 0 20px rgba(0, 255, 157, 0.25);
-        animation: pulse-glow 3s ease-in-out infinite alternate;
-    }
-    @keyframes pulse-glow {
-        0% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; }
-        50% { box-shadow: 0 0 35px rgba(0,255,157,0.6), inset 0 0 20px rgba(0,255,157,0.3); border-color:#00ff9d; }
-        100% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; }
-    }
+    .signal-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 2px solid #00ff9d; border-radius: 16px; padding: 24px; margin: 16px 0; box-shadow: 0 0 20px rgba(0,255,157,0.25); animation: pulse-glow 3s ease-in-out infinite alternate; }
+    @keyframes pulse-glow { 0% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; } 50% { box-shadow: 0 0 35px rgba(0,255,157,0.6), inset 0 0 20px rgba(0,255,157,0.3); border-color:#00ff9d; } 100% { box-shadow: 0 0 15px rgba(0,255,157,0.3), inset 0 0 10px rgba(0,255,157,0.15); border-color:#00ff9d; } }
     .signal-card.buy-active { animation: pulse-glow-buy 2.8s ease-in-out infinite alternate; }
     @keyframes pulse-glow-buy { 0%{box-shadow:0 0 20px #00ff9d80;border-color:#00ff9d} 50%{box-shadow:0 0 45px #00ff9dc0;border-color:#4dff88} 100%{box-shadow:0 0 20px #00ff9d80;border-color:#00ff9d} }
     .signal-card.sell-active { animation: pulse-glow-sell 2.8s ease-in-out infinite alternate; }
@@ -191,15 +180,7 @@ st.markdown("""
     .label { color:#a0b0c0; font-size:0.9rem; margin-bottom:4px; }
     .progress-container { background:#1e293b; border-radius:8px; height:12px; margin:12px 0; overflow:hidden; }
     .progress-bar { height:100%; background:linear-gradient(to right, #00ff9d, #00bfff); transition:width 0.4s ease; }
-    .waiting-card {
-        background: linear-gradient(135deg, #0f2a1f, #0a1f33);
-        border: 2px solid #4da9ff;
-        border-radius: 16px;
-        padding: 40px;
-        text-align: center;
-        color: #ccd6e0;
-        animation: pulse-wait 3s ease-in-out infinite alternate;
-    }
+    .waiting-card { background: linear-gradient(135deg, #0f2a1f, #0a1f33); border: 2px solid #4da9ff; border-radius: 16px; padding: 40px; text-align: center; color: #ccd6e0; animation: pulse-wait 3s ease-in-out infinite alternate; }
     @keyframes pulse-wait { 0%{box-shadow:0 0 10px #4da9ff80;border-color:#4da9ff} 50%{box-shadow:0 0 30px #4da9ffc0;border-color:#80b4ff} 100%{box-shadow:0 0 10px #4da9ff80;border-color:#4da9ff} }
     .trend-big { font-size:1.9rem; font-weight:bold; text-align:center; margin:8px 0; }
     .api-error { color:#ffaa00; font-size:0.9rem; margin-top:4px; }
@@ -302,20 +283,15 @@ else:
     last = df.iloc[-1]
     ema_f, ema_s, price = last['ema_fast'], last['ema_slow'], last['close']
     if ema_f > ema_s and price > ema_f:
-        trend = "🟢 强势多头"
-        trend_color = "#00ff9d"
+        trend = "🟢 强势多头"; trend_color = "#00ff9d"
     elif ema_f > ema_s:
-        trend = "🟢 多头"
-        trend_color = "#00ff9d"
+        trend = "🟢 多头"; trend_color = "#00ff9d"
     elif ema_f < ema_s and price < ema_f:
-        trend = "🔴 强势空头"
-        trend_color = "#ff4d88"
+        trend = "🔴 强势空头"; trend_color = "#ff4d88"
     elif ema_f < ema_s:
-        trend = "🔴 空头"
-        trend_color = "#ff4d88"
+        trend = "🔴 空头"; trend_color = "#ff4d88"
     else:
-        trend = "⚪ 震荡"
-        trend_color = "#aaa"
+        trend = "⚪ 震荡"; trend_color = "#aaa"
     st.markdown(f'<div class="trend-big" style="color:{trend_color};">{trend}</div>', unsafe_allow_html=True)
     st.markdown(f"快线 {ema_f:.2f} 慢线 {ema_s:.2f} 价格 {price:.2f}")
 
@@ -426,43 +402,6 @@ else:
     fig.update_layout(height=700, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(l=40,r=40,t=40,b=100))
     st.plotly_chart(fig)
 
-    # ---------- 市场诊断 ----------
-    with st.expander("🔍 当前市场诊断 (详细分析)", expanded=False):
-        last = df.iloc[-1]
-        spread = abs(last['ema_fast']-last['ema_slow'])/last['close']*100
-        slope = (last['ema_fast']-df['ema_fast'].iloc[-5])/5/last['close'] if len(df)>=5 else 0
-        range_pct = (df['high'].iloc[-20:].max()-df['low'].iloc[-20:].min())/last['close']*100
-        avg_vol = df['volume'].rolling(20).mean().iloc[-1] if len(df)>=20 else last['volume']
-        vol_ratio = last['volume']/avg_vol if avg_vol>0 else 0
-        side_guess = 'BUY' if last['ema_fast'] > last['ema_slow'] else 'SELL'
-        total_score, subs = get_score(side_guess, df)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"**EMA扩散** {spread:.3f}% 得分 {subs['EMA']}/20 {'✅' if spread>=0.1 else '❌'}")
-            st.markdown(f"**EMA斜率** {slope:.5f} 得分 {subs['斜率']}/20 {'✅' if abs(slope)>=0.0002 else '❌'}")
-            st.markdown(f"**20根波动率** {range_pct:.2f}% {'✅' if range_pct>=0.3 else '❌'}")
-        with col2:
-            st.markdown(f"**成交量比** {vol_ratio:.2f}x 得分 {subs['量能']}/20 {'✅' if vol_ratio>1.3 else '⏳'}")
-            st.markdown(f"**ATR强度** {last['atr']/last['close']*100:.3f}% 得分 {subs['ATR']}/20")
-            st.markdown(f"**RSI** {last['rsi']:.1f} (方向 {side_guess}) 得分 {subs['RSI']}/20")
-
-        st.markdown(f"**当前综合评分: {total_score} / 100** (阈值 {score_thresh if use_score else 'N/A'})")
-        if use_score:
-            if total_score >= score_thresh:
-                st.success("✅ 已达到评分阈值，但需满足EMA金叉/死叉及价格突破条件才会触发信号")
-            else:
-                need = score_thresh - total_score
-                st.warning(f"❌ 距离阈值还差 {need} 分")
-                suggestions = []
-                if subs['EMA'] < 20: suggestions.append(f"EMA扩散需再增加 {max(0, 0.05-spread/100):.3f}% 可多得5分")
-                if subs['斜率'] < 20: suggestions.append(f"斜率需再增加 {max(0, 0.0001-abs(slope)):.5f} 可多得5分")
-                if subs['量能'] < 10: suggestions.append(f"成交量需放大至 {max(0.8, vol_ratio+0.1):.1f}倍 可得10分")
-                elif subs['量能'] < 20: suggestions.append("成交量需放大至 1.3倍 可得20分")
-                if suggestions:
-                    st.markdown("**改进方向:**")
-                    for s in suggestions[:3]: st.markdown(f"- {s}")
-
     # ---------- 最近K线 & 历史信号 ----------
     with st.expander("📊 最近10根K线（含指标）", expanded=False):
         show = df[['open','high','low','close','volume','ema_fast','ema_slow','rsi','atr']].tail(10).round(2)
@@ -473,7 +412,14 @@ else:
     if st.session_state.history:
         st.subheader("📜 最近信号")
         hist = pd.DataFrame(list(st.session_state.history)[:10])
-        hist_display = hist[['time','side','price','result','exit_price','exit_reason']].copy()
+        # 安全处理列
+        cols = ['time','side','price','result']
+        if not hist.empty:
+            if 'exit_price' not in hist.columns:
+                hist['exit_price'] = None
+            if 'exit_reason' not in hist.columns:
+                hist['exit_reason'] = None
+        hist_display = hist[cols + ['exit_price','exit_reason']].copy()
         hist_display.columns = ['信号时间','方向','进场价','结果','出场价','出场原因']
 
         def calc_pnl(row):
@@ -498,4 +444,4 @@ else:
         st.info("暂无历史信号")
 
 st.markdown("---")
-st.caption("🔥 顶级完美终极版 v4.1 • 双数据源 • 零警告 • 极致美观 • 一键重置 • 导出功能 • 祝你交易大赚！💰")
+st.caption("🔥 顶级完美终极版 v4.2 • 零警告 • 极致稳定 • 双数据源 • 顶级动效 • 祝你交易大赚！💰")
