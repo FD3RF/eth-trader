@@ -130,43 +130,72 @@ if 'signal_stats' not in st.session_state: st.session_state.signal_stats = {'tot
 if 'last_signal_time' not in st.session_state: st.session_state.last_signal_time = None
 if 'last_refresh_time' not in st.session_state: st.session_state.last_refresh_time = time.time()
 
-# ---------- 数据获取 (CryptoCompare) ----------
-@st.cache_data(ttl=5, show_spinner=False)
+# ---------- 数据获取 (OKX) ----------
 def fetch_klines():
+    """
+    从 OKX 获取 ETH/USDT 5分钟K线数据
+    OKX 公开 API，无需密钥，返回格式兼容原有代码
+    """
     try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit={LIMIT}&aggregate={INTERVAL}"
-        resp = requests.get(url, timeout=10, headers={"User-Agent": USER_AGENT})
+        url = "https://www.okx.com/api/v5/market/candles"
+        params = {
+            'instId': 'ETH-USDT',
+            'bar': '5m',          # 5分钟K线，如需1小时可改为 '1H'
+            'limit': LIMIT
+        }
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         result = resp.json()
-        if result and result.get('Response') == 'Success':
-            data = result['Data']['Data']
-            return [[item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']] for item in data]
+        
+        if result.get('code') == '0':
+            data = result['data']
+            # OKX 返回格式: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+            # 我们需要前6个字段: [timestamp, open, high, low, close, volume]
+            converted = []
+            for item in data:
+                converted.append([
+                    int(item[0]),           # 时间戳(毫秒)
+                    float(item[1]),          # 开盘价
+                    float(item[2]),          # 最高价
+                    float(item[3]),          # 最低价
+                    float(item[4]),          # 收盘价
+                    float(item[5])           # 成交量(以币为单位)
+                ])
+            return converted
         else:
-            st.warning("API返回异常，稍后重试")
+            st.warning(f"OKX API 返回异常: {result.get('msg')}")
             return []
     except Exception as e:
         st.session_state.api_fail_count += 1
-        st.error(f"获取K线失败: {e}")
+        st.error(f"获取 OKX K线失败: {e}")
         return []
 
+# 保留原 latest_candle 函数，但使用相同的数据源
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_latest_candle():
+    """获取最新一根K线（OKX）"""
     try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={SYMBOL}&tsym={CURRENCY}&limit=1&aggregate={INTERVAL}"
-        resp = requests.get(url, timeout=5, headers={"User-Agent": USER_AGENT})
+        url = "https://www.okx.com/api/v5/market/candles"
+        params = {
+            'instId': 'ETH-USDT',
+            'bar': '5m',
+            'limit': 1
+        }
+        resp = requests.get(url, params=params, timeout=5)
         resp.raise_for_status()
         result = resp.json()
-        if result and result.get('Response') == 'Success':
-            item = result['Data']['Data'][0]
-            return [item['time']*1000, item['open'], item['high'], item['low'], item['close'], item['volumefrom']]
+        if result.get('code') == '0':
+            item = result['data'][0]
+            return [int(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4]), float(item[5])]
         return None
     except:
         return None
 
+# ---------- 高周期趋势 (仍使用 CryptoCompare，可保留) ----------
 @st.cache_data(ttl=60, show_spinner=False)
 def get_higher_trend():
     try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={SYMBOL}&tsym={CURRENCY}&limit=200"
+        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym=ETH&tsym=USD&limit=200"
         resp = requests.get(url, timeout=5, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
         result = resp.json()
@@ -458,7 +487,7 @@ def clear_signal_history(clear_db=False):
     update_signal_stats()
 
 # ---------- Streamlit UI ----------
-st.set_page_config(page_title="ETH 5分钟极致版", layout="wide")
+st.set_page_config(page_title="ETH 5分钟极致版 (OKX数据)", layout="wide")
 
 st.markdown("""
 <style>
@@ -477,7 +506,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 ETH 5分钟 EMA 剥头皮策略 (极致版)")
+st.title("📈 ETH 5分钟 EMA 剥头皮策略 (OKX真实数据)")
 
 candle_buffer = st.session_state.candle_buffer
 signal_history = st.session_state.signal_history
@@ -818,4 +847,4 @@ else:
         st.download_button("📥 导出历史信号 (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
 st.markdown("---")
-st.caption("🔥 极致版 v2026.02.27 • 三层松绑法 • 分级仓位 • CryptoCompare数据源 • 安全无密钥 • 祝你交易顺利！💰🚀")
+st.caption("🔥 极致版 v2026.02.27 • OKX真实数据 • 三层松绑法 • 分级仓位 • 安全只读 • 祝你交易顺利！💰🚀")
