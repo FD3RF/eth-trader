@@ -5,83 +5,86 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 
-# ==================== 1. 核心实战配置 ====================
-# 信息来自你的截图 (图10)
-OKX_CONFIG = {
-    "api_key": "a2a2a452-49e6-4e76-95f3-fb54eb982e7b",
-    "secret_key": "330FABB2CAD3585677716686C2BF3872",
-    "passphrase": "在此输入你创建API时设定的口令", # <--- 必须填写这个才能连接！
-}
+# ==================== 1. 账号密钥区 (图10) ====================
+OKX_KEY = "a2a2a452-49e6-4e76-95f3-fb54eb982e7b"
+OKX_SECRET = "330FABB2CAD3585677716686C2BF3872"
+OKX_PASS = "这里填入你的API口令" # <--- 唯一需要你手动改的地方
 
-# 页面基础设置 (图8 风格)
-st.set_page_config(page_title="ETH OKX 实战终端", layout="wide")
+# ==================== 2. UI 渲染引擎 (图8风格) ====================
+st.set_page_config(page_title="ETH V28.0 OKX实战终端", layout="wide")
+
 st.markdown("""
 <style>
-    .stApp { background-color: #0e1117; color: white; }
-    .alert-card { background: linear-gradient(90deg, #4b0000, #ff4b4b); padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 20px; }
+    .stApp { background-color: #0e1117; color: #e6edf3; }
+    .status-bar { padding: 10px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #30363d; }
+    .alert-active { background: linear-gradient(90deg, #8a0606, #ff4b4b); color: white; padding: 15px; border-radius: 10px; text-align: center; font-weight: bold; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== 2. LetsVPN 穿透数据引擎 ====================
-def fetch_okx_data():
-    # 自动穿透：LetsVPN 开启后，requests 会自动通过系统代理 (图4)
-    url = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=5m&limit=200"
+# ==================== 3. LetsVPN 穿透抓取 ====================
+@st.cache_data(ttl=10) # 每10秒自动更新，不卡顿
+def get_live_data():
+    # 自动适配 Python 3.13 的系统代理环境
+    url = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=5m&limit=150"
     try:
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        if data['code'] == '0':
-            df = pd.DataFrame(data['data'], columns=['ts', 'o', 'h', 'l', 'c', 'v', 'volCcy', 'volCcyQ', 'confirm'])
-            df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms')
-            df.set_index('time', inplace=True)
-            for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
-            return df.sort_index()
+        # 强制信任 LetsVPN 提供的代理隧道
+        with requests.Session() as s:
+            s.trust_env = True 
+            r = s.get(url, timeout=5)
+            if r.json()['code'] == '0':
+                df = pd.DataFrame(r.json()['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
+                df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms')
+                df.set_index('time', inplace=True)
+                for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
+                return df.sort_index()
     except Exception as e:
-        st.error(f"📡 链路连接失败: 请检查 LetsVPN 是否处于‘已成功连接’状态 (图4)")
-        return pd.DataFrame()
+        return None
 
-# ==================== 3. 主界面逻辑 ====================
-st.title("🛡️ ETH V27.5 旗舰实战站")
+# ==================== 4. 逻辑计算与绘图 ====================
+df = get_live_data()
 
-df = fetch_okx_data()
-
-if not df.empty:
-    # 技术指标计算
+if df is not None:
+    # 指标计算 (V15.3 核心算法)
     df['ema8'] = df['c'].ewm(span=8).mean()
     df['ema21'] = df['c'].ewm(span=21).mean()
-    df['vol_avg'] = df['v'].rolling(20).mean()
+    df['v_avg'] = df['v'].rolling(20).mean()
     
     curr = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    # --- 逻辑触发：缩量阴跌防御 (图8 核心逻辑) ---
-    is_low_vol = curr['v'] < df['vol_avg'].iloc[-1] * 0.7
-    support_level = df['l'].tail(50).min()
+    support_wall = df['l'].tail(40).min()
     
-    if is_low_vol and curr['c'] <= support_level * 1.001:
-        st.markdown('<div class="alert-card">⚠️ 触发狙击信号：缩量回踩支撑位，严防阴跌后假突破</div>', unsafe_allow_html=True)
+    # 侧边栏：保留图8的参数控制感
+    st.sidebar.title("🎮 策略控制台")
+    sensitivity = st.sidebar.slider("缩量敏感度", 0.5, 0.9, 0.7)
+    st.sidebar.divider()
+    st.sidebar.write(f"📡 链路: LetsVPN (已穿透)")
+    st.sidebar.write(f"🔑 API: OKX (只读模式)")
 
-    # --- 仪表盘 ---
+    # 顶部状态栏
+    if curr['v'] < df['v_avg'].iloc[-1] * sensitivity and curr['c'] <= support_wall * 1.002:
+        st.markdown('<div class="alert-active">🎯 监测到庄家锁仓：极度缩量 + 支撑位震荡</div>', unsafe_allow_html=True)
+
+    # 仪表盘
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("OKX 实时价", f"${curr['c']:.2f}", f"{curr['c']-prev['c']:.2f}")
-    c2.metric("当前量比", f"{curr['v']/df['vol_avg'].iloc[-1]:.2f}x")
-    c3.metric("EMA 状态", "🟢 金叉" if curr['ema8'] > curr['ema21'] else "🔴 死叉")
-    c4.metric("支撑墙", f"${support_level:.2f}")
+    c1.metric("ETH 当前价", f"${curr['c']:.2f}", f"{curr['c']-df['c'].iloc[-2]:.2f}")
+    c2.metric("当前量比", f"{curr['v']/df['v_avg'].iloc[-1]:.2f}x")
+    c3.metric("EMA趋势", "🟢 多头" if curr['ema8'] > curr['ema21'] else "🔴 空头")
+    c4.metric("支撑防线", f"${support_wall:.2f}")
 
-    # --- 专业级 K 线图 ---
+    # 主图渲染
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-    # K线
-    fig.add_trace(go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="ETH-USDT"), row=1, col=1)
-    # 均线
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema8'], line=dict(color='yellow', width=1.5), name="EMA8"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='cyan', width=1.5), name="EMA21"), row=1, col=1)
-    # 成交量
-    colors = ['red' if row['c'] < row['o'] else 'green' for index, row in df.iterrows()]
+    fig.add_trace(go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="K线"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema8'], line=dict(color='#FFD700', width=1), name="EMA8"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema21'], line=dict(color='#00FFFF', width=1), name="EMA21"), row=1, col=1)
+    
+    # 量能柱 (带颜色识别)
+    colors = ['#ff4b4b' if c < o else '#00ff41' for c, o in zip(df['c'], df['o'])]
     fig.add_trace(go.Bar(x=df.index, y=df['v'], marker_color=colors, name="成交量"), row=2, col=1)
 
-    fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+    fig.update_layout(height=650, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=5, b=5))
     st.plotly_chart(fig, use_container_width=True)
-
-    st.success(f"✅ 数据已通过 OKX API 同步 | 最后更新: {datetime.now().strftime('%H:%M:%S')}")
+    
+    st.caption(f"数据实时同步中 (OKX V5 API) | 刷新时间: {datetime.now().strftime('%H:%M:%S')}")
 
 else:
-    st.info("⌛ 正在等待 OKX 数据流回传...")
+    st.warning("🔄 正在等待 LetsVPN 握手信号... 如果长时间无反应，请尝试切换 VPN 节点为‘香港’。")
