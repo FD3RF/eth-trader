@@ -19,7 +19,7 @@ PASSPHRASE = "YYDS"
 pio.templates['custom_dark'] = pio.templates['plotly_dark']
 pio.templates['custom_light'] = pio.templates['plotly']
 
-st.set_page_config(layout="wide", page_title="ETH V32101 智能策略指挥官", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH V32102 终极智能指挥官", page_icon="⚖️")
 
 # ====================== 函数全部置顶 ======================
 def bayesian_update(prior, evidence):
@@ -53,19 +53,19 @@ def light_cleanup():
         st.cache_data.clear()
         st.session_state.last_cleanup = time.time()
 
-# ====================== 多空比（超短超时 + spinner 防止卡住） ======================
+# ====================== 多空比（永不卡住） ======================
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
-    for attempt in range(3):  # 仅3次超短重试
+    for attempt in range(3):
         try:
             url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
-            res = requests.get(url, timeout=4).json()  # 超短超时4秒
+            res = requests.get(url, timeout=4).json()
             if res.get('code') == '0':
                 return float(res['data'][0][1])
             time.sleep(0.3)
         except:
             pass
-    return 1.0  # 即时兜底
+    return 1.0
 
 def send_telegram(msg):
     if st.session_state.tg_token and st.session_state.tg_chat_id:
@@ -128,7 +128,7 @@ def get_candles(f_ema, s_ema, bar="1m"):
 # ====================== 侧边栏 ======================
 def render_sidebar(df):
     with st.sidebar:
-        st.title("⚡ V32101 智能策略指挥官")
+        st.title("⚡ V32102 终极智能指挥官")
         st.success("✅ 多空比永不卡住 + 智能策略已激活")
         
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
@@ -145,7 +145,6 @@ def render_sidebar(df):
             st.rerun()
         st.divider()
 
-        # 自动仓位计算器
         with st.expander("💰 自动仓位计算器", expanded=True):
             risk = st.slider("单笔风险 (%)", 0.1, 5.0, 1.0, 0.1)
             entry = st.number_input("计划入场价", value=float(df['c'].iloc[-1]) if not df.empty else 1900.0)
@@ -154,7 +153,6 @@ def render_sidebar(df):
             size = (balance * risk / 100) / abs(entry - sl) if abs(entry - sl) > 0 else 0
             st.success(f"建议仓位: **{size:.4f} {symbol.split('-')[0]}**")
 
-        # Telegram
         with st.expander("📱 Telegram推送", expanded=False):
             st.session_state.tg_token = st.text_input("Bot Token", value=st.session_state.get('tg_token', ''), type="password")
             st.session_state.tg_chat_id = st.text_input("Chat ID", value=st.session_state.get('tg_chat_id', ''))
@@ -167,10 +165,7 @@ def main():
     init_state()
     light_cleanup()
     
-    # 默认值立即显示，防止卡住
-    ls = 1.0
-    with st.spinner("正在同步多空比数据..."):
-        ls = get_ls_ratio()
+    ls = get_ls_ratio()
     st.session_state.ls_ratio = ls
     
     df = get_candles(12, 26, "15m")
@@ -181,13 +176,12 @@ def main():
     evidence = 0.6 if ls < 1 else 0.4
     bayes_prob = bayesian_update(prob / 100, evidence)
     
-    # Telegram推送
     if bayes_prob > 70 and st.session_state.get('tg_token') and st.session_state.get('tg_chat_id'):
-        send_telegram(f"🚀 V32101智能信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看多\n价格 ${df['c'].iloc[-1]:.2f}")
+        send_telegram(f"🚀 V32102智能信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看多\n价格 ${df['c'].iloc[-1]:.2f}")
     if bayes_prob < 30 and st.session_state.get('tg_token') and st.session_state.get('tg_chat_id'):
-        send_telegram(f"⚠️ V32101智能信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看空\n价格 ${df['c'].iloc[-1]:.2f}")
+        send_telegram(f"⚠️ V32102智能信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看空\n价格 ${df['c'].iloc[-1]:.2f}")
     
-    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32101) | {symbol} | {datetime.now().strftime('%H:%M:%S')}")
+    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32102) | {symbol} | {datetime.now().strftime('%H:%M:%S')}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("实时价格", f"${df['c'].iloc[-1]:.2f}")
     c2.metric("全网多空比", f"{ls:.2f}")
@@ -212,7 +206,6 @@ def main():
     fig.update_layout(template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'], height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
     st.plotly_chart(fig)
 
-    # 智能策略卡片
     with st.expander("🎯 智能策略执行计划", expanded=True):
         if bayes_prob < 45:
             st.error("🚨 **指挥官最优决策**：空仓观望！胜率过低，保本第一")
