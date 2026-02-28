@@ -6,8 +6,13 @@ from plotly.subplots import make_subplots
 import time
 from datetime import datetime
 import numpy as np
+import plotly.io as pio
 
 st.set_page_config(layout="wide", page_title="ETH V32009 终极指挥官", page_icon="⚖️")
+
+# 预注册模板（避免 ValueError）
+pio.templates['custom_dark'] = pio.templates['plotly_dark']
+pio.templates['custom_light'] = pio.templates['plotly']
 
 # ==========================================
 # 1. 状态管理与内存治理
@@ -68,14 +73,8 @@ def get_candles(f_ema, s_ema, bar="1m"):
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
         return df
-    except requests.exceptions.RequestException as e:
-        st.error(f"网络错误: {e}")
-        return pd.DataFrame()
-    except ValueError as e:
-        st.error(f"数据错误: {e}")
-        return pd.DataFrame()
     except Exception as e:
-        st.error(f"未知错误: {e}")
+        st.error(f"数据获取失败: {str(e)}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=15, max_entries=50)
@@ -111,12 +110,6 @@ def calculate_prob(df):
     prob += 10 if macd_cross else -10
     prob += 10 if net_flow > 0 else -10
     return max(min(prob, 95.0), 5.0)
-
-# 贝叶斯更新
-def bayesian_update(prior, evidence):
-    likelihood = evidence
-    posterior = (prior * likelihood) / ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) if ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) != 0 else 0.5
-    return posterior * 100
 
 # ==========================================
 # 3. 侧边栏
@@ -305,7 +298,7 @@ def main():
         colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
         fig.add_trace(go.Bar(x=df['time'], y=scaled_flow, marker_color=colors, name="庄家净流"), row=2, col=1)
 
-    fig.update_layout(template=st.session_state.theme, height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
+    fig.update_layout(template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'], height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
     st.plotly_chart(fig, use_container_width=True)
 
     if not pause_refresh:
