@@ -3,27 +3,20 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-import hmac
-import base64
-import hashlib
 from datetime import datetime
-from urllib.parse import urlencode
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ==========================================
-# 0. 核心页面配置
+# 0. 核心页面与 API 配置
 # ==========================================
 st.set_page_config(layout="wide", page_title="ETH V32010 终极指挥官", page_icon="⚖️")
 
 # OKX API 静态配置
-API_KEY = "a2a2a452-49e6-4e76-95f3-fb54e98e2e7b"
-SECRET_KEY = "330FABDB2CAD3585677716686C2BF382"
-PASSPHRASE = "YYDS"
 BASE_URL = "https://www.okx.com"
 
 # ==========================================
-# 1. 强化情报引擎 (核心修复：指标强制预注入)
+# 1. 指标引擎 (核心修复：强制字段预注入)
 # ==========================================
 @st.cache_data(ttl=10)
 def get_commander_intel(f_ema=12, s_ema=26, bar="15m"):
@@ -41,12 +34,11 @@ def get_commander_intel(f_ema=12, s_ema=26, bar="15m"):
         df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
         df['ema_s'] = df['c'].ewm(span=s_ema, adjust=False).mean()
         
-        # 计算 RSI         diff = df['c'].diff()
+        # 计算辅助指标         diff = df['c'].diff()
         gain = diff.clip(lower=0).rolling(14).mean()
         loss = -diff.clip(upper=0).rolling(14).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
         
-        # 计算 ATR 波幅
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
         
@@ -101,7 +93,11 @@ def main():
             </div>
         """, unsafe_allow_html=True)
         
-        st.info("🔍 AI 复盘：趋势量价匹配良好" if prob > 55 else "⚠️ AI 复盘：行情处于震荡期，建议保持关注")
+        # AI 复盘状态
+        if prob > 60:
+            st.info("🔵 AI 复盘：趋势量价匹配良好")
+        else:
+            st.warning("⚠️ AI 复盘：行情处于选择期，保持克制")
 
     # --- 主屏幕展示 ---
     if df.empty:
@@ -127,10 +123,9 @@ def main():
         # 激活卡片还原
         st.success(f"✅ **激活 | 物理位陷阱**\n\n止盈: ${last_p + atr*2:.1f} | 止损: ${last_p - atr:.1f}")
         st.warning(f"🔥 **进攻 | 清算猎杀**\n\n目前偏差: {atr:.2f} 建议分批止盈")
-        st.error(f"🚨 **预警 | 量价共振**\n\n警惕 EMA12 下穿 EMA26")
+        st.error(f"🚨 **预警 | 量价共振**\n\n注意回踩 EMA26 支撑")
         
         st.divider()
-        # 战术日志
         st.markdown(f"📜 **战术日志**\n\n`[{datetime.now().strftime('%H:%M:%S')}]` 卫星同步成功")
 
     with col_chart:
@@ -141,14 +136,14 @@ def main():
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_f'], line=dict(color='#00ff88', width=1.5), name="EMA12"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_s'], line=dict(color='#ff4b4b', width=1.5), name="EMA26"), row=1, col=1)
         
-        # 副图：净流柱状图
+        # 副图：1:1 还原红绿净流柱状图
         colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow'].rolling(3).mean()]
         fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=colors, name="RealTimeFlow"), row=2, col=1)
         
         fig.update_layout(template=current_theme, height=780, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-    # 自动刷新逻辑
+    # 循环逻辑
     time.sleep(hb)
     st.rerun()
 
