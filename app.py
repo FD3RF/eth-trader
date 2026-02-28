@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-import sqlite3
 from datetime import datetime
 
 # ================================
-# 1. 数据层（实时获取）
+# 1. 数据层（多周期）
 # ================================
 def fetch_okx(endpoint, params=""):
     url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
@@ -17,136 +16,125 @@ def fetch_okx(endpoint, params=""):
     except:
         return []
 
-def get_data():
+def get_multi():
     k1 = fetch_okx("market/candles", "&bar=1m&limit=100")
     k5 = fetch_okx("market/candles", "&bar=5m&limit=100")
-    t  = fetch_okx("market/trades", "&limit=100")
+    k15 = fetch_okx("market/candles", "&bar=15m&limit=100")
+    t = fetch_okx("market/trades", "&limit=100")
 
-    if not (k1 and k5 and t):
+    if not (k1 and k5 and k15 and t):
         return None
 
     df1 = pd.DataFrame(k1, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
     df5 = pd.DataFrame(k5, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
+    df15 = pd.DataFrame(k15, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
     tdf = pd.DataFrame(t)
 
-    return df1, df5, tdf
+    return df1, df5, df15, tdf
 
 
 # ================================
-# 2. 趋势诊断（高级结构）
+# 2. 指标计算（审计版）
 # ================================
-def diagnose_trend(df1, df5):
-    for d in [df1, df5]:
-        for col in ['o','h','l','c','v']:
-            d[col] = d[col].astype(float)
-        d['ema20'] = d['c'].ewm(span=20).mean()
-        d['ema60'] = d['c'].ewm(span=60).mean()
-        d['atr'] = (d['h'] - d['l']).rolling(14).mean()
-        d['rsi'] = 100 - (100 / (1 + (
-            (d['c'].diff().clip(lower=0)).rolling(14).mean() /
-            (-d['c'].diff().clip(upper=0)).rolling(14).mean().replace(0, np.nan)
-        )))
+def calc_indicators(df):
+    for col in ['o','h','l','c','v']:
+        df[col] = df[col].astype(float)
 
+    df['ema20'] = df['c'].ewm(span=20).mean()
+    df['ema60'] = df['c'].ewm(span=60).mean()
+
+    tr = np.maximum(df['h'] - df['l'],
+                   np.maximum(abs(df['h'] - df['c'].shift(1)),
+                              abs(df['l'] - df['c'].shift(1))))
+    df['atr'] = tr.rolling(14).mean()
+
+    diff = df['c'].diff()
+    gain = diff.clip(lower=0).rolling(14).mean()
+    loss = -diff.clip(upper=0).rolling(14).mean().replace(0, np.nan)
+    df['rsi'] = 100 - (100 / (1 + (gain / loss)))
+
+    return df
+
+
+# ================================
+# 3. 多周期诊断
+# ================================
+def diagnose(df1, df5, df15):
+    df1 = calc_indicators(df1)
+    df5 = calc_indicators(df5)
+    df15 = calc_indicators(df15)
+
+    # 高频（1m）
     c1 = df1.iloc[-1]
-    c5 = df5.iloc[-1]
-
-    # 趋势强度
-    slope = (df5['ema20'].iloc[-1] - df5['ema20'].iloc[-5]) / 5
-    trend = "多头" if slope > 0 else "空头"
-
-    # 波动与风险
-    volatility = c1['atr']
-    risky = volatility > df1['atr'].rolling(50).mean().iloc[-1] * 1.3
-
-    # RSI 状态
-    rsi_state = "超买" if c1['rsi'] > 70 else "超卖" if c1['rsi'] < 30 else "中性"
-
-    return {
-        "trend": trend,
-        "slope": slope,
+    high_freq = {
         "rsi": c1['rsi'],
-        "rsi_state": rsi_state,
-        "volatility": volatility,
-        "risky": risky,
-        "ema20": c1['ema20'],
-        "ema60": c1['ema60']
+        "vol": c1['v'] / df1['v'].rolling(20).mean().iloc[-1],
+        "trend": "多" if c1['ema20'] > c1['ema60'] else "空"
     }
 
-
-# ================================
-# 3. 统计闭环（只分析）
-# ================================
-def init_db():
-    conn = sqlite3.connect('analysis.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS stats
-                 (ts TEXT, trend TEXT, slope REAL, rsi REAL, vol REAL, risky INTEGER)''')
-    conn.commit()
-    return conn
-
-def log_stats(info):
-    conn = sqlite3.connect('analysis.db')
-    c = conn.cursor()
-    c.execute("""INSERT INTO stats (ts, trend, slope, rsi, vol, risky)
-                 VALUES (?,?,?,?,?,?)""",
-              (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-               info['trend'], info['slope'], info['rsi'],
-               info['volatility'], int(info['risky'])))
-    conn.commit()
-    conn.close()
-
-def stats_report():
-    conn = sqlite3.connect('analysis.db')
-    df = pd.read_sql_query("SELECT * FROM stats ORDER BY ts DESC", conn)
-    conn.close()
-
-    if df.empty:
-        return "暂无统计"
-
-    # 胜率式统计（趋势一致率）
-    total = len(df)
-    trend_ok = (df['trend'] == df['trend'].shift(1)).sum()
-    stability = trend_ok / (total-1) if total > 1 else 0
-
-    risky_rate = df['risky'].mean()
-
-    return {
-        "records": total,
-        "stability": stability,
-        "risky_rate": risky_rate
+    # 波段（5m）
+    c5 = df5.iloc[-1]
+    slope5 = (df5['ema20'].iloc[-1] - df5['ema20'].iloc[-5]) / 5
+    swing = {
+        "trend": "多" if slope5 > 0 else "空",
+        "slope": slope5,
+        "strength": abs(slope5) > (c5['atr'] * 0.15)
     }
+
+    # 大趋势（15m）
+    c15 = df15.iloc[-1]
+    slope15 = (df15['ema20'].iloc[-1] - df15['ema20'].iloc[-5]) / 5
+    trend15 = {
+        "trend": "多" if slope15 > 0 else "空",
+        "strength": abs(slope15) > (c15['atr'] * 0.12)
+    }
+
+    return high_freq, swing, trend15, df1
 
 
 # ================================
 # 4. Streamlit 面板
 # ================================
-st.set_page_config(page_title="实时分析面板 V200", layout="wide")
-init_db()
+st.set_page_config(page_title="多周期分析 V210", layout="wide")
 
-data = get_data()
+data = get_multi()
 if data:
-    df1, df5, tdf = data
-    info = diagnose_trend(df1, df5)
-    log_stats(info)
+    df1, df5, df15, tdf = data
+    hf, sw, td, df1 = diagnose(df1, df5, df15)
 
-    st.title("📊 实时分析面板 V200（只分析）")
+    st.title("📊 多周期分析 V210（1m / 5m / 15m）")
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("趋势", info['trend'])
-    col2.metric("RSI", f"{info['rsi']:.1f}", info['rsi_state'])
-    col3.metric("波动率", f"{info['volatility']:.2f}")
+
+    with col1:
+        st.subheader("1m 高频")
+        st.metric("趋势", hf['trend'])
+        st.metric("RSI", f"{hf['rsi']:.1f}")
+        st.metric("量比", f"{hf['vol']:.2f}x")
+
+    with col2:
+        st.subheader("5m 波段")
+        st.metric("趋势", sw['trend'])
+        st.metric("斜率", f"{sw['slope']:.4f}")
+        st.metric("强度", "强" if sw['strength'] else "弱")
+
+    with col3:
+        st.subheader("15m 趋势")
+        st.metric("趋势", td['trend'])
+        st.metric("强度", "强" if td['strength'] else "弱")
 
     st.write("---")
-    st.subheader("趋势诊断")
+    st.subheader("趋势综合")
 
     st.write(f"""
-    - 趋势方向：{info['trend']}
-    - 斜率：{info['slope']:.4f}
-    - RSI：{info['rsi']:.1f}（{info['rsi_state']}）
-    - 风险信号：{'⚠️ 高波动' if info['risky'] else '✅ 正常'}
+    - 高频趋势：{hf['trend']}
+    - 波段趋势：{sw['trend']}
+    - 大趋势：{td['trend']}
+    - 高频 RSI：{hf['rsi']:.1f}
+    - 高频量比：{hf['vol']:.2f}
     """)
 
-    # 图表
+    # 图表（1m）
     fig = go.Figure(data=[go.Candlestick(
         x=df1.index, open=df1['o'], high=df1['h'], low=df1['l'], close=df1['c']
     )])
@@ -155,12 +143,5 @@ if data:
     fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # 统计闭环
-    st.write("---")
-    st.subheader("统计闭环")
-
-    report = stats_report()
-    st.write(report)
-
 else:
-    st.warning("数据获取失败，等待重试...")
+    st.warning("数据获取失败")
