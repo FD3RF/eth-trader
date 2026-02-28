@@ -102,17 +102,29 @@ def get_candles(f_ema, s_ema, bar="1m"):
         return df
     except Exception as e:
         st.error(f"数据获取失败: {str(e)}")
-        return pd.DataFrame()
+        # 兜底默认 df，防止页面空白
+        dummy = pd.DataFrame({
+            'time': pd.date_range('now', periods=50, freq='T'),
+            'o': [1900]*50, 'h': [1910]*50, 'l': [1890]*50, 'c': [1900]*50, 'v': [1000]*50
+        })
+        dummy['ema_f'] = dummy['c'].ewm(span=f_ema, adjust=False).mean()
+        dummy['ema_s'] = dummy['c'].ewm(span=s_ema, adjust=False).mean()
+        dummy['rsi'] = 50.0
+        dummy['macd'] = 0
+        dummy['macd_signal'] = 0
+        dummy['net_flow'] = 0
+        dummy['atr'] = 5.0
+        return dummy
 
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
-    for attempt in range(3):  # 重试3次
+    for attempt in range(5):  # 重试5次 + 指数退避
         try:
             url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
             res = requests.get(url, timeout=6).json()
             if res.get('code') == '0':
                 return float(res['data'][0][1])
-            time.sleep(1)
+            time.sleep(2 ** attempt)
         except:
             pass
     st.warning("多空比获取失败，使用默认 1.0")
@@ -135,6 +147,8 @@ def render_sidebar(df):
         f_e = st.number_input("快线 EMA", 5, 30, 12)
         s_e = st.number_input("慢线 EMA", 20, 100, 26)
         st.session_state.theme = st.selectbox("主题", ['dark', 'light'], index=0 if st.session_state.theme == 'dark' else 1)
+        if st.button("强制刷新"):
+            st.rerun()
         st.divider()
 
         if len(df) < 14:
@@ -304,9 +318,11 @@ def main():
         scaled_flow = df['net_flow'] / flow_max * 800
         colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
         fig.add_trace(go.Bar(x=df['time'], y=scaled_flow, marker_color=colors, name="庄家净流"), row=2, col=1)
+    else:
+        fig.add_annotation(text="数据加载中...请点击强制刷新", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="white"))
 
     fig.update_layout(template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'], height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
-    st.plotly_chart(fig)   # 移除 use_container_width，消除所有弃用警告
+    st.plotly_chart(fig)
 
     if not pause_refresh:
         time.sleep(hb)
