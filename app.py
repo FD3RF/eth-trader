@@ -2,82 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import sqlite3
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# ==================== 1. 系统核心配置与数据库初始化 ====================
-st.set_page_config(page_title="ETH V135 职业自感知终端", layout="wide")
+# ==================== 1. 系统核心配置 ====================
+st.set_page_config(page_title="ETH V15-80 战地指挥官", layout="wide")
 
-def init_db():
-    conn = sqlite3.connect('trading_intelligence.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS signals 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  ts TEXT, direction TEXT, price REAL, 
-                  score INTEGER, confidence REAL, rsi REAL, 
-                  atr REAL, net_flow REAL, result_15m REAL DEFAULT 0)''')
-    conn.commit()
-    conn.close()
-
-def log_trade(sig, p, score, conf, rsi, atr, nf):
-    conn = sqlite3.connect('trading_intelligence.db')
-    c = conn.cursor()
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute("SELECT id FROM signals WHERE ts LIKE ? AND direction = ?", (f"{now[:16]}%", sig))
-    if not c.fetchone():
-        c.execute("""INSERT INTO signals (ts, direction, price, score, confidence, rsi, atr, net_flow) 
-                     VALUES (?,?,?,?,?,?,?,?)""", (now, sig, p, score, conf, rsi, atr, nf))
-        conn.commit()
-    conn.close()
-
-# ==================== 2. 职业审计级引擎 (V135) ====================
-def quantum_engine_v135(df1, df5, net_flow, buy_ratio):
-    # --- 指标预处理 (严格审计标准) ---
-    for d in [df1, df5]:
-        for col in ['o', 'h', 'l', 'c', 'v']: d[col] = d[col].astype(float)
-        tr = np.maximum(d['h'] - d['l'], np.maximum(abs(d['h'] - d['c'].shift(1)), abs(d['l'] - d['c'].shift(1))))
-        d['atr'] = tr.rolling(14).mean()
-        delta = d['c'].diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
-        d['rsi'] = 100 - (100 / (1 + (gain.rolling(14).mean() / loss.rolling(14).mean().replace(0, np.nan))))
-        d['ema20'] = d['c'].ewm(span=20, adjust=False).mean()
-        d['ema60'] = d['c'].ewm(span=60, adjust=False).mean()
-
-    # 消除未来函数的回测置信度
-    df1['prev_c'], df1['prev_ema'] = df1['c'].shift(1), df1['ema20'].shift(1)
-    df1['signal'] = np.where((df1['prev_c'] > df1['prev_ema']), 1, -1)
-    conf = np.clip(50 + (df1['signal'] * df1['c'].pct_change().shift(-1)).tail(30).sum() * 1000, 20, 95)
-
-    curr1, curr5 = df1.iloc[-1], df5.iloc[-1]
-    vol_ratio = curr1['v'] / df1['v'].rolling(20).mean().iloc[-1]
-
-    # 双向评分独立 (审计修正)
-    l_score, s_score = 0, 0
-    t_gap = (curr5['ema20'] - curr5['ema60']) / curr5['atr']
-    if t_gap > 0.8: l_score += 3
-    elif t_gap < -0.8: s_score += 3
-    if net_flow > 5: l_score += 2
-    if net_flow < -5: s_score += 2
-    
-    is_real = vol_ratio > 1.2 and (abs(curr1['c']-curr1['o'])/curr1['atr'] > 0.6)
-    if is_real:
-        if curr1['c'] > curr1['o']: l_score += 2
-        else: s_score += 2
-
-    # 动态门槛与信号触发
-    sig = {"dir": None, "score": 0, "type": "🚥 扫描中"}
-    threshold = 7 if conf < 50 else 6
-    
-    if curr1['atr'] > df1['atr'].rolling(50).mean().iloc[-1] * 0.7:
-        if l_score >= threshold: sig = {"dir": "LONG", "score": l_score, "type": "🚀 多头点火"}
-        elif s_score >= threshold: sig = {"dir": "SHORT", "score": s_score, "type": "🔥 空头下破"}
-    
-    if sig['dir']:
-        log_trade(sig['dir'], curr1['c'], sig['score'], conf, curr1['rsi'], curr1['atr'], net_flow)
-
-    return sig, l_score, s_score, conf, is_real, curr1['rsi'], curr1['atr']
-
-# ==================== 3. 辅助函数 ====================
 def fetch_okx(endpoint, params=""):
     url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
     try:
@@ -85,45 +15,122 @@ def fetch_okx(endpoint, params=""):
         return r if r.get('code') == '0' else None
     except: return None
 
-# ==================== 4. UI 界面布局 ====================
-init_db()
+# ==================== 2. 进攻型核心引擎 (整合 V15-V80) ====================
+def battle_commander_engine(df1, df5, net_flow, buy_ratio):
+    # 统一转换类型
+    for d in [df1, df5]:
+        for col in ['o', 'h', 'l', 'c', 'v']: d[col] = d[col].astype(float)
+        d['ema20'] = d['c'].ewm(span=20, adjust=False).mean()
+        d['ema60'] = d['c'].ewm(span=60, adjust=False).mean()
+        d['atr'] = (d['h'] - d['l']).rolling(14).mean()
+        # 布林带 (V75 核心)
+        d['std'] = d['c'].rolling(20).std()
+        d['upper'] = d['ema20'] + (d['std'] * 2)
+        d['lower'] = d['ema20'] - (d['std'] * 2)
+
+    curr1, curr5 = df1.iloc[-1], df5.iloc[-1]
+    atr = curr1['atr']
+    
+    # 【V15 基本面雷达】
+    f_score = (2 if net_flow > 3 else -2 if net_flow < -3 else 0) + (1 if buy_ratio > 55 else -1 if buy_ratio < 45 else 0)
+    
+    # 【V80 庄家辨伪】
+    vol_q = curr1['v'] / df1['v'].rolling(20).mean().iloc[-1]
+    is_real = vol_q > 1.05 # 降低门槛，只要放量就视为真实
+    
+    # 【V75 趋势/震荡双模】
+    slope5 = (df5['ema20'].iloc[-1] - df5['ema20'].iloc[-5]) / 5
+    is_trend = abs(slope5) > (atr * 0.1)
+
+    # 【V65 AI 战术生成器】
+    plan = {"status": "🔭 待机", "action": "观望", "pos": "0%", "entry": None, "tp": None, "sl": None, "reason": "市场动能不足"}
+    
+    # 策略 A: 趋势进攻 (V80 核心)
+    if is_trend and is_real:
+        if curr1['c'] > curr1['ema20'] and f_score >= 2:
+            plan = {
+                "status": "🚀 趋势火炮", "action": "做多 (LONG)", "pos": "5-10%", 
+                "entry": curr1['c'], "tp": curr1['c'] + 2.5*atr, "sl": curr1['c'] - 1.5*atr,
+                "reason": "5M趋势向上 + 1M资金流入确认"
+            }
+        elif curr1['c'] < curr1['ema20'] and f_score <= -2:
+            plan = {
+                "status": "🔥 趋势崩塌", "action": "做空 (SHORT)", "pos": "5-10%", 
+                "entry": curr1['c'], "tp": curr1['c'] - 2.5*atr, "sl": curr1['c'] + 1.5*atr,
+                "reason": "5M下行结构 + 抛压真实释放"
+            }
+    
+    # 策略 B: 震荡收割 (V75 核心)
+    elif not is_trend:
+        if curr1['c'] <= curr1['lower'] and f_score >= 1:
+            plan = {
+                "status": "🏹 底部埋伏", "action": "做多 (LONG)", "pos": "3%", 
+                "entry": curr1['c'], "tp": curr1['ema20'], "sl": curr1['c'] - 1.2*atr,
+                "reason": "触碰布林下轨 + 资金暗中护盘"
+            }
+        elif curr1['c'] >= curr1['upper'] and f_score <= -1:
+            plan = {
+                "status": "🎯 高位狙击", "action": "做空 (SHORT)", "pos": "3%", 
+                "entry": curr1['c'], "tp": curr1['ema20'], "sl": curr1['c'] + 1.2*atr,
+                "reason": "触碰布林上轨 + 获利盘了结"
+            }
+
+    return plan, f_score, is_trend, is_real, curr1['atr']
+
+# ==================== 3. 界面渲染 (回归 V15 暴力美学) ====================
 k1_raw = fetch_okx("market/candles", "&bar=1m&limit=100")
 k5_raw = fetch_okx("market/candles", "&bar=5m&limit=100")
 t_raw = fetch_okx("market/trades", "&limit=50")
 
 if k1_raw and k5_raw and t_raw:
-    df1 = pd.DataFrame(k1_raw['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])[::-1].reset_index(drop=True)
-    df5 = pd.DataFrame(k5_raw['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])[::-1].reset_index(drop=True)
+    df1 = pd.DataFrame(k1_raw['data'], columns=['ts','o','h','l','c','v','vol','vq','cf'])[::-1].reset_index(drop=True)
+    df5 = pd.DataFrame(k5_raw['data'], columns=['ts','o','h','l','c','v','vol','vq','cf'])[::-1].reset_index(drop=True)
     tdf = pd.DataFrame(t_raw['data'])
     net_f = tdf[tdf['side']=='buy']['sz'].astype(float).sum() - tdf[tdf['side']=='sell']['sz'].astype(float).sum()
     buy_r = (tdf[tdf['side']=='buy']['sz'].astype(float).sum() / tdf['sz'].astype(float).sum()) * 100
     
-    sig, l_score, s_score, conf, is_real, rsi, atr = quantum_engine_v135(df1, df5, net_f, buy_r)
+    plan, f_score, is_trend, is_real, atr = battle_commander_engine(df1, df5, net_f, buy_r)
 
-    with st.sidebar:
-        st.header("🧠 核心自感知")
-        st.metric("策略置信度", f"{conf:.1f}%")
-        st.write(f"📈 多头分: `{l_score}` | 📉 空头分: `{s_score}`")
-        st.divider()
-        if st.button("查看黑匣子数据"):
-            conn = sqlite3.connect('trading_intelligence.db')
-            st.dataframe(pd.read_sql_query("SELECT * FROM signals ORDER BY id DESC LIMIT 5", conn))
-            conn.close()
-
-    st.title("🛡️ ETH 职业自感知终端 V135")
+    # --- 顶部分栏: 核心数据 ---
+    st.title("🛡️ ETH 战地指挥官 V15-80 终极版")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("1min 净流", f"{net_f:+.2f} ETH")
-    c2.metric("审计 RSI", f"{rsi:.1f}")
-    c3.metric("ATR 波动", f"{atr:.2f}")
-    c4.metric("品质校验", "REAL" if is_real else "NOISE")
+    c1.metric("资金净流", f"{net_f:+.2f} ETH", delta=f"{f_score} 分")
+    c2.metric("买压占比", f"{buy_r:.1f}%")
+    c3.metric("市场模式", "🌊 趋势" if is_trend else "⚖️ 震荡")
+    c4.metric("动能校验", "✅ 真实" if is_real else "⚠️ 虚假")
 
-    if sig['dir']:
-        color = "#00FFCC" if sig['dir'] == "LONG" else "#FF4B4B"
-        st.markdown(f"<div style='background:{color}33; border:2px solid {color}; padding:20px; border-radius:10px; text-align:center;'><h2>{sig['type']} (Score: {sig['score']})</h2><p>动态准入已通过，信号已记入黑匣子</p></div>", unsafe_allow_html=True)
+    # --- 核心: 详细交易计划策略表 (V65 灵魂) ---
+    st.markdown("---")
+    st.subheader("📝 实时作战指令计划")
+    
+    col_l, col_r = st.columns([1, 2])
+    with col_l:
+        color = "#00FFCC" if "多" in plan['action'] else "#FF4B4B" if "空" in plan['action'] else "#888"
+        st.markdown(f"""
+            <div style="border:3px solid {color}; padding:20px; border-radius:15px; background:rgba(0,0,0,0.3)">
+                <h1 style="color:{color}; margin:0">{plan['status']}</h1>
+                <h2 style="margin:5px 0">{plan['action']}</h2>
+                <hr>
+                <p style="font-size:18px">📍 <b>入场点:</b> {f"${plan['entry']:.2f}" if plan['entry'] else "---"}</p>
+                <p style="font-size:18px; color:#00FFCC">💰 <b>止盈点:</b> {f"${plan['tp']:.2f}" if plan['tp'] else "---"}</p>
+                <p style="font-size:18px; color:#FF4B4B">❌ <b>止损点:</b> {f"${plan['sl']:.2f}" if plan['sl'] else "---"}</p>
+                <p style="font-size:16px">📊 <b>建议仓位:</b> {plan['pos']}</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col_r:
+        st.info(f"**战术分析建议**: {plan['reason']}")
+        # 实时 K 线图 (带布林带和 EMA)
+        fig = go.Figure(data=[go.Candlestick(x=df1.index, open=df1['o'], high=df1['h'], low=df1['l'], close=df1['c'], name="1M K")])
+        fig.add_trace(go.Scatter(x=df1.index, y=df1['upper'], line=dict(color='rgba(255,255,255,0.2)', dash='dot'), name="上轨"))
+        fig.add_trace(go.Scatter(x=df1.index, y=df1['lower'], line=dict(color='rgba(255,255,255,0.2)', dash='dot'), name="下轨"))
+        fig.add_trace(go.Scatter(x=df1.index, y=df1['ema20'], line=dict(color='yellow', width=1), name="EMA20"))
+        fig.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-    fig = go.Figure(data=[go.Candlestick(x=df1.index, open=df1['o'], high=df1['h'], low=df1['l'], close=df1['c'], name="K线")])
-    fig.add_trace(go.Scatter(x=df1.index, y=df1['ema20'], line=dict(color='yellow', width=1), name="EMA20"))
-    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    # --- 底部分栏: 庄家雷达 ---
+    st.markdown("---")
+    st.write(f"🕵️ **庄家动态**: 1M 量比 `{vol_ratio:.2f}` | 波动率 ATR `{atr:.2f}` | 当前时间: {datetime.now().strftime('%H:%M:%S')}")
+
 else:
-    st.warning("正在同步 OKX 职业数据流...")
+    st.error("正在强行接入 OKX 战地数据源...")
