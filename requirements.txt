@@ -1,5 +1,6 @@
-streamlit>=1.30.0
+streamlit
 pandas
-numpy
 requests
+numpy
 plotly
+scikit-learn
