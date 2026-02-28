@@ -3,20 +3,22 @@ import requests
 import time
 from datetime import datetime
 
-# 1. 物理层隔离：只留最原始的执行逻辑
-st.set_page_config(page_title="ETH_GOD_V16")
-st.markdown("<style>#MainMenu,footer{visibility:hidden;} .stCodeBlock{border:1px solid #ff4b4b;}</style>", unsafe_allow_html=True)
+# 1. 物理层配置 - 绝不使用过时参数
+st.set_page_config(page_title="ETH_SURVIVOR_V17")
+st.markdown("<style>#MainMenu,footer{visibility:hidden;} .stMetric{background:#0e1117;}</style>", unsafe_allow_html=True)
 
-# 2. 状态原子化：锁死唯一内存地址
-if 'ST' not in st.session_state:
-    st.session_state.ST = {'bal': 10.0, 'pos': "NONE", 'ent': 0.0, 'size': 0.0, 'logs': []}
+# 2. 状态原子锁 - 唯一数据源
+if 'SURVIVOR' not in st.session_state:
+    st.session_state['SURVIVOR'] = {
+        'bal': 10.0, 'pos': "NONE", 'ent': 0.0, 'size': 0.0, 
+        'logs': [], 'history': [10.0]
+    }
 
-s = st.session_state.ST
+s = st.session_state['SURVIVOR']
 
-# 3. 极简实时行情 (移除所有 Cache，杜绝假死)
+# 3. 极简实时行情 - 杜绝假死
 def get_px():
     try:
-        # 直接物理获取 OKX 永续合约实时价
         r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP", timeout=1).json()
         return float(r['data'][0]['last'])
     except:
@@ -24,49 +26,50 @@ def get_px():
 
 px = get_px()
 
-# 4. 暴力过滤逻辑：只打“必胜”的插针回归
+# 4. 暴力执行内核 - 10U 活命逻辑
 if px:
-    # 模拟极简动态波段：计算这一秒的偏离度 (不使用历史数据，减少内存负担)
-    # 我们只在发生“断崖式”下跌（瞬时跌幅 > 0.1%）时进场咬反弹
-    if 'prev' not in st.session_state: st.session_state.prev = px
-    gap = px - st.session_state.prev
+    # 记录上一秒价格，寻找“断崖式”入场机会
+    if 'old_px' not in st.session_state: st.session_state.old_px = px
+    
+    # 计算瞬时跌幅 (只要那种能瞬间拉回来的深坑)
+    drop = (px / st.session_state.old_px) - 1
     
     if s['pos'] == "NONE":
-        # 严格入场：必须瞬时暴跌才会触发，杜绝在阴跌中被磨损
-        if gap < -(px * 0.0015): 
+        # 只在瞬间跌幅超过 0.1% 的非理性时刻进场咬肉
+        if drop < -0.001: 
             s['ent'] = px
             s['pos'] = "LONG"
-            s['size'] = (s['bal'] * 0.999) / px # 极限仓位，预留极低滑点
+            s['size'] = (s['bal'] * 0.999) / px # 预留手续费
             s['bal'] = 0.0
-            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | 🗡️ 瞬时暴跌捕捉 | 入场 @ {px}")
+            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | 🚨 捕捉瞬间插针 @ {px}")
     else:
-        # 持仓中：严格执行 0.8% 止盈 / 0.4% 止损
-        # 10U 账户只能玩极短线，利润一到立刻撤退
-        pnl = (px / s['ent'] - 1) if s['pos'] == "LONG" else (1 - px / s['ent'])
-        
+        # 持仓状态：10U 账户严禁贪婪
+        pnl = (px / s['ent'] - 1)
+        # 0.8% 止盈 (覆盖手续费后有肉) / 0.4% 止损 (保命)
         if pnl > 0.008 or pnl < -0.004:
-            # 扣除手续费 0.05% * 2
-            val = s['size'] * s['ent'] * (1 + pnl) * 0.999
-            s['bal'] = round(val, 4)
-            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | 💰 咬肉成功 | P/L: {pnl:.2%} | 余额: ${s['bal']}")
-            s['pos'], s['ent'], s['size'] = "NONE", 0.0, 0.0
-            
-    st.session_state.prev = px
+            # 退出扣除 0.05% 滑点
+            exit_val = s['size'] * s['ent'] * (1 + pnl) * 0.999
+            s['bal'] = round(exit_val, 4)
+            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | ✅ 闪击撤退 | P/L: {pnl:.2%} | 余: ${s['bal']}")
+            s['pos'], s['size'] = "NONE", 0.0
+    
+    st.session_state.old_px = px
 
-# 5. UI 强制平铺：不使用 columns，不给 NameError 任何机会
-st.title(f"💰 账户净值: ${s['bal'] if s['pos'] == 'NONE' else (s['size']*px):.4f}")
-st.write(f"实时价格: `{px if px else 'LINK_LOST'}`")
+# 5. UI 渲染 - 绝对线性平铺 (杜绝 NameError)
+st.title(f"💰 账户余额: ${s['bal'] if s['pos'] == 'NONE' else (s['size']*px):.4f}")
+st.write(f"实时行情: `{px if px else 'SYNCING...'}`")
 
 if s['pos'] != "NONE":
-    st.warning(f"⚠️ 战斗中 | 持仓: {s['pos']} | 盈亏: {((px/s['ent']-1)*100):.3f}%")
+    st.warning(f"🎯 持仓中: {s['pos']} | 实时盈亏: {((px/s['ent']-1)*100):.3f}%")
 else:
-    st.info("🎯 状态：冷静待机，等待市场失衡瞬间...")
+    st.info("🛰️ 侦测中心：正在等待极端插针信号...")
 
+# 简易审计志
 if s['logs']:
-    st.write("---")
-    for log in reversed(s['logs']):
-        st.code(log)
+    st.divider()
+    for l in reversed(s['logs']):
+        st.code(l)
 
-# 6. 循环
+# 6. 原子级重载
 time.sleep(1)
 st.rerun()
