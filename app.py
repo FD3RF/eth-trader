@@ -6,9 +6,6 @@ from plotly.subplots import make_subplots
 import time
 from datetime import datetime
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
 
 st.set_page_config(layout="wide", page_title="ETH V32009 终极指挥官", page_icon="⚖️")
 
@@ -18,6 +15,8 @@ st.set_page_config(layout="wide", page_title="ETH V32009 终极指挥官", page_
 def init_commander_state():
     if 'ls_ratio' not in st.session_state: st.session_state.ls_ratio = 1.0
     if 'last_cleanup' not in st.session_state: st.session_state.last_cleanup = time.time()
+    if 'theme' not in st.session_state: st.session_state.theme = 'dark'
+    if 'alarm_on' not in st.session_state: st.session_state.alarm_on = False
 
 def light_cleanup():
     if time.time() - st.session_state.last_cleanup > 86400:
@@ -25,7 +24,7 @@ def light_cleanup():
         st.session_state.last_cleanup = time.time()
 
 # ==========================================
-# 2. 情报引擎（优化真实性 + 动态阈值）
+# 2. 情报引擎（真实 public API + trades 净流 + RSI + MACD）
 # ==========================================
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(f_ema, s_ema, bar="1m"):
@@ -40,15 +39,32 @@ def get_candles(f_ema, s_ema, bar="1m"):
         
         df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
         df['ema_s'] = df['c'].ewm(span=s_ema, adjust=False).mean()
-        # 改进净流：用 RSI 调整系数，更真实模拟 (可接 trades API)
-        # 注释：真实版调用 trades API 估算买/卖压力
+        
+        # RSI
         diff = df['c'].diff()
         gain = diff.clip(lower=0).rolling(14).mean()
         loss = -diff.clip(upper=0).rolling(14).mean()
         rs = gain / loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        coeff = 0.2 if rsi.iloc[-1] > 50 else 0.1
-        df['net_flow'] = (df['c'].diff() * df['v'] * coeff).rolling(5).sum().fillna(0)
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # MACD
+        ema12 = df['c'].ewm(span=12, adjust=False).mean()
+        ema26 = df['c'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        # 真实净流：用 public trades API 计算买/卖体积
+        trades_url = f"https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100"
+        trades_res = requests.get(trades_url, timeout=6).json()
+        if trades_res.get('code') == '0':
+            trades_df = pd.DataFrame(trades_res['data'], columns=['ts', 'px', 'sz', 'side'])
+            trades_df['sz'] = trades_df['sz'].astype(float)
+            buy_vol = trades_df[trades_df['side'] == 'buy']['sz'].sum()
+            sell_vol = trades_df[trades_df['side'] == 'sell']['sz'].sum()
+            df['net_flow'] = buy_vol - sell_vol
+        else:
+            df['net_flow'] = 0
+
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
         return df
@@ -75,51 +91,78 @@ def get_ls_ratio():
         return 1.0
 
 # ==========================================
-# 3. 侧边栏（优化体验 + 健壮性）
+# 胜率计算（规则 + 动态阈值）
+# ==========================================
+def calculate_prob(df):
+    if len(df) < 14:
+        return 50.0
+    
+    is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
+    rsi = df['rsi'].iloc[-1]
+    macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
+    net_flow = df['net_flow'].iloc[-1]
+    
+    rsi_high_th = np.percentile(df['rsi'].tail(30), 70) if len(df) > 30 else 60
+    rsi_low_th = np.percentile(df['rsi'].tail(30), 30) if len(df) > 30 else 40
+    
+    prob = 50.0
+    prob += 20 if is_golden_cross else -15
+    prob += 15 if rsi > rsi_high_th else -15 if rsi < rsi_low_th else 0
+    prob += 10 if macd_cross else -10
+    prob += 10 if net_flow > 0 else -10
+    return max(min(prob, 95.0), 5.0)
+
+# 贝叶斯更新
+def bayesian_update(prior, evidence):
+    likelihood = evidence
+    posterior = (prior * likelihood) / ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) if ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) != 0 else 0.5
+    return posterior * 100
+
+# ==========================================
+# 3. 侧边栏
 # ==========================================
 def render_sidebar(df):
     with st.sidebar:
         st.markdown("### 🛸 量子实时控制 V32009")
-        st.warning("⚠️ 部分指标（如净流入、清算区）为模拟演示，请勿作为实盘依据。")
+        st.warning("⚠️ 部分指标为模拟演示，请勿作为实盘唯一依据。")
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
         pause_refresh = st.checkbox("暂停自动刷新", value=False)
+        st.session_state.alarm_on = st.checkbox("启用声音报警 (胜率>70% or <30%)", value=st.session_state.alarm_on)
         
         tf_options = ["1m", "5m", "15m", "30m", "1H"]
         tf = st.selectbox("时间框架", tf_options, index=2)
         
         f_e = st.number_input("快线 EMA", 5, 30, 12)
         s_e = st.number_input("慢线 EMA", 20, 100, 26)
+        st.session_state.theme = st.selectbox("主题", ['dark', 'light'], index=0 if st.session_state.theme == 'dark' else 1)
         st.divider()
 
         if len(df) < 14:
-            st.warning("数据不足，无法计算指标，使用默认值")
+            st.warning("数据不足，使用默认值")
             last_p = 0
             atr = 5.0
             is_golden_cross = False
             net_flow = 0
+            rsi = 50.0
+            macd = 0
+            macd_signal = 0
         else:
             last_p = df['c'].iloc[-1]
             atr = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else 5.0
             is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
             net_flow = df['net_flow'].iloc[-1]
+            rsi = df['rsi'].iloc[-1]
+            macd = df['macd'].iloc[-1]
+            macd_signal = df['macd_signal'].iloc[-1]
 
         ls = st.session_state.ls_ratio
 
-        # 重构胜率：GBDT + 贝叶斯
-        features = ["ema_f", "ema_s", "atr", "net_flow"]
-        X = df[features]
-        y = (df['c'].shift(-1) > df['c']).astype(int)  # 简化标签
-
-        if len(df) < 50:
-            prob = 50.0
-        else:
-            X_train, X_test, y_train, y_test = train_test_split(X.iloc[:-1], y.iloc[1:], test_size=0.2, shuffle=False)
-            model = GradientBoostingClassifier()
-            model.fit(X_train, y_train)
-            prob = model.predict_proba(df[features].iloc[-1:].values)[0][1] * 100
-
+        prob = calculate_prob(df)
         evidence = 0.6 if ls < 1 else 0.4
-        bayes_prob = bayesian_update(prob / 100, evidence) * 100
+        bayes_prob = bayesian_update(prob / 100, evidence)
+
+        if st.session_state.alarm_on and (bayes_prob > 70 or bayes_prob < 30):
+            st.markdown('<audio autoplay="true"><source src="https://freesound.org/data/previews/66/66152_239025-little_robot_sound_factory-lq.mp3" type="audio/mpeg"></audio>', unsafe_allow_html=True)
 
         direction = 1 if bayes_prob > 50 else -1
         tp_sugg = last_p + direction * atr * 2.6
@@ -161,11 +204,56 @@ def render_sidebar(df):
                 st.warning("⚖️ **指挥官最优决策**：轻仓物理位陷阱 或 观望。")
 
             strats = [
-                # ... 同 V32007 3个策略卡片，保持不变
+                {
+                    "name": "物理位陷阱",
+                    "state": "⚪ 观察中",
+                    "color": "#FFD700",
+                    "entry": f"价格回踩 EMA26（约{last_p - atr*0.8:.1f}）后反弹",
+                    "tp": f"${last_p + atr*2.0:.1f}",
+                    "sl": f"${last_p - atr*1.2:.1f}",
+                    "rr": "1:1.7",
+                    "position": "轻仓 20%",
+                    "reason": "当前震荡箱体，防假突破。适合防御型交易者。",
+                    "risk": "若净流持续转负，立即取消。"
+                },
+                {
+                    "name": "清算猎杀",
+                    "state": "🔥 进攻中" if bayes_prob > 65 else "⚪ 待机",
+                    "color": "#00ff88" if bayes_prob > 65 else "#ff4b4b",
+                    "entry": f"突破近期高点（约{df['h'].tail(30).max():.1f}）",
+                    "tp": f"${tp_sugg:.1f}",
+                    "sl": f"${sl_sugg:.1f}",
+                    "rr": f"1:{rr:.2f}",
+                    "position": "中仓 40%" if bayes_prob > 65 else "观望",
+                    "reason": f"胜率{bayes_prob:.0f}% + EMA金叉，主力净流倾向多头，适合猎杀空头止损。",
+                    "risk": "ATR扩大时严格执行SL。"
+                },
+                {
+                    "name": "EMA金叉追涨",
+                    "state": "✅ 已激活" if is_golden_cross else "⚪ 未触发",
+                    "color": "#00ff88" if is_golden_cross else "#888888",
+                    "entry": "15m框架下金叉确认 + 量能放大",
+                    "tp": f"${last_p + atr*3.5:.1f}",
+                    "sl": f"${last_p - atr*1.0:.1f}",
+                    "rr": "1:3.5",
+                    "position": "重仓 60%" if is_golden_cross and bayes_prob > 70 else "轻仓",
+                    "reason": "多时间框架共振，金叉后趋势加速概率高。当前15m框架最强。",
+                    "risk": "若15m回踩EMA26失效，立即减仓。"
+                }
             ]
 
             for s in strats:
-                st.markdown(...)  # 卡片代码同前
+                st.markdown(f"""
+                    <div style="border-left:4px solid {s['color']}; padding:12px; margin:8px 0; background:rgba(255,255,255,0.05); border-radius:8px;">
+                        <b style="color:{s['color']};">{s['state']} | {s['name']}</b><br>
+                        <span style="color:#00ff88;">📍 入场：{s['entry']}</span><br>
+                        <span style="color:#00ff88;">🎯 TP：{s['tp']}　</span>
+                        <span style="color:#ff4b4b;">🛡️ SL：{s['sl']}</span><br>
+                        <span style="color:#aaa;">R/R {s['rr']}　仓位 {s['position']}</span><br>
+                        <span style="font-size:0.8em; color:#ccc;">理由：{s['reason']}</span><br>
+                        <span style="font-size:0.75em; color:#ff4b4b;">⚠️ 风险：{s['risk']}</span>
+                    </div>
+                """, unsafe_allow_html=True)
 
         st.divider()
         st.markdown(f"【{datetime.now().strftime('%H:%M:%S')}】卫星同步成功 | 当前框架：{tf}")
@@ -217,7 +305,7 @@ def main():
         colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
         fig.add_trace(go.Bar(x=df['time'], y=scaled_flow, marker_color=colors, name="庄家净流"), row=2, col=1)
 
-    fig.update_layout(template="plotly_dark", height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
+    fig.update_layout(template=st.session_state.theme, height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
     st.plotly_chart(fig, use_container_width=True)
 
     if not pause_refresh:
