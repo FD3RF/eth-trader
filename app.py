@@ -3,111 +3,162 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from sklearn.ensemble import IsolationForest
 
-# ==========================================
-# 1. 物理锁：最顶层强制初始化 (严禁改动)
-# ==========================================
-st.set_page_config(layout="wide", page_title="ETH V70000 战神终端")
-
-# 强制焊死状态机，防止刷新瞬间的 KeyError
-def force_init():
-    for k, v in {
-        'df': pd.DataFrame(),
-        'p_equity': 10000.0,
-        'e_hist': [{"time": "00:00", "equity": 10000.0, "pnl": 0.0}],
-        'init_p': 0.0
-    }.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-force_init()
-
-# ==========================================
-# 2. 数据层：物理补齐协议
-# ==========================================
-def get_data_v7():
-    url = "https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar=1m&limit=100"
-    cols = ['ts','o','h','l','c','v','volC','volCQ','cf']
-    # 物理必填列，缺少这些列程序就不准往下走
-    must_have = ['ema12', 'ema26', 'macd', 'liq', 'flow']
-    
+# ================================
+# 数据获取
+# ================================
+def fetch_okx(endpoint, params=""):
+    url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
     try:
         r = requests.get(url, timeout=3).json()
-        raw = r.get('data', [])
-        if not raw: return st.session_state.df
-        
-        df = pd.DataFrame(raw, columns=cols)[::-1]
-        df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
-        for c in ['o','h','l','c','v']: df[c] = df[c].astype(float)
-        
-        # --- 物理补齐：无论如何，先造出这些列 ---
-        df = df.reindex(columns=list(df.columns) + must_have, fill_value=0.0)
-        
-        df['ema12'] = df['c'].ewm(span=12, adjust=False).mean()
-        df['ema26'] = df['c'].ewm(span=26, adjust=False).mean()
-        df['macd'] = df['ema12'] - df['ema26']
-        df['flow'] = (df['v'] * np.random.uniform(-0.02, 0.02)).rolling(5).sum().fillna(0)
-        
-        # 爆仓判定：只要成交量翻倍即标记
-        v_avg = df['v'].mean()
-        df.loc[df['v'] > v_avg * 3, 'liq'] = 1
-        
-        return df
+        return r.get('data', []) if r.get('code') == '0' else []
     except:
-        return st.session_state.df
+        return []
 
-# ==========================================
-# 3. 终端主界面
-# ==========================================
-def main():
-    force_init()
-    
-    if st.sidebar.button("♻️ 物理链路重置") or st.session_state.df.empty:
-        st.session_state.df = get_data_v7()
+def get_data():
+    k1 = fetch_okx("market/candles", "&bar=1m&limit=200")
+    if not k1:
+        return None
 
-    df = st.session_state.df
-    
-    # --- 最终物理关卡：不达标不显示 ---
-    if df.empty or len(df) < 10:
-        st.info("📡 链路数据同步中... 若长时间无响应请检查网络或点击‘重置’")
-        return
+    df = pd.DataFrame(k1, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1]
+    for col in ['o','h','l','c','v']:
+        df[col] = df[col].astype(float)
 
-    # 安全取值，绝不直接读 index
-    last_c = df['c'].values[-1]
-    curr_eq = st.session_state.e_hist[-1]['equity']
-    
-    # UI 标题与指标
-    st.markdown(f"### 🛡️ ETH 战神·最终裁决终端 (V70000)")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("账户净值", f"${curr_eq:.2f}")
-    c2.metric("实时币价", f"${last_c:.2f}")
-    c3.metric("趋势状态", "📈 多头向上" if df['macd'].values[-1] > 0 else "📉 空头压制")
+    return df.reset_index(drop=True)
 
-    # --- 绘图保护：用 try-except 物理包裹 ---
-    try:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        
-        # 1. K线与爆仓点
-        fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="行情"), row=1, col=1)
-        
-        liq_df = df[df['liq'] == 1]
-        if not liq_df.empty:
-            fig.add_trace(go.Scatter(x=liq_df['time'], y=liq_df['h'] + 5, mode='markers', 
-                                   marker=dict(color='yellow', size=12, symbol='star'), name="爆仓"), row=1, col=1)
-        
-        # 2. 动能
-        fig.add_trace(go.Bar(x=df['time'], y=df['macd'], marker_color='cyan', name="动能"), row=2, col=1)
 
-        fig.update_layout(template="plotly_dark", height=700, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-        
-    except Exception as e:
-        st.warning(f"⚠️ 绘图引擎临时挂起: {e}")
+# ================================
+# 特征与序列
+# ================================
+def make_label(df):
+    df = df.copy()
+    df['future'] = df['c'].pct_change().shift(-1)
+    df['label'] = (df['future'] > 0).astype(int)
+    return df
 
-    # 日志审查
-    with st.expander("🔍 物理内存数据审查"):
-        st.dataframe(df.tail(5), use_container_width=True)
+def build_seq(df, window=20):
+    seq = []
+    for i in range(len(df) - window):
+        block = df[['o','h','l','c','v']].iloc[i:i+window].values
+        seq.append(block)
+    return np.array(seq)
 
-if __name__ == "__main__":
-    main()
+
+# ================================
+# 深度学习模型
+# ================================
+def build_model(input_shape):
+    model = Sequential([
+        LSTM(64, return_sequences=True, input_shape=input_shape),
+        Dropout(0.2),
+        LSTM(32),
+        Dense(16, activation='relu'),
+        Dense(1, activation='sigmoid')
+    ])
+
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+
+# ================================
+# 异常检测
+# ================================
+def detect_anomaly(df):
+    model = IsolationForest(contamination=0.02, random_state=42)
+    df['anomaly'] = model.fit_predict(df[['o','h','l','c','v']])
+    return df
+
+
+# ================================
+# 回测
+# ================================
+def backtest(df):
+    df = make_label(df)
+    win = df[df['label'] == 1].shape[0]
+    total = df.shape[0]
+    return {
+        "win_rate": win / total if total > 0 else 0,
+        "total": total
+    }
+
+
+# ================================
+# AI 建议
+# ================================
+def ai_advice(model, seq):
+    prob = model.predict(seq.reshape(1, *seq.shape))[0][0]
+    if prob > 0.65:
+        return "看多（结构概率优势）"
+    elif prob < 0.35:
+        return "看空（结构概率劣势）"
+    else:
+        return "观望"
+
+
+# ================================
+# Streamlit 面板
+# ================================
+st.set_page_config(page_title="AI 深度分析 V700", layout="wide")
+
+st.title("🧠 AI 深度学习分析 V700")
+
+df = get_data()
+
+if df is not None:
+    df = detect_anomaly(df)
+
+    df = make_label(df)
+    seq = build_seq(df)
+
+    if len(seq) == 0:
+        st.warning("序列数据不足")
+        st.stop()
+
+    # 训练模型（轻量）
+    model = build_model(seq.shape[1:])
+    labels = df['label'].iloc[len(df) - len(seq):].values
+    model.fit(seq, labels, epochs=3, batch_size=16, verbose=0)
+
+    # 回测
+    bt = backtest(df)
+
+    # AI 推断
+    last = seq[-1]
+    advice = ai_advice(model, last)
+
+    # 面板
+    col1, col2, col3 = st.columns(3)
+    col1.metric("回测胜率", f"{bt['win_rate']*100:.1f}%")
+    col2.metric("样本数", bt['total'])
+    col3.metric("AI 建议", advice)
+
+    st.write("---")
+
+    # 图表
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c']
+    )])
+
+    # 异常点
+    anom = df[df['anomaly'] == -1]
+    fig.add_trace(go.Scatter(
+        x=anom.index, y=anom['c'],
+        mode='markers',
+        marker=dict(size=8),
+        name="异常"
+    ))
+
+    fig.update_layout(template="plotly_dark", height=600)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("异常统计")
+    st.write(anom[['c']].describe())
+
+    st.write("---")
+    st.info(f"AI 建议：{advice}")
+
+else:
+    st.warning("数据获取失败")
