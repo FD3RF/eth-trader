@@ -3,22 +3,20 @@ import requests
 import time
 from datetime import datetime
 
-# 1. 彻底清空环境，只留最基础的显示
-st.set_page_config(page_title="ETH_DEATH_SQUAD")
-st.markdown("### 💀 ETH 10U 战神执行终端 (V15.0)")
+# 1. 物理层隔离：只留最原始的执行逻辑
+st.set_page_config(page_title="ETH_GOD_V16")
+st.markdown("<style>#MainMenu,footer{visibility:hidden;} .stCodeBlock{border:1px solid #ff4b4b;}</style>", unsafe_allow_html=True)
 
-# 2. 状态锁死：哪怕天崩地裂，账户数据必须准确
-if 'S' not in st.session_state:
-    st.session_state['S'] = {
-        'bal': 10.0, 'pos': "NONE", 'ent': 0.0, 'size': 0.0, 'logs': []
-    }
+# 2. 状态原子化：锁死唯一内存地址
+if 'ST' not in st.session_state:
+    st.session_state.ST = {'bal': 10.0, 'pos': "NONE", 'ent': 0.0, 'size': 0.0, 'logs': []}
 
-s = st.session_state['S']
+s = st.session_state.ST
 
-# 3. 物理心跳获取
+# 3. 极简实时行情 (移除所有 Cache，杜绝假死)
 def get_px():
     try:
-        # 直接物理获取价格
+        # 直接物理获取 OKX 永续合约实时价
         r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP", timeout=1).json()
         return float(r['data'][0]['last'])
     except:
@@ -26,45 +24,49 @@ def get_px():
 
 px = get_px()
 
-# 4. 暴力点位逻辑：只抓“确定性”
-# 我们设置一个简单的极值回归：如果 10 秒内波动超过 0.3%，视为插针，立即反向咬一口
-if 'last_px' not in st.session_state: st.session_state.last_px = px
-
+# 4. 暴力过滤逻辑：只打“必胜”的插针回归
 if px:
-    diff = px - st.session_state.last_px
-    # 只要没仓位，就死等那个“暴跌后的反弹”点位
+    # 模拟极简动态波段：计算这一秒的偏离度 (不使用历史数据，减少内存负担)
+    # 我们只在发生“断崖式”下跌（瞬时跌幅 > 0.1%）时进场咬反弹
+    if 'prev' not in st.session_state: st.session_state.prev = px
+    gap = px - st.session_state.prev
+    
     if s['pos'] == "NONE":
-        st.info(f"⚖️ 正在监测瞬时波动... 当前价: {px}")
-        # 如果瞬时跌幅超过 0.2%，认为这是“稳赢”的反弹起点
-        if diff < -(px * 0.002): 
+        # 严格入场：必须瞬时暴跌才会触发，杜绝在阴跌中被磨损
+        if gap < -(px * 0.0015): 
             s['ent'] = px
             s['pos'] = "LONG"
-            s['size'] = (s['bal'] * 0.995) / px # 扣除滑点预留
+            s['size'] = (s['bal'] * 0.999) / px # 极限仓位，预留极低滑点
             s['bal'] = 0.0
-            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | ⚡ 瞬间插针捕捉：做多 @ {px}")
+            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | 🗡️ 瞬时暴跌捕捉 | 入场 @ {px}")
     else:
-        # 持仓中：只看那 1.5% 的肉
+        # 持仓中：严格执行 0.8% 止盈 / 0.4% 止损
+        # 10U 账户只能玩极短线，利润一到立刻撤退
         pnl = (px / s['ent'] - 1) if s['pos'] == "LONG" else (1 - px / s['ent'])
-        st.warning(f"🎯 咬肉中: {pnl:.4%}")
         
-        # 严格执行：咬到 1% 就跑，或者亏 0.5% 就割。10U 容不下贪婪。
-        if pnl > 0.01 or pnl < -0.005:
-            final = s['size'] * s['ent'] * (1 + pnl) * 0.999
-            s['bal'] = round(final, 4)
-            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | ✅ 撤退结算 | P/L: {pnl:.2%} | 余: ${s['bal']}")
+        if pnl > 0.008 or pnl < -0.004:
+            # 扣除手续费 0.05% * 2
+            val = s['size'] * s['ent'] * (1 + pnl) * 0.999
+            s['bal'] = round(val, 4)
+            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | 💰 咬肉成功 | P/L: {pnl:.2%} | 余额: ${s['bal']}")
             s['pos'], s['ent'], s['size'] = "NONE", 0.0, 0.0
             
-    st.session_state.last_px = px
+    st.session_state.prev = px
 
-# 5. 渲染：不搞多列，不搞图表，只要结果
-st.divider()
-st.title(f"💰 余额: ${s['bal'] if s['pos'] == 'NONE' else (s['size']*px):.4f}")
+# 5. UI 强制平铺：不使用 columns，不给 NameError 任何机会
+st.title(f"💰 账户净值: ${s['bal'] if s['pos'] == 'NONE' else (s['size']*px):.4f}")
+st.write(f"实时价格: `{px if px else 'LINK_LOST'}`")
+
+if s['pos'] != "NONE":
+    st.warning(f"⚠️ 战斗中 | 持仓: {s['pos']} | 盈亏: {((px/s['ent']-1)*100):.3f}%")
+else:
+    st.info("🎯 状态：冷静待机，等待市场失衡瞬间...")
 
 if s['logs']:
     st.write("---")
     for log in reversed(s['logs']):
         st.code(log)
 
-# 6. 原子频率刷新 (1秒一次，不能再快了，否则 OKX 封 IP)
+# 6. 循环
 time.sleep(1)
 st.rerun()
