@@ -10,14 +10,11 @@ import hmac
 import base64
 import hashlib
 from urllib.parse import urlencode
-import json
-import os
+import telegram  # pip install python-telegram-bot
 
 st.set_page_config(layout="wide", page_title="ETH V32009 终极指挥官", page_icon="⚖️")
 
-# ==========================================
-# OKX API 配置（使用您的密钥）
-# ==========================================
+# OKX API 配置 (用户密钥)
 API_KEY = "a2a2a452-49e6-4e76-95f3-fb54e98e2e7b"
 SECRET_KEY = "330FABDB2CAD3585677716686C2BF382"
 PASSPHRASE = "YYDS"
@@ -26,16 +23,15 @@ BASE_URL = "https://www.okx.com"
 def okx_signed_request(method, endpoint, params=None):
     timestamp = datetime.utcnow().isoformat()[:-3] + 'Z'
     request_path = endpoint
+    body = ''
     if params:
         request_path += '?' + urlencode(params)
-    
-    message = timestamp + method.upper() + request_path
-    signature = hmac.new(SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
-    signature_b64 = base64.b64encode(signature).decode('utf-8')
+    message = timestamp + method.upper() + request_path + body
+    signature = base64.b64encode(hmac.new(SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()).decode('utf-8')
     
     headers = {
         'OK-ACCESS-KEY': API_KEY,
-        'OK-ACCESS-SIGN': signature_b64,
+        'OK-ACCESS-SIGN': signature,
         'OK-ACCESS-TIMESTAMP': timestamp,
         'OK-ACCESS-PASSPHRASE': PASSPHRASE,
         'Content-Type': 'application/json'
@@ -50,6 +46,8 @@ def init_commander_state():
     if 'last_cleanup' not in st.session_state: st.session_state.last_cleanup = time.time()
     if 'theme' not in st.session_state: st.session_state.theme = 'dark'
     if 'alarm_on' not in st.session_state: st.session_state.alarm_on = False
+    if 'telegram_bot_token' not in st.session_state: st.session_state.telegram_bot_token = ''
+    if 'telegram_chat_id' not in st.session_state: st.session_state.telegram_chat_id = ''
 
 def light_cleanup():
     if time.time() - st.session_state.last_cleanup > 86400:
@@ -57,23 +55,19 @@ def light_cleanup():
         st.session_state.last_cleanup = time.time()
 
 # ==========================================
-# 2. 情报引擎（使用真实 OKX API + RSI + MACD）
+# 2. 情报引擎（真实 K线 + trades 净流 + RSI + MACD）
 # ==========================================
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(f_ema, s_ema, bar="1m"):
     try:
         endpoint = "/api/v5/market/candles"
-        params = {
-            'instId': 'ETH-USDT',
-            'bar': bar,
-            'limit': '100'
-        }
+        params = {'instId': 'ETH-USDT', 'bar': bar, 'limit': '100'}
         headers = okx_signed_request('GET', endpoint, params)
         res = requests.get(BASE_URL + endpoint, headers=headers, params=params).json()
         if res.get('code') != '0':
             raise ValueError("API 返回错误: " + res.get('msg', '未知'))
         df = pd.DataFrame(res['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])[::-1].reset_index(drop=True)
-        df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms')
+        df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
         for c in ['o','h','l','c','v']: df[c] = df[c].astype(float)
         
         df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
@@ -92,10 +86,15 @@ def get_candles(f_ema, s_ema, bar="1m"):
         df['macd'] = ema12 - ema26
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # 净流（改进，用 RSI 调整）
-        coeff = 0.2 if df['rsi'].iloc[-1] > 50 else 0.1
-        df['net_flow'] = (df['c'].diff() * df['v'] * coeff).rolling(5).sum().fillna(0)
-        
+        # 真实净流：用 trades API 计算主动买/卖
+        trades = get_trades()
+        if not trades.empty:
+            buy_vol = trades[trades['side'] == 'buy']['sz'].sum()
+            sell_vol = trades[trades['side'] == 'sell']['sz'].sum()
+            df['net_flow'] = buy_vol - sell_vol
+        else:
+            df['net_flow'] = 0  # 备选
+
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
         return df
@@ -123,6 +122,18 @@ def get_ls_ratio():
         st.error("多空比获取失败")
         return 1.0
 
+def get_trades():
+    try:
+        url = f"{BASE_URL}/api/v5/market/trades?instId=ETH-USDT&limit=100"
+        res = requests.get(url).json()
+        if res.get('code') != '0':
+            raise ValueError("API 返回错误")
+        df = pd.DataFrame(res['data'], columns=['ts','px','sz','side'])
+        df['sz'] = df['sz'].astype(float)
+        return df
+    except:
+        return pd.DataFrame()
+
 # ==========================================
 # 胜率计算（规则 + 动态阈值）
 # ==========================================
@@ -135,9 +146,12 @@ def calculate_prob(df):
     macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
     net_flow = df['net_flow'].iloc[-1]
     
+    rsi_high_th = np.percentile(df['rsi'].tail(30), 70) if len(df) > 30 else 60
+    rsi_low_th = np.percentile(df['rsi'].tail(30), 30) if len(df) > 30 else 40
+    
     prob = 50.0
     prob += 20 if is_golden_cross else -15
-    prob += 15 if rsi > 60 else -15 if rsi < 40 else 0
+    prob += 15 if rsi > rsi_high_th else -15 if rsi < rsi_low_th else 0
     prob += 10 if macd_cross else -10
     prob += 10 if net_flow > 0 else -10
     return max(min(prob, 95.0), 5.0)
@@ -158,8 +172,12 @@ def render_sidebar(df):
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
         pause_refresh = st.checkbox("暂停自动刷新", value=False)
         st.session_state.alarm_on = st.checkbox("启用声音报警 (胜率>70% or <30%)", value=st.session_state.alarm_on)
+        telegram_bot_token = st.text_input("Telegram Bot Token (可选推送)", st.session_state.telegram_bot_token)
+        telegram_chat_id = st.text_input("Telegram Chat ID", st.session_state.telegram_chat_id)
+        st.session_state.telegram_bot_token = telegram_bot_token
+        st.session_state.telegram_chat_id = telegram_chat_id
         
-        tf_options = ["1m", "5m", "15m", "30m", "1H", "4H"]
+        tf_options = ["1m", "5m", "15m", "30m", "1H", "4H", "1D"]
         tf = st.selectbox("时间框架", tf_options, index=2)
         
         f_e = st.number_input("快线 EMA", 5, 30, 12)
@@ -191,9 +209,12 @@ def render_sidebar(df):
         evidence = 0.6 if ls < 1 else 0.4
         bayes_prob = bayesian_update(prob / 100, evidence)
 
-        if st.session_state.alarm_on:
-            if bayes_prob > 70 or bayes_prob < 30:
-                st.markdown('<audio autoplay="true"><source src="https://www.w3schools.com/html/horse.mp3" type="audio/mpeg"></audio>', unsafe_allow_html=True)  # 替换为您的音频 URL
+        if st.session_state.alarm_on and (bayes_prob > 70 or bayes_prob < 30):
+            st.markdown('<audio autoplay="true"><source src="https://freesound.org/data/previews/66/66152_239025-little_robot_sound_factory-lq.mp3" type="audio/mpeg"></audio>', unsafe_allow_html=True)  # 报警声
+
+        if telegram_bot_token and telegram_chat_id and (bayes_prob > 70 or bayes_prob < 30):
+            bot = telegram.Bot(token=telegram_bot_token)
+            bot.send_message(chat_id=telegram_chat_id, text=f"警报！ETH 胜率 {bayes_prob:.1f}% - {recap}")
 
         direction = 1 if bayes_prob > 50 else -1
         tp_sugg = last_p + direction * atr * 2.6
@@ -309,7 +330,7 @@ def main():
     hb, f_e, s_e, tf, pause_refresh = render_sidebar(df)
     df = get_candles(f_e, s_e, tf)
     
-    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32008) | {tf} | {datetime.now().strftime('%H:%M:%S')}")
+    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32009) | {tf} | {datetime.now().strftime('%H:%M:%S')}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("实时价格", f"${df['c'].iloc[-1]:.2f}" if not df.empty else "N/A")
     
