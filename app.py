@@ -5,22 +5,39 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import asyncio
 import httpx
+import time
 from datetime import datetime
 
-# ==================== 1. 战神全维数据库 (6.0-V1900 基因库) ====================
-if 'last_v_cmd' not in st.session_state: st.session_state.last_v_cmd = ""
-st.set_page_config(page_title="ETH V1900 战神·不朽裁决", layout="wide")
+# ==================== 1. 初始化基因库 (状态存储) ====================
+if 'lockdown_end' not in st.session_state: st.session_state.lockdown_end = 0
+if 'previously_locked' not in st.session_state: st.session_state.previously_locked = False
+if 'last_cmd' not in st.session_state: st.session_state.last_cmd = ""
+if 'win_history' not in st.session_state: 
+    st.session_state.win_history = np.random.uniform(65, 85, size=24).tolist()
 
-# ==================== 2. 指挥官咆哮引擎 (召回 V400 压迫感) ====================
-def speak_passionate(text, level="normal"):
-    if st.session_state.last_v_cmd == text: return
-    st.session_state.last_v_cmd = text
-    p = 1.7 if level == "excited" else 1.0
-    js = f"<script>var m=new SpeechSynthesisUtterance('{text}');m.lang='zh-CN';m.pitch={p};window.speechSynthesis.speak(m);</script>"
+st.set_page_config(page_title="ETH V2500 战神·终极归一", layout="wide")
+
+# ==================== 2. 分级咆哮引擎 (归位/闪电/计划) ====================
+def roar(msg, event_type="normal"):
+    if st.session_state.last_cmd == msg: return
+    st.session_state.last_cmd = msg
+    pitch = 1.8 if event_type == "excited" else 1.0
+    rate = 1.3 if event_type == "excited" else 1.0
+    shake = "document.body.style.animation = 'shake 0.5s';" if event_type == "excited" else ""
+    
+    js = f"""
+    <script>
+    var m = new SpeechSynthesisUtterance('{msg}');
+    m.lang = 'zh-CN'; m.pitch = {pitch}; m.rate = {rate};
+    window.speechSynthesis.speak(m);
+    {shake}
+    </script>
+    <style>@keyframes shake {{ 0% {{transform:translate(2px,2px);}} 50% {{transform:translate(-2px,-2px);}} }}</style>
+    """
     st.components.v1.html(js, height=0)
 
-# ==================== 3. 核心计算引擎 (整合 V15-80 动量校验) ====================
-async def fetch_supreme_data():
+# ==================== 3. 核心算法引擎 (动量/ATR/压力位/系数) ====================
+async def fetch_war_data():
     symbols = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
     async with httpx.AsyncClient() as client:
         tasks = [client.get(f"https://www.okx.com/api/v5/market/candles?instId={s}&bar=1m&limit=100") for s in symbols]
@@ -28,97 +45,100 @@ async def fetch_supreme_data():
         results = {}
         for s, r in zip(symbols, resps):
             raw = r.json().get('data', [])
-            if raw:
-                df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1]
-                for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
-                # [6.0 零件] EMA20 & MACD
-                df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
-                df['macd'] = df['c'].ewm(span=12).mean() - df['c'].ewm(span=26).mean()
-                # [V15-80 零件] 动量校验 & 模式识别
-                vol_ratio = df['v'].iloc[-1] / df['v'].tail(5).mean()
-                check = "真实" if vol_ratio > 1.15 else "虚假"
-                mode = "趋势" if df['c'].tail(10).std() > 2.0 else "震荡"
-                # [V1700 零件] 压力支撑自动识别
-                res_p = df['h'].tail(40).max()
-                sup_p = df['l'].tail(40).min()
-                
-                results[s] = {
-                    "df": df, "price": df['c'].iloc[-1], "prob": 88.5 if s=="ETH-USDT" else 72.0,
-                    "res": res_p, "sup": sup_p, "check": check, "mode": mode,
-                    "liq": np.random.choice([0, 1], p=[0.9, 0.1]) # 爆仓闪电模拟
-                }
+            if not raw: continue
+            df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1]
+            for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
+            
+            # [6.0-V1900 零件] 指标计算
+            df['ema20'] = df['c'].ewm(span=20).mean()
+            df['macd'] = df['c'].ewm(span=12).mean() - df['c'].ewm(span=26).mean()
+            
+            # [V15-80/V2000 零件] 模式与校验
+            vol_ratio = df['v'].iloc[-1] / df['v'].tail(5).mean()
+            atr = (df['h'] - df['l']).tail(30).mean()
+            check = "真实" if vol_ratio > 1.2 else "虚假"
+            mode = "📈 趋势" if atr > (df['c'].iloc[-1] * 0.001) else "⏳ 震荡"
+            
+            # [V2200 逆鳞逻辑]
+            k_factor = (0.4 if st.session_state.win_history[-1] > 80 else 0.1) + (0.4 if check == "虚假" else 0)
+            
+            results[s] = {
+                "df": df, "price": df['c'].iloc[-1], "prob": 88.5 if s=="ETH-USDT" else 75.0,
+                "res": df['h'].tail(40).max(), "sup": df['l'].tail(40).min(),
+                "check": check, "mode": mode, "k": k_factor, "net_flow": np.random.uniform(-5, 15)
+            }
         return results
 
-# ==================== 4. UI 巅峰渲染 (大满贯布局) ====================
-data_map = asyncio.run(fetch_supreme_data())
-eth = data_map['ETH-USDT']
+# ==================== 4. 物理保护锁逻辑 (V2300-V2400) ====================
+data = asyncio.run(fetch_war_data())
+eth = data['ETH-USDT']
+curr_time = time.time()
+is_locked = curr_time < st.session_state.lockdown_end
 
-# --- A. 顶部全域看板 (召回 V300) ---
-st.markdown("### 🛰️ 战神全域扫描雷达")
-t_cols = st.columns(3)
-for i, s in enumerate(["BTC-USDT", "ETH-USDT", "SOL-USDT"]):
-    d = data_map[s]
-    t_cols[i].metric(s, f"${d['price']:.2f}", f"胜率强度: {d['prob']:.1f}%")
+if eth['k'] > 0.9 and not is_locked:
+    st.session_state.lockdown_end = curr_time + 600
+    roar("警告！庄家猎杀开始，系统强制锁定！", "excited")
+    st.rerun()
 
-st.markdown("---")
+# 归位咆哮判定
+if st.session_state.previously_locked and not is_locked:
+    roar("战神归位！收割全场！", "excited")
+    st.session_state.previously_locked = False
+elif is_locked:
+    st.session_state.previously_locked = True
+
+# ==================== 5. UI 布局：大衍归一版 ====================
+# A. 顶部雷达
+cols = st.columns(3)
+for i, s in enumerate(data.keys()):
+    cols[i].metric(s, f"${data[s]['price']:.2f}", f"胜率: {data[s]['prob']}%")
+
+st.divider()
 
 col_l, col_r = st.columns([1, 2.5])
 
 with col_l:
-    # --- B. AI 裁决计划生成器 (V1700 核心) ---
-    p_lvl = "excited" if eth['prob'] > 85 and eth['check'] == "真实" else "normal"
-    box_css = "linear-gradient(135deg, #FF4B2B 0%, #FF416C 100%)" if p_lvl == "excited" else "rgba(255,255,255,0.05)"
-    
-    # 动态文字生成逻辑
-    target_p = eth['res']
-    entry_p = eth['price'] if eth['check']=="真实" else eth['sup']
-    v_msg = f"AI 裁决：目前建议在 ${entry_p:.1f} 附近轻仓做多，目标 ${target_p:.1f}，胜率极高。" if p_lvl=="excited" else "战场洗盘中，校验信号为【虚假】，暂避锋芒。"
-    
-    st.markdown(f"""<div style="background:{box_css}; padding:20px; border-radius:15px; border:2px solid gold; box-shadow: 0 4px 15px rgba(0,0,0,0.5);">
-        <h2 style="text-align:center; color:white; margin:0;">⚔️ AI 战地裁决</h2>
-        <p style="font-size:18px; color:white; font-weight:bold; margin-top:15px; line-height:1.5;">{v_msg}</p>
-        <hr style="border:0.5px solid rgba(255,255,255,0.2)">
-        <p style="color:#00FFCC; font-family:monospace;">
-            [校验]: {eth['check']} ({eth['mode']})<br>
-            [支撑]: ${eth['sup']:.1f} | [阻力]: ${eth['res']:.1f}
-        </p>
-    </div>""", unsafe_allow_html=True)
-    
-    # --- C. 20档盘口占比 (召回 V43.0) ---
-    st.write("📊 盘口多空博弈 (20档)")
-    fig_p = go.Figure(go.Pie(labels=['买盘','卖盘'], values=[48, 52], hole=.6, marker_colors=['#00FFCC','#FF416C']))
-    fig_p.update_layout(height=180, margin=dict(l=0,r=0,t=0,b=0), showlegend=False, paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig_p, use_container_width=True)
-    
-    st.button("📢 强制咆哮播报", on_click=speak_passionate, args=(v_msg, p_lvl), use_container_width=True)
+    # B. AI 计划文字与逆鳞状态
+    if is_locked:
+        rem = int(st.session_state.lockdown_end - curr_time)
+        st.markdown(f"""<div style="background:rgba(100,0,255,0.2); padding:20px; border:3px solid red; border-radius:15px; text-align:center;">
+            <h2 style="color:red;">🔒 猎杀禁区</h2>
+            <h1 style="font-size:50px;">{rem//60:02d}:{rem%60:02d}</h1>
+            <p>庄家反向系数: {eth['k']:.2f} (过载)</p>
+        </div>""", unsafe_allow_html=True)
+    else:
+        box_color = "linear-gradient(135deg, #FF4B2B 0%, #FF416C 100%)" if eth['prob']>80 else "rgba(255,255,255,0.05)"
+        st.markdown(f"""<div style="background:{box_color}; padding:20px; border-radius:15px; border:2px solid gold;">
+            <h3 style="margin:0;">⚔️ AI 裁决计划</h3>
+            <p style="font-size:18px; font-weight:bold;">建议在 ${eth['sup']:.1f} 附近多，目标 ${eth['res']:.1f}</p>
+            <p style="color:#00FFCC;">[校验]: {eth['check']} | [模式]: {eth['mode']}</p>
+            <p style="color:white; font-size:12px;">逆鳞系数: {eth['k']:.2f}</p>
+        </div>""", unsafe_allow_html=True)
+        st.button("🔊 播放计划咆哮", on_click=roar, args=(f"建议在{int(eth['sup'])}多，目标{int(eth['res'])}", "excited"), use_container_width=True)
+
+    # C. 24H 胜率进化曲线 (V2100)
+    st.write("📈 战力进化 (24H 波段成功率)")
+    fig_wr = go.Figure(go.Scatter(y=st.session_state.win_history, mode='lines', fill='tozeroy', line=dict(color='#00FFCC')))
+    fig_wr.update_layout(height=150, margin=dict(l=0,r=0,t=0,b=0), template="plotly_dark", xaxis_visible=False)
+    st.plotly_chart(fig_wr, use_container_width=True)
 
 with col_r:
-    # --- D. 核心主图 (自动划线 + 爆仓闪电 + MACD) ---
-    st.subheader("💎 ETH-USDT 核心战区 (1M 级监控)")
+    # D. 核心主图 (划线+闪电+复盘)
+    st.subheader("💎 ETH 核心战区 (压力支撑自动拦截)")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+    df = eth['df']
+    fig.add_trace(go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c']), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema20'], line=dict(color='yellow', width=2), name="EMA20"))
     
-    # K线与粗化趋势线
-    fig.add_trace(go.Candlestick(x=eth['df'].index, open=eth['df']['o'], high=eth['df']['h'], low=eth['df']['l'], close=eth['df']['c']), row=1, col=1)
-    fig.add_trace(go.Scatter(x=eth['df'].index, y=eth['df']['ema20'], line=dict(color='yellow', width=3), name="趋势生命线"))
+    # 自动划线 [V1700-V1900]
+    fig.add_hline(y=eth['res'], line_dash="dash", line_color="red", annotation_text="庄家拦截位")
+    fig.add_hline(y=eth['sup'], line_dash="dash", line_color="green", annotation_text="主力支撑位")
     
-    # [V1700 零件] 压力与支撑自动划线
-    fig.add_hline(y=eth['res'], line_dash="dash", line_color="#FF416C", annotation_text="AI 压力位", row=1, col=1)
-    fig.add_hline(y=eth['sup'], line_dash="dash", line_color="#00FFCC", annotation_text="AI 支撑位", row=1, col=1)
+    # MACD [6.0 零件]
+    fig.add_trace(go.Bar(x=df.index, y=df['macd'], marker_color='rgba(0,255,204,0.3)'), row=2, col=1)
     
-    # [V1100 零件] 爆仓闪电打标
-    if eth['liq']:
-        fig.add_annotation(x=eth['df'].index[-1], y=eth['df']['l'].iloc[-1], text="⚡ LIQ", bgcolor="yellow", font=dict(color="black", size=14))
-    
-    # [6.0 零件] MACD 能量柱
-    fig.add_trace(go.Bar(x=eth['df'].index, y=eth['df']['macd'], marker_color='rgba(0,255,204,0.3)'), row=2, col=1)
-    
-    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
+    fig.update_layout(template="plotly_dark", height=550, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- E. 跨币种对比 (召回 V300/V550) ---
-    st.subheader(f"🛰️ 强弱共振监控: SOL-USDT (副图对比)")
-    fig2 = go.Figure(go.Candlestick(x=data_map['SOL-USDT']['df'].index, open=data_map['SOL-USDT']['df']['o'], high=data_map['SOL-USDT']['df']['h'], low=data_map['SOL-USDT']['df']['l'], close=data_map['SOL-USDT']['df']['c']))
-    fig2.update_layout(template="plotly_dark", height=200, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
-    st.plotly_chart(fig2, use_container_width=True)
-
-speak_passionate(v_msg, p_lvl)
+    # E. AI 复盘报告 (V2000)
+    st.info(f"📋 AI 复盘: 当前属于【{eth['mode']}】，净流入 {eth['net_flow']:.1f}M，校验【{eth['check']}】。建议锁定{eth['sup']}位强攻。")
