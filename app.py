@@ -6,7 +6,7 @@ from plotly.subplots import make_subplots
 import time
 from datetime import datetime
 
-st.set_page_config(layout="wide", page_title="ETH V32006 终极指挥官", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH V32007 终极指挥官", page_icon="⚖️")
 
 # ==========================================
 # 1. 状态管理与内存治理
@@ -21,7 +21,7 @@ def light_cleanup():
         st.session_state.last_cleanup = time.time()
 
 # ==========================================
-# 2. 情报引擎（支持1m/5m/15m）
+# 2. 情报引擎（支持更多框架：1m/5m/15m/30m/1H）
 # ==========================================
 @st.cache_data(ttl=10)
 def get_candles(f_ema, s_ema, bar="1m"):
@@ -51,38 +51,36 @@ def get_ls_ratio():
         return 1.0
 
 # ==========================================
-# 3. 侧边栏（V32006 核心：详细策略 + 最优决策）
+# 3. 侧边栏：新增多TF共振提示 + 详细策略
 # ==========================================
 def render_sidebar(df):
     with st.sidebar:
-        st.markdown("### 🛸 量子实时控制 V32006")
+        st.markdown("### 🛸 量子实时控制 V32007")
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
         
-        tf_options = ["1m", "5m", "15m"]
-        tf = st.selectbox("时间框架", tf_options, index=0)
+        tf_options = ["1m", "5m", "15m", "30m", "1H"]
+        tf = st.selectbox("时间框架", tf_options, index=2)  # 默认15m
         
         f_e = st.number_input("快线 EMA", 5, 30, 12)
         s_e = st.number_input("慢线 EMA", 20, 100, 26)
         st.divider()
-
+        
         last_p = df['c'].iloc[-1]
         atr = df['atr'].iloc[-1]
         ls = st.session_state.ls_ratio
         is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
 
-        # 多因子胜率
         prob = 50.0
         prob += 18 if is_golden_cross else -10
         prob += 12 if ls > 1.08 else -14 if ls < 0.92 else 0
         prob += 8 if df['net_flow'].iloc[-1] > 0 else -6
         prob = max(min(prob, 89.0), 22.0)
 
-        # 动态 R/R
         direction = 1 if prob > 50 else -1
         tp_sugg = last_p + direction * atr * 2.6
         sl_sugg = last_p - direction * atr * 1.4
         rr = abs(tp_sugg - last_p) / abs(last_p - sl_sugg) if abs(last_p - sl_sugg) > 0.01 else 1.8
-
+        
         box_color = "#00ff88" if prob > 65 else "#FFD700" if prob > 48 else "#ff4b4b"
         st.markdown(f"""
             <div style="border:2px solid {box_color}; padding:18px; border-radius:14px; background:rgba(0,255,136,0.08); text-align:center;">
@@ -97,11 +95,21 @@ def render_sidebar(df):
         recap = "✅ 趋势量价匹配良好" if prob > 55 else "📉 警惕缩量虚拉"
         st.info(f"🔍 AI 自动复盘：{recap}\n\n散户情绪: {sentiment}")
 
-        # =============== 详细交易策略执行计划（V32006 强化版） ===============
+        # 新增：多时间框架共振提示
+        st.markdown("#### 🔄 多时间框架共振提示")
+        if tf in ["15m", "30m"] and df['net_flow'].iloc[-1] > 1000:
+            st.success("✅ **15m/30m 共振强信号**：主力吸筹，适合轻仓布局")
+        elif tf == "1H" and is_golden_cross:
+            st.success("✅ **1H 金叉确认**：大趋势反转，可中仓追涨")
+        elif tf == "1m" and prob < 45:
+            st.warning("⚠️ 1m 噪音大，切换15m/30m确认信号")
+        else:
+            st.info("⚖️ 当前框架共振中性，尝试切换15m/30m查看净流")
+
+        # 详细交易策略执行计划
         st.markdown("#### 🎯 详细交易策略执行计划")
         st.caption(f"当前市场判断：{'EMA金叉+净流偏多' if is_golden_cross and df['net_flow'].iloc[-1]>0 else '震荡中性+轻微流出'}")
 
-        # 指挥官最优决策（新增高亮）
         if prob < 45:
             st.error("🚨 **指挥官最优决策**：空仓观望！胜率过低，保本第一，等待15m金叉。")
         elif prob > 65:
@@ -111,27 +119,39 @@ def render_sidebar(df):
 
         strats = [
             {
-                "name": "物理位陷阱", "state": "⚪ 观察中", "color": "#FFD700",
+                "name": "物理位陷阱",
+                "state": "⚪ 观察中",
+                "color": "#FFD700",
                 "entry": f"价格回踩 EMA26（约{last_p - atr*0.8:.1f}）后反弹",
-                "tp": f"${last_p + atr*2.0:.1f}", "sl": f"${last_p - atr*1.2:.1f}",
-                "rr": "1:1.7", "position": "轻仓 20%",
-                "reason": "震荡箱体防御，适合低胜率时小仓试探。",
+                "tp": f"${last_p + atr*2.0:.1f}",
+                "sl": f"${last_p - atr*1.2:.1f}",
+                "rr": "1:1.7",
+                "position": "轻仓 20%",
+                "reason": "当前震荡箱体，防假突破。适合防御型交易者。",
                 "risk": "若净流持续转负，立即取消。"
             },
             {
-                "name": "清算猎杀", "state": "🔥 进攻中" if prob > 65 else "⚪ 待机", "color": "#00ff88" if prob > 65 else "#ff4b4b",
+                "name": "清算猎杀",
+                "state": "🔥 进攻中" if prob > 65 else "⚪ 待机",
+                "color": "#00ff88" if prob > 65 else "#ff4b4b",
                 "entry": f"突破近期高点（约{df['h'].tail(30).max():.1f}）",
-                "tp": f"${tp_sugg:.1f}", "sl": f"${sl_sugg:.1f}",
-                "rr": f"1:{rr:.2f}", "position": "中仓 40%" if prob > 65 else "观望",
-                "reason": f"胜率{prob:.0f}% + EMA状态，主力净流倾向多头，适合猎杀空头止损。",
+                "tp": f"${tp_sugg:.1f}",
+                "sl": f"${sl_sugg:.1f}",
+                "rr": f"1:{rr:.2f}",
+                "position": "中仓 40%" if prob > 65 else "观望",
+                "reason": f"胜率{prob:.0f}% + EMA金叉，主力净流倾向多头，适合猎杀空头止损。",
                 "risk": "ATR扩大时严格执行SL。"
             },
             {
-                "name": "EMA金叉追涨", "state": "✅ 已激活" if is_golden_cross else "⚪ 未触发", "color": "#00ff88" if is_golden_cross else "#888888",
+                "name": "EMA金叉追涨",
+                "state": "✅ 已激活" if is_golden_cross else "⚪ 未触发",
+                "color": "#00ff88" if is_golden_cross else "#888888",
                 "entry": "15m框架下金叉确认 + 量能放大",
-                "tp": f"${last_p + atr*3.5:.1f}", "sl": f"${last_p - atr*1.0:.1f}",
-                "rr": "1:3.5", "position": "重仓 60%" if is_golden_cross and prob > 70 else "轻仓",
-                "reason": "多时间框架共振，金叉后趋势加速概率最高。",
+                "tp": f"${last_p + atr*3.5:.1f}",
+                "sl": f"${last_p - atr*1.0:.1f}",
+                "rr": "1:3.5",
+                "position": "重仓 60%" if is_golden_cross and prob > 70 else "轻仓",
+                "reason": "多时间框架共振，金叉后趋势加速概率高。当前15m框架最强。",
                 "risk": "若15m回踩EMA26失效，立即减仓。"
             }
         ]
@@ -163,7 +183,7 @@ def main():
     ls = get_ls_ratio()
     st.session_state.ls_ratio = ls
     
-    df_init = get_candles(12, 26, "1m")
+    df_init = get_candles(12, 26, "15m")
     if df_init.empty:
         st.error("❌ 卫星连接断开，正在重试...")
         time.sleep(2)
@@ -172,7 +192,7 @@ def main():
     hb, f_e, s_e, tf = render_sidebar(df_init)
     df = get_candles(f_e, s_e, tf)
     
-    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32006) | {tf} | {datetime.now().strftime('%H:%M:%S')}")
+    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32007) | {tf} | {datetime.now().strftime('%H:%M:%S')}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("实时价格", f"${df['c'].iloc[-1]:.2f}")
     
@@ -184,7 +204,7 @@ def main():
         delta_text = "↔ 中性均衡"
     c2.metric("全网多空比", f"{ls:.2f}", delta_text)
     
-    c3.metric("ATR 波幅", f"{df['atr'].iloc[-1]:.2f}")
+    c3.metric("ATR 动态波幅", f"{df['atr'].iloc[-1]:.2f}")
     c4.metric("庄家净流", f"{df['net_flow'].iloc[-1]:.0f}")
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
