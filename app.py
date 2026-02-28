@@ -306,7 +306,7 @@ def main():
         fig.add_trace(go.Bar(x=df['time'], y=scaled_flow, marker_color=colors, name="庄家净流"), row=2, col=1)
 
     fig.update_layout(template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'], height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
-    st.plotly_chart(fig)  # 移除 use_container_width=True，消除弃用警告
+    st.plotly_chart(fig)   # 移除 use_container_width，消除所有弃用警告
 
     if not pause_refresh:
         time.sleep(hb)
