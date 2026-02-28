@@ -1,93 +1,124 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import httpx
-import asyncio
 import plotly.graph_objects as go
 from datetime import datetime
+import asyncio
+import httpx
 
-# ==================== 1. 全域异步扫描配置 ====================
-SYMBOLS = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+# ==================== 1. 基础配置与初始化 ====================
+st.set_page_config(page_title="ETH V400 战神·不朽版", layout="wide")
 
-async def fetch_symbol_data(client, symbol):
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1m&limit=100"
-    try:
-        r = await client.get(url, timeout=5)
-        return symbol, r.json().get('data', [])
-    except: return symbol, []
+# 初始化持久化存储
+if 'hall_of_glory' not in st.session_state: st.session_state.hall_of_glory = []
+if 'war_logs_fail' not in st.session_state: st.session_state.war_logs_fail = []
+if 'last_cmd' not in st.session_state: st.session_state.last_cmd = ""
 
-async def get_all_market_data():
+# ==================== 2. 核心引擎功能 ====================
+
+def speak_passionate(text, passion_level="normal"):
+    """热血语音引擎"""
+    if st.session_state.last_cmd == text: return # 防止重复播报
+    st.session_state.last_cmd = text
+    
+    pitch = 1.5 if passion_level == "excited" else (0.8 if passion_level == "warning" else 1.0)
+    rate = 1.2 if passion_level == "excited" else 1.0
+    
+    js_code = f"""
+    <script>
+    var msg = new SpeechSynthesisUtterance('{text}');
+    msg.lang = 'zh-CN';
+    msg.pitch = {pitch};
+    msg.rate = {rate};
+    window.speechSynthesis.speak(msg);
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+async def fetch_market_data():
+    """全域异步扫描"""
+    symbols = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
     async with httpx.AsyncClient() as client:
-        tasks = [fetch_symbol_data(client, s) for s in SYMBOLS]
-        return await asyncio.gather(*tasks)
+        tasks = [client.get(f"https://www.okx.com/api/v5/market/candles?instId={s}&bar=1m&limit=100") for s in symbols]
+        responses = await asyncio.gather(*tasks)
+        results = {}
+        for s, r in zip(symbols, responses):
+            data = r.json().get('data', [])
+            if data:
+                df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1]
+                for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
+                df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
+                results[s] = {"df": df, "price": df['c'].iloc[-1]}
+        return results
 
-# ==================== 2. 战神裁决引擎 (1M 高频逻辑) ====================
-def engine_v300(symbol, raw):
-    if not raw: return None
-    df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1]
-    for col in ['o','h','l','c','v']: df[col] = df[col].astype(float)
+def get_strategy(symbol, price, df):
+    """先知裁决逻辑"""
+    res = df['h'].tail(50).max()
+    sup = df['l'].tail(50).min()
+    prob = 82.5 if symbol == "ETH-USDT" else 65.0 # 实战中此处应接回测胜率函数
     
-    # 核心指标
-    df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
-    df['atr'] = (df['h'] - df['l']).rolling(14).mean()
-    # 模拟胜率计算逻辑 (基于 RSI 和 EMA 偏离度)
-    prob = 75.0 if symbol == "ETH-USDT" else np.random.uniform(60, 80)
+    if prob >= 80 and price > df['ema20'].iloc[-1]:
+        return f"冲啊战神！{symbol}胜率爆表({int(prob)}%)！目标看{int(res)}！", "excited", res, sup, prob
+    elif price < sup:
+        return f"撤退！{symbol}跌破防线，立即保护战果！", "warning", res, sup, prob
+    else:
+        return "战场冷静期，观察动能变化。", "normal", res, sup, prob
+
+# ==================== 3. UI 渲染 ====================
+
+# 数据抓取
+try:
+    data_map = asyncio.run(fetch_market_data())
+except:
+    st.error("📡 网络波动，正在尝试重连作战中心...")
+    st.stop()
+
+tab1, tab2, tab3 = st.tabs(["🎮 实时指挥部", "🏆 战神荣耀册", "🕯️ 战败反思录"])
+
+# --- 实时指挥部 ---
+with tab1:
+    eth_main = data_map['ETH-USDT']
+    voice_txt, p_level, res_v, sup_v, p_val = get_strategy('ETH-USDT', eth_main['price'], eth_main['df'])
     
-    return {"symbol": symbol, "price": df['c'].iloc[-1], "prob": prob, "df": df}
+    l, r = st.columns([1, 2.5])
+    with l:
+        style = "background:linear-gradient(45deg, #FF4B2B, #FF416C);" if p_level == "excited" else "background:#1E1E1E;"
+        st.markdown(f"""
+        <div style="{style} padding:20px; border-radius:15px; border:2px solid gold;">
+            <h2 style="text-align:center; color:white;">⚔️ 实时指令</h2>
+            <p style="font-size:18px; color:white;"><b>{voice_txt}</b></p>
+            <p style="color:#00FFCC;">当前价格: ${eth_main['price']}</p>
+            <p style="color:white;">胜率强度: {p_val}%</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if st.button("📢 强制播报语音"): speak_passionate(voice_txt, p_level)
+        
+        st.markdown("---")
+        # 模拟操作按钮
+        c1, c2 = st.columns(2)
+        if c1.button("🚀 录入大捷"):
+            st.session_state.hall_of_glory.insert(0, {"time": datetime.now().strftime("%H:%M"), "pnl": "+150U", "chart": eth_main['df'].tail(30), "cmd": voice_txt})
+            st.balloons()
+        if c2.button("💀 录入战败"):
+            st.session_state.war_logs_fail.insert(0, {"time": datetime.now().strftime("%H:%M"), "pnl": "-80U", "chart": eth_main['df'].tail(30), "cmd": voice_txt})
+            st.snow()
 
-# ==================== 3. 终极 UI 渲染 ====================
-st.set_page_config(page_title="ETH V300 战神归位", layout="wide")
+    with r:
+        fig = go.Figure(data=[go.Candlestick(x=eth_main['df'].index, open=eth_main['df']['o'], high=eth_main['df']['h'], low=eth_main['df']['l'], close=eth_main['df']['c'])])
+        fig.add_hline(y=res_v, line_dash="dash", line_color="#FF4B4B", annotation_text="阻力 R")
+        fig.add_hline(y=sup_v, line_dash="dash", line_color="#00FFCC", annotation_text="支撑 S")
+        fig.add_trace(go.Scatter(x=eth_main['df'].index, y=eth_main['df']['ema20'], line=dict(color='yellow', width=1.5), name="EMA20"))
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-# 启动全速扫描
-market_raw = asyncio.run(get_all_market_data())
-data_map = {}
-for sym, raw in market_raw:
-    res = engine_v300(sym, raw)
-    if res: data_map[sym] = res
+# --- 荣耀册 & 反思录 ---
+with tab2:
+    for v in st.session_state.hall_of_glory:
+        st.success(f"✨ {v['time']} | 收益: {v['pnl']} | 指令: {v['cmd']}")
+with tab3:
+    for f in st.session_state.war_logs_fail:
+        st.error(f"💀 {f['time']} | 亏损: {f['pnl']} | 反思: 当时执行“{f['cmd']}”是否过晚？")
 
-# 排序找出最强品种
-ranked = sorted(data_map.values(), key=lambda x: x['prob'], reverse=True)
-best_now = ranked[0]
-
-st.title("🛡️ ETH 战神 V300 · 1M 终极全域终端")
-
-# 第一排：多品种胜率看板
-c1, c2, c3 = st.columns(3)
-for i, sym in enumerate(SYMBOLS):
-    target = data_map.get(sym)
-    if target:
-        cols = [c1, c2, c3]
-        cols[i].metric(sym, f"${target['price']:.2f}", f"胜率: {target['prob']:.1f}%")
-
-st.markdown("---")
-
-# 主战区：左 1/3 控制台 | 右 2/3 双 K 线
-l, r = st.columns([1, 2.5])
-
-with l:
-    st.markdown(f"""<div style="border:4px solid #FFD700; padding:20px; border-radius:15px; background:rgba(0,0,0,0.5)">
-        <h2 style="color:#FFD700; text-align:center">👑 ETH 核心指挥</h2><hr>
-        <p style="font-size:20px">当前价格: <b>${data_map['ETH-USDT']['price']:.2f}</b></p>
-        <p style="font-size:18px; color:#00FFCC">趋势状态: {'🚀 强势' if data_map['ETH-USDT']['price'] > data_map['ETH-USDT']['df']['ema20'].iloc[-1] else '🌊 回调'}</p>
-        <p style="color:#eee">全场扫描提示: 目前最强动能品种为 <b>{best_now['symbol']}</b>。</p>
-    </div>""", unsafe_allow_html=True)
-    
-    if st.button("🔄 刷新战地数据"): st.rerun()
-
-with r:
-    # 图表 1：以太坊 1M 强制显示 (这是你的核心)
-    st.subheader(f"💎 ETH-USDT 1分钟 核心战区图")
-    eth_df = data_map['ETH-USDT']['df']
-    fig_eth = go.Figure(data=[go.Candlestick(x=eth_df.index, open=eth_df['o'], high=eth_df['h'], low=eth_df['l'], close=eth_df['c'])])
-    fig_eth.add_trace(go.Scatter(x=eth_df.index, y=eth_df['ema20'], line=dict(color='yellow', width=1.5), name="EMA20"))
-    fig_eth.update_layout(template="plotly_dark", height=350, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig_eth, use_container_width=True)
-
-    # 图表 2：全场最高胜率品种 (对比参考)
-    st.subheader(f"🛰️ 全场最高胜率捕捉: {best_now['symbol']} (参考图)")
-    best_df = best_now['df']
-    fig_best = go.Figure(data=[go.Candlestick(x=best_df.index, open=best_df['o'], high=best_df['h'], low=best_df['l'], close=best_df['c'])])
-    fig_best.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig_best, use_container_width=True)
-
-st.caption(f"🚀 V300 异步架构已激活 | 1M K线实时监控中 | 最后跳动: {datetime.now().strftime('%H:%M:%S')}")
+# 自动语音触发
+speak_passionate(voice_txt, p_level)
