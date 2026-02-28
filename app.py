@@ -8,32 +8,31 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ==========================================
-# 0. 核心配置与 API 桥接
+# 0. 核心配置：确保部署不丢包
 # ==========================================
-st.set_page_config(layout="wide", page_title="ETH V32010 终极指挥官", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH V32010 指挥官", page_icon="⚖️")
 
-# OKX 行情接口
+# OKX API 节点
 BASE_URL = "https://www.okx.com"
 
 # ==========================================
-# 1. 强化指标引擎 (核心修复：指标预注入)
+# 1. 强化指标计算引擎 (核心排查点：确保字段存在)
 # ==========================================
 @st.cache_data(ttl=5)
 def get_commander_intel(f_ema, s_ema, bar="15m"):
     try:
-        # A. 抓取 K 线
-        res = requests.get(f"{BASE_URL}/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit=100").json()
+        # A. 获取 K 线         res = requests.get(f"{BASE_URL}/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit=100").json()
         if res.get('code') != '0': return pd.DataFrame()
         
         df = pd.DataFrame(res['data'], columns=['ts','o','h','l','c','v','volC','volCQ','confirm'])[::-1].reset_index(drop=True)
         for c in ['o','h','l','c','v']: df[c] = df[c].astype(float)
         df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
 
-        # B. 【关键修复】彻底解决 KeyError: 'ema_f'
+        # B. 【强制同步计算】解决 KeyError: 'ema_f'
         df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
         df['ema_s'] = df['c'].ewm(span=s_ema, adjust=False).mean()
         
-        # 计算 RSI 与 ATR 
+        # 计算辅助战术指标
         diff = df['c'].diff()
         gain = diff.clip(lower=0).rolling(14).mean()
         loss = -diff.clip(upper=0).rolling(14).mean()
@@ -42,8 +41,8 @@ def get_commander_intel(f_ema, s_ema, bar="15m"):
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
         
-        # C. 实时净流
-        t_res = requests.get(f"{BASE_URL}/api/v5/market/trades?instId=ETH-USDT&limit=80").json()
+        # C. 实时净流计算
+        t_res = requests.get(f"{BASE_URL}/api/v5/market/trades?instId=ETH-USDT&limit=100").json()
         df['net_flow'] = 0
         if t_res.get('code') == '0':
             tdf = pd.DataFrame(t_res['data'], columns=['ts','px','sz','side'])
@@ -66,17 +65,17 @@ def main():
         s_ema = st.number_input("慢线 EMA", 20, 100, 26)
         tf = st.selectbox("时间框架", ["1m", "5m", "15m", "1H"], index=2)
         
-        # 【关键修复】显式主题映射
+        # 【主题映射修复】
         theme_map = {"深邃黑": "plotly_dark", "简约白": "plotly_white"}
         theme_sel = st.selectbox("视觉主题", list(theme_map.keys()), index=0)
         current_theme = theme_map[theme_sel]
         
         st.divider()
         
-        # 加载数据
+        # 获取情报
         df = get_commander_intel(f_ema, s_ema, tf)
         
-        # AI 实时胜率卡片还原
+        # AI 实时胜率 (逻辑对齐截图)
         prob = 50.0
         if not df.empty:
             last = df.iloc[-1]
@@ -84,7 +83,6 @@ def main():
             prob += 10 if last['net_flow'] > 0 else -10
             prob += 5 if 40 < last['rsi'] < 60 else -5
         
-        # 动态颜色逻辑
         status_color = "#00ff88" if prob > 60 else "#ff4b4b" if prob < 40 else "#FFD700"
         st.markdown(f"""
             <div style="border:2px solid {status_color}; padding:15px; border-radius:12px; text-align:center; background:rgba(0,0,0,0.3);">
@@ -95,11 +93,14 @@ def main():
         """, unsafe_allow_html=True)
         
         # AI 复盘状态
-        st.info("🔵 AI 复盘：趋势量价匹配良好" if prob > 60 else "⚠️ AI 复盘：行情处于选择期")
+        if prob > 60:
+            st.info("🔵 AI 复盘：趋势量价匹配良好")
+        else:
+            st.warning("⚠️ AI 复盘：行情处于震荡/选择期")
 
-    # --- 主屏幕展示 ---
+    # --- 主显示区 ---
     if df.empty:
-        st.warning("📡 卫星链路重组中..."); time.sleep(2); st.rerun()
+        st.warning("📡 卫星链路同步中..."); time.sleep(2); st.rerun()
 
     last_p = df['c'].iloc[-1]
     atr = df['atr'].iloc[-1]
@@ -112,7 +113,7 @@ def main():
     m3.metric("ATR 动态波幅", f"{atr:.2f}")
     m4.metric("庄家净流", f"{df['net_flow'].iloc[-1]:.0f}")
 
-    # 战术分栏
+    # 战术分栏布局
     col_strat, col_chart = st.columns([1.1, 3])
 
     with col_strat:
@@ -126,22 +127,22 @@ def main():
         st.markdown(f"📜 **战术日志**\n\n`[{datetime.now().strftime('%H:%M:%S')}]` 卫星同步成功")
 
     with col_chart:
-        # 可视化引擎
+        # 可视化核心
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.7, 0.3])
         
-        # 主图：K线与 EMA 
+        # 主图
         fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="Price"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_f'], line=dict(color='#00ff88', width=1.5), name="EMA12"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_s'], line=dict(color='#ff4b4b', width=1.5), name="EMA26"), row=1, col=1)
         
-        # 副图：净流
+        # 副图：1:1 净流还原
         colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow'].rolling(3).mean()]
         fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=colors, name="RealTimeFlow"), row=2, col=1)
         
         fig.update_layout(template=current_theme, height=780, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-    # 循环
+    # 循环控制
     time.sleep(hb)
     st.rerun()
 
