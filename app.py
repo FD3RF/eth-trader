@@ -8,11 +8,11 @@ from datetime import datetime
 import numpy as np
 import plotly.io as pio
 
-st.set_page_config(layout="wide", page_title="ETH V32009 终极指挥官", page_icon="⚖️")
-
-# 预注册模板（避免 ValueError）
+# 预注册模板（彻底避免 ValueError）
 pio.templates['custom_dark'] = pio.templates['plotly_dark']
 pio.templates['custom_light'] = pio.templates['plotly']
+
+st.set_page_config(layout="wide", page_title="ETH V32010 终极指挥官", page_icon="⚖️")
 
 # ==========================================
 # 1. 状态管理与内存治理
@@ -110,6 +110,12 @@ def calculate_prob(df):
     prob += 10 if macd_cross else -10
     prob += 10 if net_flow > 0 else -10
     return max(min(prob, 95.0), 5.0)
+
+# 贝叶斯更新（补全函数）
+def bayesian_update(prior, evidence):
+    likelihood = evidence
+    posterior = (prior * likelihood) / ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) if ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) != 0 else 0.5
+    return posterior * 100
 
 # ==========================================
 # 3. 侧边栏
