@@ -6,7 +6,7 @@ from plotly.subplots import make_subplots
 import time
 from datetime import datetime
 
-st.set_page_config(layout="wide", page_title="ETH V32005 终极指挥官", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH V32006 终极指挥官", page_icon="⚖️")
 
 # ==========================================
 # 1. 状态管理与内存治理
@@ -51,11 +51,11 @@ def get_ls_ratio():
         return 1.0
 
 # ==========================================
-# 3. 侧边栏：详细交易策略执行计划（核心升级）
+# 3. 侧边栏（V32006 核心：详细策略 + 最优决策）
 # ==========================================
 def render_sidebar(df):
     with st.sidebar:
-        st.markdown("### 🛸 量子实时控制 V32005")
+        st.markdown("### 🛸 量子实时控制 V32006")
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
         
         tf_options = ["1m", "5m", "15m"]
@@ -97,45 +97,41 @@ def render_sidebar(df):
         recap = "✅ 趋势量价匹配良好" if prob > 55 else "📉 警惕缩量虚拉"
         st.info(f"🔍 AI 自动复盘：{recap}\n\n散户情绪: {sentiment}")
 
-        # ==================== 【详细交易策略执行计划】 ====================
+        # =============== 详细交易策略执行计划（V32006 强化版） ===============
         st.markdown("#### 🎯 详细交易策略执行计划")
-        st.caption(f"当前市场判断：{ 'EMA金叉 + 净流偏多' if is_golden_cross and df['net_flow'].iloc[-1] > 0 else '震荡中性 + 轻微流出' }")
+        st.caption(f"当前市场判断：{'EMA金叉+净流偏多' if is_golden_cross and df['net_flow'].iloc[-1]>0 else '震荡中性+轻微流出'}")
+
+        # 指挥官最优决策（新增高亮）
+        if prob < 45:
+            st.error("🚨 **指挥官最优决策**：空仓观望！胜率过低，保本第一，等待15m金叉。")
+        elif prob > 65:
+            st.success("🚀 **指挥官最优决策**：中仓进攻清算猎杀！")
+        else:
+            st.warning("⚖️ **指挥官最优决策**：轻仓物理位陷阱 或 观望。")
 
         strats = [
             {
-                "name": "物理位陷阱",
-                "state": "⚪ 观察中",
-                "color": "#FFD700",
+                "name": "物理位陷阱", "state": "⚪ 观察中", "color": "#FFD700",
                 "entry": f"价格回踩 EMA26（约{last_p - atr*0.8:.1f}）后反弹",
-                "tp": f"${last_p + atr*2.0:.1f}",
-                "sl": f"${last_p - atr*1.2:.1f}",
-                "rr": "1:1.7",
-                "position": "轻仓 20%",
-                "reason": "当前震荡箱体，防假突破。适合防御型交易者。",
+                "tp": f"${last_p + atr*2.0:.1f}", "sl": f"${last_p - atr*1.2:.1f}",
+                "rr": "1:1.7", "position": "轻仓 20%",
+                "reason": "震荡箱体防御，适合低胜率时小仓试探。",
                 "risk": "若净流持续转负，立即取消。"
             },
             {
-                "name": "清算猎杀",
-                "state": "🔥 进攻中" if prob > 65 else "⚪ 待机",
-                "color": "#00ff88" if prob > 65 else "#ff4b4b",
+                "name": "清算猎杀", "state": "🔥 进攻中" if prob > 65 else "⚪ 待机", "color": "#00ff88" if prob > 65 else "#ff4b4b",
                 "entry": f"突破近期高点（约{df['h'].tail(30).max():.1f}）",
-                "tp": f"${tp_sugg:.1f}",
-                "sl": f"${sl_sugg:.1f}",
-                "rr": f"1:{rr:.2f}",
-                "position": "中仓 40%" if prob > 65 else "观望",
-                "reason": f"胜率{prob:.0f}% + EMA金叉，主力净流倾向多头，适合猎杀空头止损。",
+                "tp": f"${tp_sugg:.1f}", "sl": f"${sl_sugg:.1f}",
+                "rr": f"1:{rr:.2f}", "position": "中仓 40%" if prob > 65 else "观望",
+                "reason": f"胜率{prob:.0f}% + EMA状态，主力净流倾向多头，适合猎杀空头止损。",
                 "risk": "ATR扩大时严格执行SL。"
             },
             {
-                "name": "EMA金叉追涨",
-                "state": "✅ 已激活" if is_golden_cross else "⚪ 未触发",
-                "color": "#00ff88" if is_golden_cross else "#888888",
+                "name": "EMA金叉追涨", "state": "✅ 已激活" if is_golden_cross else "⚪ 未触发", "color": "#00ff88" if is_golden_cross else "#888888",
                 "entry": "15m框架下金叉确认 + 量能放大",
-                "tp": f"${last_p + atr*3.5:.1f}",
-                "sl": f"${last_p - atr*1.0:.1f}",
-                "rr": "1:3.5",
-                "position": "重仓 60%" if is_golden_cross and prob > 70 else "轻仓",
-                "reason": "多时间框架共振，金叉后趋势加速概率高。当前15m框架最强。",
+                "tp": f"${last_p + atr*3.5:.1f}", "sl": f"${last_p - atr*1.0:.1f}",
+                "rr": "1:3.5", "position": "重仓 60%" if is_golden_cross and prob > 70 else "轻仓",
+                "reason": "多时间框架共振，金叉后趋势加速概率最高。",
                 "risk": "若15m回踩EMA26失效，立即减仓。"
             }
         ]
@@ -176,7 +172,7 @@ def main():
     hb, f_e, s_e, tf = render_sidebar(df_init)
     df = get_candles(f_e, s_e, tf)
     
-    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32005) | {tf} | {datetime.now().strftime('%H:%M:%S')}")
+    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32006) | {tf} | {datetime.now().strftime('%H:%M:%S')}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("实时价格", f"${df['c'].iloc[-1]:.2f}")
     
