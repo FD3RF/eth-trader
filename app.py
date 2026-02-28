@@ -6,9 +6,6 @@ from plotly.subplots import make_subplots
 import time
 from datetime import datetime
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
 
 st.set_page_config(layout="wide", page_title="ETH V32008 终极指挥官", page_icon="⚖️")
 
@@ -77,21 +74,22 @@ def get_ls_ratio():
         st.error("多空比获取失败")
         return 1.0
 
-# 重构胜率：GBDT + 贝叶斯
+# 简化胜率计算：规则-based (EMA + RSI + 净流)
 def calculate_prob(df):
-    if len(df) < 50:
+    if len(df) < 14:
         return 50.0
     
-    features = ['ema_f', 'ema_s', 'atr', 'rsi', 'net_flow']
-    X = df[features].iloc[:-1]
-    y = (df['c'].shift(-1) > df['c']).astype(int).iloc[1:]
+    is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
+    rsi = df['rsi'].iloc[-1]
+    net_flow = df['net_flow'].iloc[-1]
+    
+    prob = 50.0
+    prob += 20 if is_golden_cross else -12
+    prob += 15 if rsi > 60 else -15 if rsi < 40 else 0
+    prob += 10 if net_flow > 0 else -10
+    return max(min(prob, 90.0), 10.0)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-    model = GradientBoostingClassifier()
-    model.fit(X_train, y_train)
-    prob = model.predict_proba(df[features].iloc[-1:].values)[0][1] * 100
-    return prob
-
+# 贝叶斯更新
 def bayesian_update(prior, evidence):
     likelihood = evidence
     posterior = (prior * likelihood) / ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) if ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) != 0 else 0.5
@@ -120,11 +118,13 @@ def render_sidebar(df):
             atr = 5.0
             is_golden_cross = False
             net_flow = 0
+            rsi = 50.0
         else:
             last_p = df['c'].iloc[-1]
             atr = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else 5.0
             is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
             net_flow = df['net_flow'].iloc[-1]
+            rsi = df['rsi'].iloc[-1]
 
         ls = st.session_state.ls_ratio
 
