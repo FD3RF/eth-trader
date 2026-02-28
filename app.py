@@ -6,15 +6,50 @@ from plotly.subplots import make_subplots
 import time
 from datetime import datetime
 import numpy as np
+import hmac
+import base64
+import hashlib
+from urllib.parse import urlencode
+import json
+import os
 
-st.set_page_config(layout="wide", page_title="ETH V32008 终极指挥官", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="ETH V32009 终极指挥官", page_icon="⚖️")
 
 # ==========================================
-# 1. 状态管理与内存治理
+# OKX API 配置（使用您的密钥）
+# ==========================================
+API_KEY = "a2a2a452-49e6-4e76-95f3-fb54e98e2e7b"
+SECRET_KEY = "330FABDB2CAD3585677716686C2BF382"
+PASSPHRASE = "YYDS"
+BASE_URL = "https://www.okx.com"
+
+def okx_signed_request(method, endpoint, params=None):
+    timestamp = datetime.utcnow().isoformat()[:-3] + 'Z'
+    request_path = endpoint
+    if params:
+        request_path += '?' + urlencode(params)
+    
+    message = timestamp + method.upper() + request_path
+    signature = hmac.new(SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
+    signature_b64 = base64.b64encode(signature).decode('utf-8')
+    
+    headers = {
+        'OK-ACCESS-KEY': API_KEY,
+        'OK-ACCESS-SIGN': signature_b64,
+        'OK-ACCESS-TIMESTAMP': timestamp,
+        'OK-ACCESS-PASSPHRASE': PASSPHRASE,
+        'Content-Type': 'application/json'
+    }
+    return headers
+
+# ==========================================
+# 状态管理与内存治理
 # ==========================================
 def init_commander_state():
     if 'ls_ratio' not in st.session_state: st.session_state.ls_ratio = 1.0
     if 'last_cleanup' not in st.session_state: st.session_state.last_cleanup = time.time()
+    if 'theme' not in st.session_state: st.session_state.theme = 'dark'
+    if 'alarm_on' not in st.session_state: st.session_state.alarm_on = False
 
 def light_cleanup():
     if time.time() - st.session_state.last_cleanup > 86400:
@@ -22,17 +57,23 @@ def light_cleanup():
         st.session_state.last_cleanup = time.time()
 
 # ==========================================
-# 2. 情报引擎（优化真实性 + 动态阈值 + RSI）
+# 2. 情报引擎（使用真实 OKX API + RSI + MACD）
 # ==========================================
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(f_ema, s_ema, bar="1m"):
     try:
-        url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit=100"
-        res = requests.get(url, timeout=6).json()
+        endpoint = "/api/v5/market/candles"
+        params = {
+            'instId': 'ETH-USDT',
+            'bar': bar,
+            'limit': '100'
+        }
+        headers = okx_signed_request('GET', endpoint, params)
+        res = requests.get(BASE_URL + endpoint, headers=headers, params=params).json()
         if res.get('code') != '0':
             raise ValueError("API 返回错误: " + res.get('msg', '未知'))
         df = pd.DataFrame(res['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])[::-1].reset_index(drop=True)
-        df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
+        df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms')
         for c in ['o','h','l','c','v']: df[c] = df[c].astype(float)
         
         df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
@@ -45,7 +86,13 @@ def get_candles(f_ema, s_ema, bar="1m"):
         rs = gain / loss.replace(0, np.nan)
         df['rsi'] = 100 - (100 / (1 + rs))
         
-        # 改进净流：用 RSI 调整系数
+        # MACD
+        ema12 = df['c'].ewm(span=12, adjust=False).mean()
+        ema26 = df['c'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        # 净流（改进，用 RSI 调整）
         coeff = 0.2 if df['rsi'].iloc[-1] > 50 else 0.1
         df['net_flow'] = (df['c'].diff() * df['v'] * coeff).rolling(5).sum().fillna(0)
         
@@ -65,8 +112,10 @@ def get_candles(f_ema, s_ema, bar="1m"):
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
     try:
-        url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
-        res = requests.get(url, timeout=6).json()
+        endpoint = "/api/v5/rubik/stat/contracts/long-short-account-ratio"
+        params = {'instId': 'ETH-USDT', 'period': '5m'}
+        headers = okx_signed_request('GET', endpoint, params)
+        res = requests.get(BASE_URL + endpoint, headers=headers, params=params).json()
         if res.get('code') != '0':
             raise ValueError("API 返回错误")
         return float(res['data'][0][1])
@@ -74,20 +123,24 @@ def get_ls_ratio():
         st.error("多空比获取失败")
         return 1.0
 
-# 简化胜率计算：规则-based (EMA + RSI + 净流)
+# ==========================================
+# 胜率计算（规则 + 动态阈值）
+# ==========================================
 def calculate_prob(df):
     if len(df) < 14:
         return 50.0
     
     is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
     rsi = df['rsi'].iloc[-1]
+    macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
     net_flow = df['net_flow'].iloc[-1]
     
     prob = 50.0
-    prob += 20 if is_golden_cross else -12
+    prob += 20 if is_golden_cross else -15
     prob += 15 if rsi > 60 else -15 if rsi < 40 else 0
+    prob += 10 if macd_cross else -10
     prob += 10 if net_flow > 0 else -10
-    return max(min(prob, 90.0), 10.0)
+    return max(min(prob, 95.0), 5.0)
 
 # 贝叶斯更新
 def bayesian_update(prior, evidence):
@@ -100,37 +153,47 @@ def bayesian_update(prior, evidence):
 # ==========================================
 def render_sidebar(df):
     with st.sidebar:
-        st.markdown("### 🛸 量子实时控制 V32008")
-        st.warning("⚠️ 部分指标（如净流入、清算区）为模拟演示，请勿作为实盘依据。")
+        st.markdown("### 🛸 量子实时控制 V32009")
+        st.warning("⚠️ 部分指标为模拟演示，请勿作为实盘唯一依据。")
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
         pause_refresh = st.checkbox("暂停自动刷新", value=False)
+        st.session_state.alarm_on = st.checkbox("启用声音报警 (胜率>70% or <30%)", value=st.session_state.alarm_on)
         
-        tf_options = ["1m", "5m", "15m", "30m", "1H"]
+        tf_options = ["1m", "5m", "15m", "30m", "1H", "4H"]
         tf = st.selectbox("时间框架", tf_options, index=2)
         
         f_e = st.number_input("快线 EMA", 5, 30, 12)
         s_e = st.number_input("慢线 EMA", 20, 100, 26)
+        st.session_state.theme = st.selectbox("主题", ['dark', 'light'], index=0 if st.session_state.theme == 'dark' else 1)
         st.divider()
 
         if len(df) < 14:
-            st.warning("数据不足，无法计算指标，使用默认值")
+            st.warning("数据不足，使用默认值")
             last_p = 0
             atr = 5.0
             is_golden_cross = False
             net_flow = 0
             rsi = 50.0
+            macd = 0
+            macd_signal = 0
         else:
             last_p = df['c'].iloc[-1]
             atr = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else 5.0
             is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
             net_flow = df['net_flow'].iloc[-1]
             rsi = df['rsi'].iloc[-1]
+            macd = df['macd'].iloc[-1]
+            macd_signal = df['macd_signal'].iloc[-1]
 
         ls = st.session_state.ls_ratio
 
         prob = calculate_prob(df)
         evidence = 0.6 if ls < 1 else 0.4
         bayes_prob = bayesian_update(prob / 100, evidence)
+
+        if st.session_state.alarm_on:
+            if bayes_prob > 70 or bayes_prob < 30:
+                st.markdown('<audio autoplay="true"><source src="https://www.w3schools.com/html/horse.mp3" type="audio/mpeg"></audio>', unsafe_allow_html=True)  # 替换为您的音频 URL
 
         direction = 1 if bayes_prob > 50 else -1
         tp_sugg = last_p + direction * atr * 2.6
@@ -273,7 +336,7 @@ def main():
         colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
         fig.add_trace(go.Bar(x=df['time'], y=scaled_flow, marker_color=colors, name="庄家净流"), row=2, col=1)
 
-    fig.update_layout(template="plotly_dark", height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
+    fig.update_layout(template=st.session_state.theme, height=830, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=15,b=10))
     st.plotly_chart(fig, use_container_width=True)
 
     if not pause_refresh:
