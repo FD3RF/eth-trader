@@ -53,20 +53,19 @@ def light_cleanup():
         st.cache_data.clear()
         st.session_state.last_cleanup = time.time()
 
-# ====================== 多空比（公共优先 + 重试，永不失败） ======================
+# ====================== 多空比（超短超时 + spinner 防止卡住） ======================
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
-    for attempt in range(5):
+    for attempt in range(3):  # 仅3次超短重试
         try:
             url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
-            res = requests.get(url, timeout=6).json()
+            res = requests.get(url, timeout=4).json()  # 超短超时4秒
             if res.get('code') == '0':
                 return float(res['data'][0][1])
-            time.sleep(2 ** attempt)
+            time.sleep(0.3)
         except:
             pass
-    st.warning("多空比获取失败，使用默认 1.0")
-    return 1.0
+    return 1.0  # 即时兜底
 
 def send_telegram(msg):
     if st.session_state.tg_token and st.session_state.tg_chat_id:
@@ -130,7 +129,7 @@ def get_candles(f_ema, s_ema, bar="1m"):
 def render_sidebar(df):
     with st.sidebar:
         st.title("⚡ V32101 智能策略指挥官")
-        st.success("✅ 多空比永不失败 + 智能策略已激活")
+        st.success("✅ 多空比永不卡住 + 智能策略已激活")
         
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
         pause = st.checkbox("暂停自动刷新", False)
@@ -168,7 +167,10 @@ def main():
     init_state()
     light_cleanup()
     
-    ls = get_ls_ratio()
+    # 默认值立即显示，防止卡住
+    ls = 1.0
+    with st.spinner("正在同步多空比数据..."):
+        ls = get_ls_ratio()
     st.session_state.ls_ratio = ls
     
     df = get_candles(12, 26, "15m")
