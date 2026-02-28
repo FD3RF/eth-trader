@@ -15,6 +15,33 @@ pio.templates['custom_light'] = pio.templates['plotly']
 st.set_page_config(layout="wide", page_title="ETH V32010 终极指挥官", page_icon="⚖️")
 
 # ==========================================
+# 函数定义（全部置顶，确保无 NameError）
+# ==========================================
+def bayesian_update(prior, evidence):
+    likelihood = evidence
+    posterior = (prior * likelihood) / ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) if ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) != 0 else 0.5
+    return posterior * 100
+
+def calculate_prob(df):
+    if len(df) < 14:
+        return 50.0
+    
+    is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
+    rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50.0
+    macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1] if 'macd' in df.columns else False
+    net_flow = df['net_flow'].iloc[-1] if 'net_flow' in df.columns else 0
+    
+    rsi_high_th = np.percentile(df['rsi'].tail(30), 70) if 'rsi' in df.columns and len(df) > 30 else 60
+    rsi_low_th = np.percentile(df['rsi'].tail(30), 30) if 'rsi' in df.columns and len(df) > 30 else 40
+    
+    prob = 50.0
+    prob += 20 if is_golden_cross else -15
+    prob += 15 if rsi > rsi_high_th else -15 if rsi < rsi_low_th else 0
+    prob += 10 if macd_cross else -10
+    prob += 10 if net_flow > 0 else -10
+    return max(min(prob, 95.0), 5.0)
+
+# ==========================================
 # 1. 状态管理与内存治理
 # ==========================================
 def init_commander_state():
@@ -37,7 +64,8 @@ def get_candles(f_ema, s_ema, bar="1m"):
         url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit=100"
         res = requests.get(url, timeout=6).json()
         if res.get('code') != '0':
-            raise ValueError("API 返回错误: " + res.get('msg', '未知'))
+            st.warning("K线 API 返回错误，使用缓存或默认")
+            return pd.DataFrame()
         df = pd.DataFrame(res['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])[::-1].reset_index(drop=True)
         df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
         for c in ['o','h','l','c','v']: df[c] = df[c].astype(float)
@@ -58,7 +86,7 @@ def get_candles(f_ema, s_ema, bar="1m"):
         df['macd'] = ema12 - ema26
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
-        # 真实净流：用 public trades API 计算买/卖体积
+        # 真实净流
         trades_url = f"https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100"
         trades_res = requests.get(trades_url, timeout=6).json()
         if trades_res.get('code') == '0':
@@ -86,36 +114,8 @@ def get_ls_ratio():
             raise ValueError("API 返回错误")
         return float(res['data'][0][1])
     except:
-        st.error("多空比获取失败")
+        st.warning("多空比获取失败，使用默认 1.0")
         return 1.0
-
-# ==========================================
-# 胜率计算（规则 + 动态阈值）
-# ==========================================
-def calculate_prob(df):
-    if len(df) < 14:
-        return 50.0
-    
-    is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
-    rsi = df['rsi'].iloc[-1]
-    macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
-    net_flow = df['net_flow'].iloc[-1]
-    
-    rsi_high_th = np.percentile(df['rsi'].tail(30), 70) if len(df) > 30 else 60
-    rsi_low_th = np.percentile(df['rsi'].tail(30), 30) if len(df) > 30 else 40
-    
-    prob = 50.0
-    prob += 20 if is_golden_cross else -15
-    prob += 15 if rsi > rsi_high_th else -15 if rsi < rsi_low_th else 0
-    prob += 10 if macd_cross else -10
-    prob += 10 if net_flow > 0 else -10
-    return max(min(prob, 95.0), 5.0)
-
-# 贝叶斯更新（补全函数）
-def bayesian_update(prior, evidence):
-    likelihood = evidence
-    posterior = (prior * likelihood) / ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) if ((prior * likelihood) + ((1 - prior) * (1 - likelihood))) != 0 else 0.5
-    return posterior * 100
 
 # ==========================================
 # 3. 侧边栏
@@ -150,9 +150,9 @@ def render_sidebar(df):
             atr = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else 5.0
             is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
             net_flow = df['net_flow'].iloc[-1]
-            rsi = df['rsi'].iloc[-1]
-            macd = df['macd'].iloc[-1]
-            macd_signal = df['macd_signal'].iloc[-1]
+            rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50.0
+            macd = df['macd'].iloc[-1] if 'macd' in df.columns else 0
+            macd_signal = df['macd_signal'].iloc[-1] if 'macd_signal' in df.columns else 0
 
         ls = st.session_state.ls_ratio
 
