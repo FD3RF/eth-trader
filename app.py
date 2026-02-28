@@ -56,7 +56,7 @@ def light_cleanup():
         st.session_state.last_cleanup = time.time()
 
 # ==========================================
-# 2. 情报引擎（真实 public API + trades 净流 + RSI + MACD）
+# 2. 情报引擎（真实 API + trades 净流 + 重试）
 # ==========================================
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(f_ema, s_ema, bar="1m"):
@@ -64,8 +64,7 @@ def get_candles(f_ema, s_ema, bar="1m"):
         url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit=100"
         res = requests.get(url, timeout=6).json()
         if res.get('code') != '0':
-            st.warning("K线 API 返回错误，使用缓存或默认")
-            return pd.DataFrame()
+            raise ValueError("API 返回错误: " + res.get('msg', '未知'))
         df = pd.DataFrame(res['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])[::-1].reset_index(drop=True)
         df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
         for c in ['o','h','l','c','v']: df[c] = df[c].astype(float)
@@ -107,15 +106,17 @@ def get_candles(f_ema, s_ema, bar="1m"):
 
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
-    try:
-        url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
-        res = requests.get(url, timeout=6).json()
-        if res.get('code') != '0':
-            raise ValueError("API 返回错误")
-        return float(res['data'][0][1])
-    except:
-        st.warning("多空比获取失败，使用默认 1.0")
-        return 1.0
+    for attempt in range(3):  # 重试3次
+        try:
+            url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
+            res = requests.get(url, timeout=6).json()
+            if res.get('code') == '0':
+                return float(res['data'][0][1])
+            time.sleep(1)
+        except:
+            pass
+    st.warning("多空比获取失败，使用默认 1.0")
+    return 1.0
 
 # ==========================================
 # 3. 侧边栏
