@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 
 # ==========================================
-# 1. 指挥部：环境硬锁与内存治理
+# 1. 环境锁与内存治理 (V1 核心)
 # ==========================================
 st.set_page_config(layout="wide", page_title="ETH V32000 终极指挥官", page_icon="⚖️")
 
@@ -18,14 +18,14 @@ def init_commander_state():
     if 'last_cleanup_ts' not in st.session_state: st.session_state.last_cleanup_ts = time.time()
 
 def auto_memory_cleanup():
-    """V1 核心：4小时深度治理，防止挂机崩溃"""
+    """每4小时深度清理，防止挂机内存溢出"""
     if time.time() - st.session_state.last_cleanup_ts > 14400:
-        st.session_state.battle_logs = [f"【系统】{datetime.now().strftime('%H:%M:%S')} 内存治理完成：历史日志已归档。"]
+        st.session_state.battle_logs = [f"【系统】{datetime.now().strftime('%H:%M:%S')} 内存治理完成。"]
         st.session_state.last_cleanup_ts = time.time()
         st.cache_data.clear()
 
 # ==========================================
-# 2. 数据层：多源情报同步
+# 2. 数据情报引擎
 # ==========================================
 @st.cache_data(ttl=10)
 def get_market_intel(f_ema, s_ema):
@@ -50,82 +50,72 @@ def get_market_intel(f_ema, s_ema):
     except: return pd.DataFrame()
 
 # ==========================================
-# 3. 渲染层：左侧边栏 (V1+V2 混合体)
+# 3. 终极边栏：胜率、R/R、复盘与策略
 # ==========================================
 def render_sidebar_intelligence(df):
     with st.sidebar:
         st.markdown("### 🛸 量子实时控制")
-        heartbeat = st.slider("心跳频率 (秒)", 5, 60, 10)
-        f_ema = st.number_input("快线 EMA", 5, 30, 12)
-        s_ema = st.number_input("慢线 EMA", 20, 100, 26)
-        
+        hb = st.slider("心跳频率 (秒)", 5, 60, 10)
+        f_e = st.number_input("快线 EMA", 5, 30, 12)
+        s_e = st.number_input("慢线 EMA", 20, 100, 26)
         st.divider()
-        
-        # --- V1 盈亏比计算核心 ---
+
+        # --- V1 盈亏比矩阵集成 ---
         last_p = df['c'].iloc[-1]
         atr = df['atr'].iloc[-1]
         prob = 50.0 + (10 if df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1] else -5) + (15 if st.session_state.ls_ratio < 0.95 else -10)
         prob = max(min(prob, 99.0), 1.0)
         
-        tp_px = last_p + (atr * (2.5 if prob > 60 else 1.5))
-        sl_px = last_p - (atr * 1.5)
-        rr_ratio = abs(tp_px - last_p) / abs(last_p - sl_px)
+        # 动态计算建议 TP/SL 和 R/R
+        tp_sugg = last_p + (atr * 2.5) if prob > 50 else last_p - (atr * 2.5)
+        sl_sugg = last_p - (atr * 1.5) if prob > 50 else last_p + (atr * 1.5)
+        rr_sugg = abs(tp_sugg - last_p) / abs(last_p - sl_sugg)
         
-        box_color = "#00ff00" if (prob > 60 and rr_ratio > 1.8) else "#FFD700" if prob > 50 else "#ff4b4b"
+        box_color = "#ff4b4b" if prob < 45 else "#FFD700" if prob < 60 else "#00ff00"
         st.markdown(f"""
-            <div style="border:1px solid {box_color}; padding:15px; border-radius:10px; background:rgba(0,0,0,0.3); text-align:center;">
+            <div style="border:1px solid {box_color}; padding:15px; border-radius:10px; background:rgba(255,255,255,0.05); text-align:center;">
                 <div style="color:{box_color}; font-size:0.8em; font-weight:bold;">AI 实时胜率</div>
-                <div style="color:{box_color}; font-size:1.8em; font-weight:bold;">{prob:.1f}%</div>
-                <div style="color:#888; font-size:0.7em; margin-top:5px;">建议 R/R: 1 : {rr_ratio:.2f}</div>
+                <div style="color:{box_color}; font-size:2em; font-weight:bold;">{prob:.1f}%</div>
+                <div style="color:#888; font-size:0.7em; margin-top:5px;">建议 R/R: 1 : {rr_sugg:.2f}</div>
             </div>
         """, unsafe_allow_html=True)
-        
         st.divider()
-        
-        # --- V2 AI复盘报告 ---
+
+        # --- AI 自动复盘 ---
         st.markdown("#### 🔍 AI 自动复盘")
-        is_vol_push = df['v'].iloc[-1] > df['v'].tail(10).mean() * 1.5
-        recap = "📉 缩量诱多：价格虚拉，警惕反手。" if (df['c'].iloc[-1] > df['c'].iloc[-2] and not is_vol_push) else "✅ 趋势运行：量价匹配。"
+        recap = "📉 缩量诱多：价格虚拉，警惕反手。" if (df['c'].iloc[-1] > df['c'].iloc[-2] and df['v'].iloc[-1] < df['v'].tail(10).mean()) else "✅ 趋势运行：目前量价匹配。"
         st.info(f"{recap}\n\n散户情绪: {'看多 🔥' if st.session_state.ls_ratio < 0.95 else '看空 ❄️'}")
-        
         st.divider()
-        
-        # --- 策略执行卡片 ---
+
+        # --- 策略执行计划 ---
         st.markdown("#### 🎯 策略执行计划")
         strats = [
-            {"name": "物理位陷阱", "state": "✅ 激活" if abs(last_p - df['l'].min()) < 5 else "⚪ 观察", "tp": df['h'].max(), "sl": last_p - (atr*1.5)},
-            {"name": "清算猎杀", "state": "🔥 进攻" if prob > 65 else "⚪ 待机", "tp": df['h'].max()*1.02, "sl": last_p - (atr*2)}
+            {"name": "物理位陷阱", "state": "⚪ 观察", "tp": df['h'].tail(30).max(), "sl": last_p - 10},
+            {"name": "清算猎杀", "state": "🔥 进攻" if prob > 60 else "⚪ 待机", "tp": last_p + 30, "sl": last_p - 15}
         ]
         for s in strats:
-            color = "#00ff00" if "✅" in s['state'] or "🔥" in s['state'] else "#888"
-            st.markdown(f"""<div style="border-left:3px solid {color}; padding-left:8px; margin-bottom:10px;">
-                <div style="font-size:0.85em; color:{color}; font-weight:bold;">{s['state']} | {s['name']}</div>
-                <div style="font-size:0.75em; color:#00ff00;">🎯 TP: ${s['tp']:.1f} | <span style="color:#ff4b4b;">🛡️ SL: ${s['sl']:.1f}</span></div>
+            st.markdown(f"""<div style="font-size:0.85em; margin-bottom:10px;">
+                <b>{s['state']} | {s['name']}</b><br/>
+                <span style="color:#00ff00;">🎯 TP: ${s['tp']:.1f}</span> | <span style="color:#ff4b4b;">🛡️ SL: ${s['sl']:.1f}</span>
             </div>""", unsafe_allow_html=True)
-
         st.divider()
-        st.markdown("#### 📜 战术日志")
-        if not st.session_state.battle_logs: st.session_state.battle_logs.append(f"【{datetime.now().strftime('%H:%M:%S')}】卫星同步成功")
-        for log in st.session_state.battle_logs[-5:]: st.caption(log)
-        
-        return heartbeat, f_ema, s_ema
+        st.markdown(f"【{datetime.now().strftime('%H:%M:%S')}】卫星同步成功")
+        return hb, f_e, s_e
 
 # ==========================================
-# 4. 主界面：全屏图表区
+# 4. 主大屏渲染
 # ==========================================
 def main():
     init_commander_state()
     auto_memory_cleanup()
     
-    # 获取边栏参数并渲染
-    f_ema_dummy = 12; s_ema_dummy = 26 # 占位符
-    df_preview = get_market_intel(f_ema_dummy, s_ema_dummy)
-    if df_preview.empty: st.error("❌ 卫星同步失败"); return
+    df_init = get_market_intel(12, 26)
+    if df_init.empty: st.error("❌ 数据同步失败"); return
     
-    hb, f_e, s_e = render_sidebar_intelligence(df_preview)
-    df = get_market_intel(f_e, s_e) # 最终带参数抓取
+    hb, f_e, s_e = render_sidebar_intelligence(df_init)
+    df = get_market_intel(f_e, s_e)
     
-    # 顶部仪表盘
+    # 仪表盘
     st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32000) | {datetime.now().strftime('%H:%M:%S')}")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("实时价格", f"${df['c'].iloc[-1]:.2f}")
@@ -133,19 +123,18 @@ def main():
     m3.metric("ATR 动态波幅", f"{df['atr'].iloc[-1]:.2f}")
     m4.metric("庄家净流", f"{df['net_flow'].iloc[-1]:.0f}")
 
-    # 绘图区
+    # 图表
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="Price"), row=1, col=1)
     
-    # 爆仓带绘制 (逆推 50x 杠杆)
-    h_max, l_min = df['h'].tail(60).max(), df['l'].tail(60).min()
+    # 清算地雷区可视化
+    h_max = df['h'].tail(60).max()
+    l_min = df['l'].tail(60).min()
     fig.add_hrect(y0=h_max*1.018, y1=h_max*1.02, fillcolor="red", opacity=0.3, line_width=0, annotation_text="空头燃料", row=1, col=1)
     fig.add_hrect(y0=l_min*0.98, y1=l_min*0.982, fillcolor="green", opacity=0.3, line_width=0, annotation_text="多头燃料", row=1, col=1)
-    
-    # 资金流
+
     colors = ['#00ff00' if x > 0 else '#ff4b4b' for x in df['net_flow']]
     fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=colors, name="Flow"), row=2, col=1)
-    
     fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=0,b=0))
     st.plotly_chart(fig, use_container_width=True)
 
