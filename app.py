@@ -19,7 +19,7 @@ PASSPHRASE = "YYDS"
 pio.templates['custom_dark'] = pio.templates['plotly_dark']
 pio.templates['custom_light'] = pio.templates['plotly']
 
-st.set_page_config(layout="wide", page_title="ETH V32102 终极智能指挥官", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="实时量化决策引擎", page_icon="📊")
 
 # ====================== 函数全部置顶 ======================
 def bayesian_update(prior, evidence):
@@ -29,18 +29,33 @@ def bayesian_update(prior, evidence):
 
 def calculate_prob(df):
     if len(df) < 30: return 50.0
+    
+    # 升级版：多指标 + 动态权重 + BB挤压 + 成交量确认
+    df['vol_ma5'] = df['v'].rolling(5).mean()
+    volume_confirm = df['v'].iloc[-1] > df['vol_ma5'].iloc[-1] * 1.5  # 成交量放大1.5倍
+    
     is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
     rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50.0
     macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1] if 'macd' in df.columns else False
     net_flow = df['net_flow'].iloc[-1] if 'net_flow' in df.columns else 0
-    rsi_high_th = np.percentile(df['rsi'].tail(30), 70) if 'rsi' in df.columns and len(df) > 30 else 60
-    rsi_low_th = np.percentile(df['rsi'].tail(30), 30) if 'rsi' in df.columns and len(df) > 30 else 40
+    
+    bb_upper = df['c'].rolling(20).mean() + 2 * df['c'].rolling(20).std()
+    bb_lower = df['c'].rolling(20).mean() - 2 * df['c'].rolling(20).std()
+    bb_squeeze = (bb_upper.iloc[-1] - bb_lower.iloc[-1]) / df['c'].iloc[-1] < 0.015  # 布林带挤压
+    
+    # 动态权重：趋势强时EMA/MACD权重更高
+    trend_weight = 1.2 if net_flow > 0 else 0.8
+    squeeze_penalty = -18 if bb_squeeze else 0
+    volume_bonus = 12 if volume_confirm else 0
+    
     prob = 50.0
-    prob += 20 if is_golden_cross else -15
-    prob += 15 if rsi > rsi_high_th else -15 if rsi < rsi_low_th else 0
-    prob += 10 if macd_cross else -10
-    prob += 10 if net_flow > 0 else -10
-    return max(min(prob, 95.0), 5.0)
+    prob += 25 * trend_weight if is_golden_cross else -18 * trend_weight
+    prob += 18 if 35 < rsi < 65 else -12  # 更严格RSI区间
+    prob += 15 * trend_weight if macd_cross else -15 * trend_weight
+    prob += 15 if net_flow > 0 else -15
+    prob += squeeze_penalty
+    prob += volume_bonus
+    return max(min(prob, 96), 4)
 
 # ====================== 状态管理 ======================
 def init_state():
@@ -128,7 +143,7 @@ def get_candles(f_ema, s_ema, bar="1m"):
 # ====================== 侧边栏 ======================
 def render_sidebar(df):
     with st.sidebar:
-        st.title("⚡ V32102 终极智能指挥官")
+        st.title("实时量化决策引擎")
         st.success("✅ 多空比永不卡住 + 智能策略已激活")
         
         hb = st.slider("刷新频率 (秒)", 5, 60, 10)
@@ -177,11 +192,19 @@ def main():
     bayes_prob = bayesian_update(prob / 100, evidence)
     
     if bayes_prob > 70 and st.session_state.get('tg_token') and st.session_state.get('tg_chat_id'):
-        send_telegram(f"🚀 V32102智能信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看多\n价格 ${df['c'].iloc[-1]:.2f}")
+        send_telegram(f"🚀 量化信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看多\n价格 ${df['c'].iloc[-1]:.2f}")
     if bayes_prob < 30 and st.session_state.get('tg_token') and st.session_state.get('tg_chat_id'):
-        send_telegram(f"⚠️ V32102智能信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看空\n价格 ${df['c'].iloc[-1]:.2f}")
+        send_telegram(f"⚠️ 量化信号！\n{symbol} 胜率 {bayes_prob:.1f}% 看空\n价格 ${df['c'].iloc[-1]:.2f}")
     
-    st.markdown(f"### 🛰️ ETH 量子决策指挥官 (V32102) | {symbol} | {datetime.now().strftime('%H:%M:%S')}")
+    st.markdown(f"""
+        <h1 style='text-align: center; color: #00ff88; font-family: "Courier New", monospace; margin-bottom: 0;'>
+            实时量化决策引擎
+        </h1>
+        <h3 style='text-align: center; color: #aaa; margin-top: 5px;'>
+            {symbol} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        </h3>
+    """, unsafe_allow_html=True)
+    
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("实时价格", f"${df['c'].iloc[-1]:.2f}")
     c2.metric("全网多空比", f"{ls:.2f}")
