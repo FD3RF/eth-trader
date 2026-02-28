@@ -3,10 +3,12 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from datetime import datetime
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 
 # ================================
-# 1. 数据层（多周期）
+# 1. 数据获取（OKX）
 # ================================
 def fetch_okx(endpoint, params=""):
     url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
@@ -20,126 +22,150 @@ def get_multi():
     k1 = fetch_okx("market/candles", "&bar=1m&limit=100")
     k5 = fetch_okx("market/candles", "&bar=5m&limit=100")
     k15 = fetch_okx("market/candles", "&bar=15m&limit=100")
-    t = fetch_okx("market/trades", "&limit=100")
 
-    if not (k1 and k5 and k15 and t):
+    if not (k1 and k5 and k15):
         return None
 
     df1 = pd.DataFrame(k1, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
     df5 = pd.DataFrame(k5, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
     df15 = pd.DataFrame(k15, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
-    tdf = pd.DataFrame(t)
 
-    return df1, df5, df15, tdf
+    return df1, df5, df15
 
 
 # ================================
-# 2. 指标计算（审计版）
+# 2. 特征工程
 # ================================
-def calc_indicators(df):
+def build_features(df):
+    df = df.copy()
     for col in ['o','h','l','c','v']:
         df[col] = df[col].astype(float)
 
+    # EMA
     df['ema20'] = df['c'].ewm(span=20).mean()
     df['ema60'] = df['c'].ewm(span=60).mean()
 
-    tr = np.maximum(df['h'] - df['l'],
-                   np.maximum(abs(df['h'] - df['c'].shift(1)),
-                              abs(df['l'] - df['c'].shift(1))))
-    df['atr'] = tr.rolling(14).mean()
-
+    # RSI
     diff = df['c'].diff()
     gain = diff.clip(lower=0).rolling(14).mean()
     loss = -diff.clip(upper=0).rolling(14).mean().replace(0, np.nan)
     df['rsi'] = 100 - (100 / (1 + (gain / loss)))
 
-    return df
+    # ATR
+    tr = np.maximum(df['h'] - df['l'],
+                   np.maximum(abs(df['h'] - df['c'].shift(1)),
+                              abs(df['l'] - df['c'].shift(1))))
+    df['atr'] = tr.rolling(14).mean()
+
+    # 标签：未来收益是否为正
+    df['future'] = df['c'].pct_change().shift(-1)
+    df['label'] = (df['future'] > 0).astype(int)
+
+    features = df[['ema20','ema60','rsi','atr','v']].dropna()
+    labels = df['label'].loc[features.index]
+
+    return features, labels, df
 
 
 # ================================
-# 3. 多周期诊断
+# 3. AI 模型
 # ================================
-def diagnose(df1, df5, df15):
-    df1 = calc_indicators(df1)
-    df5 = calc_indicators(df5)
-    df15 = calc_indicators(df15)
+def train_ai(df):
+    X, y, _ = build_features(df)
 
-    # 高频（1m）
-    c1 = df1.iloc[-1]
-    high_freq = {
-        "rsi": c1['rsi'],
-        "vol": c1['v'] / df1['v'].rolling(20).mean().iloc[-1],
-        "trend": "多" if c1['ema20'] > c1['ema60'] else "空"
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+    model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=8,
+        random_state=42
+    )
+
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+
+    report = classification_report(y_test, pred)
+    return model, report
+
+
+def ai_infer(model, df):
+    last = df.iloc[-1]
+
+    features = pd.DataFrame([{
+        "ema20": last['ema20'],
+        "ema60": last['ema60'],
+        "rsi": last['rsi'],
+        "atr": last['atr'],
+        "v": last['v']
+    }])
+
+    prob = model.predict_proba(features)[0][1]
+
+    return {
+        "confidence": prob,
+        "suggestion": "看多" if prob > 0.6 else "看空" if prob < 0.4 else "观望"
     }
 
-    # 波段（5m）
-    c5 = df5.iloc[-1]
-    slope5 = (df5['ema20'].iloc[-1] - df5['ema20'].iloc[-5]) / 5
-    swing = {
-        "trend": "多" if slope5 > 0 else "空",
-        "slope": slope5,
-        "strength": abs(slope5) > (c5['atr'] * 0.15)
-    }
 
-    # 大趋势（15m）
-    c15 = df15.iloc[-1]
-    slope15 = (df15['ema20'].iloc[-1] - df15['ema20'].iloc[-5]) / 5
-    trend15 = {
-        "trend": "多" if slope15 > 0 else "空",
-        "strength": abs(slope15) > (c15['atr'] * 0.12)
-    }
+# ================================
+# 4. 多周期评分
+# ================================
+def score(df1, df5, df15):
+    def calc(df):
+        df = build_features(df)[2]
+        last = df.iloc[-1]
+        score = 0
+        if last['ema20'] > last['ema60']: score += 1
+        if last['rsi'] < 30 or last['rsi'] > 70: score += 1
+        if last['v'] > df['v'].rolling(20).mean().iloc[-1]: score += 1
+        return score
 
-    return high_freq, swing, trend15, df1
+    return {
+        "high": calc(df1),
+        "swing": calc(df5),
+        "trend": calc(df15)
+    }
 
 
 # ================================
-# 4. Streamlit 面板
+# 5. Streamlit 面板
 # ================================
-st.set_page_config(page_title="多周期分析 V210", layout="wide")
+st.set_page_config(page_title="AI 分析 V600", layout="wide")
 
 data = get_multi()
 if data:
-    df1, df5, df15, tdf = data
-    hf, sw, td, df1 = diagnose(df1, df5, df15)
+    df1, df5, df15 = data
 
-    st.title("📊 多周期分析 V210（1m / 5m / 15m）")
+    # AI 训练（轻量）
+    model, report = train_ai(df1)
+
+    # AI 推断
+    _, _, df1b = build_features(df1)
+    ai = ai_infer(model, df1b)
+
+    # 评分
+    sc = score(df1, df5, df15)
+
+    st.title("🧠 AI 多周期分析 V600（只分析）")
 
     col1, col2, col3 = st.columns(3)
+    col1.metric("高频评分", sc['high'])
+    col2.metric("波段评分", sc['swing'])
+    col3.metric("趋势评分", sc['trend'])
 
-    with col1:
-        st.subheader("1m 高频")
-        st.metric("趋势", hf['trend'])
-        st.metric("RSI", f"{hf['rsi']:.1f}")
-        st.metric("量比", f"{hf['vol']:.2f}x")
-
-    with col2:
-        st.subheader("5m 波段")
-        st.metric("趋势", sw['trend'])
-        st.metric("斜率", f"{sw['slope']:.4f}")
-        st.metric("强度", "强" if sw['strength'] else "弱")
-
-    with col3:
-        st.subheader("15m 趋势")
-        st.metric("趋势", td['trend'])
-        st.metric("强度", "强" if td['strength'] else "弱")
+    st.metric("AI 置信度", f"{ai['confidence']*100:.1f}%")
+    st.metric("AI 建议", ai['suggestion'])
 
     st.write("---")
-    st.subheader("趋势综合")
+    st.subheader("模型报告")
+    st.code(report)
 
-    st.write(f"""
-    - 高频趋势：{hf['trend']}
-    - 波段趋势：{sw['trend']}
-    - 大趋势：{td['trend']}
-    - 高频 RSI：{hf['rsi']:.1f}
-    - 高频量比：{hf['vol']:.2f}
-    """)
-
-    # 图表（1m）
+    # 图表
     fig = go.Figure(data=[go.Candlestick(
         x=df1.index, open=df1['o'], high=df1['h'], low=df1['l'], close=df1['c']
     )])
-    fig.add_trace(go.Scatter(x=df1.index, y=df1['ema20'], name="EMA20", line=dict(color='yellow')))
-    fig.add_trace(go.Scatter(x=df1.index, y=df1['ema60'], name="EMA60", line=dict(color='cyan')))
+    fig.add_trace(go.Scatter(x=df1.index, y=df1b['ema20'], name="EMA20"))
+    fig.add_trace(go.Scatter(x=df1.index, y=df1b['ema60'], name="EMA60"))
     fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
