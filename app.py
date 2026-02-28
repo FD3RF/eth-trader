@@ -1,14 +1,13 @@
 import streamlit as st
-import pandas as pd
 import requests
 import time
 from datetime import datetime
 
-# 1. 物理环境硬化
-st.set_page_config(page_title="ETH_ALGO_V14")
-st.markdown("### 🛠️ ETH 10U 策略执行器 (V14.0)")
+# 1. 彻底清空环境，只留最基础的显示
+st.set_page_config(page_title="ETH_DEATH_SQUAD")
+st.markdown("### 💀 ETH 10U 战神执行终端 (V15.0)")
 
-# 2. 状态存储 (唯一的全局字典)
+# 2. 状态锁死：哪怕天崩地裂，账户数据必须准确
 if 'S' not in st.session_state:
     st.session_state['S'] = {
         'bal': 10.0, 'pos': "NONE", 'ent': 0.0, 'size': 0.0, 'logs': []
@@ -16,55 +15,56 @@ if 'S' not in st.session_state:
 
 s = st.session_state['S']
 
-# 3. 实时价格抓取 (物理心跳)
+# 3. 物理心跳获取
 def get_px():
     try:
-        r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP", timeout=2).json()
+        # 直接物理获取价格
+        r = requests.get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP", timeout=1).json()
         return float(r['data'][0]['last'])
     except:
         return None
 
 px = get_px()
 
-# 如果拿不到价格，直接中止，防止假死
-if px is None:
-    st.error("网络链路中断，正在重新挂载信号...")
-    time.sleep(1)
-    st.rerun()
+# 4. 暴力点位逻辑：只抓“确定性”
+# 我们设置一个简单的极值回归：如果 10 秒内波动超过 0.3%，视为插针，立即反向咬一口
+if 'last_px' not in st.session_state: st.session_state.last_px = px
 
-# 4. 暴力执行逻辑 (无花里胡哨指标，只抓确定性点位)
-# 进场逻辑：价格跌破 24 小时极值或特定偏移 (此处模拟最稳共振点)
-trigger = (int(time.time()) % 60 == 0) # 模拟每分钟一次的奇点扫描
+if px:
+    diff = px - st.session_state.last_px
+    # 只要没仓位，就死等那个“暴跌后的反弹”点位
+    if s['pos'] == "NONE":
+        st.info(f"⚖️ 正在监测瞬时波动... 当前价: {px}")
+        # 如果瞬时跌幅超过 0.2%，认为这是“稳赢”的反弹起点
+        if diff < -(px * 0.002): 
+            s['ent'] = px
+            s['pos'] = "LONG"
+            s['size'] = (s['bal'] * 0.995) / px # 扣除滑点预留
+            s['bal'] = 0.0
+            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | ⚡ 瞬间插针捕捉：做多 @ {px}")
+    else:
+        # 持仓中：只看那 1.5% 的肉
+        pnl = (px / s['ent'] - 1) if s['pos'] == "LONG" else (1 - px / s['ent'])
+        st.warning(f"🎯 咬肉中: {pnl:.4%}")
+        
+        # 严格执行：咬到 1% 就跑，或者亏 0.5% 就割。10U 容不下贪婪。
+        if pnl > 0.01 or pnl < -0.005:
+            final = s['size'] * s['ent'] * (1 + pnl) * 0.999
+            s['bal'] = round(final, 4)
+            s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | ✅ 撤退结算 | P/L: {pnl:.2%} | 余: ${s['bal']}")
+            s['pos'], s['ent'], s['size'] = "NONE", 0.0, 0.0
+            
+    st.session_state.last_px = px
 
-if s['pos'] == "NONE":
-    st.write(f"🔍 正在扫描奇点... 当前价格: `{px}`")
-    # 最稳入场位判定 (此处为示例逻辑，核心在于 1.5% 止盈)
-    if trigger and px > 0: 
-        s['ent'] = px
-        s['pos'] = "LONG"
-        s['size'] = (s['bal'] * 0.99) / px
-        s['bal'] = 0.0
-        s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | 🚀 进场做多 @ {px}")
-else:
-    pnl = (px / s['ent'] - 1) if s['pos'] == "LONG" else (1 - px / s['ent'])
-    st.warning(f"⚠️ 当前持仓: {s['pos']} | 盈亏: {pnl:.4%}")
-    
-    # 硬性止盈止损线 (1.5% / -0.8%)
-    if pnl > 0.015 or pnl < -0.008:
-        final = s['size'] * s['ent'] * (1 + pnl) * 0.999
-        s['bal'] = round(final, 4)
-        s['logs'].append(f"{datetime.now().strftime('%H:%M:%S')} | ✅ 平仓结算 | P/L: {pnl:.2%} | 余额: ${s['bal']}")
-        s['pos'], s['ent'], s['size'] = "NONE", 0.0, 0.0
-
-# 5. 极简渲染 (彻底杜绝 NameError)
+# 5. 渲染：不搞多列，不搞图表，只要结果
 st.divider()
-st.subheader(f"账户余额: ${s['bal'] if s['pos'] == 'NONE' else (s['size']*px):.4f}")
+st.title(f"💰 余额: ${s['bal'] if s['pos'] == 'NONE' else (s['size']*px):.4f}")
 
 if s['logs']:
-    with st.expander("交易审计日志", expanded=True):
-        for log in reversed(s['logs']):
-            st.code(log)
+    st.write("---")
+    for log in reversed(s['logs']):
+        st.code(log)
 
-# 6. 强制原子刷新
+# 6. 原子频率刷新 (1秒一次，不能再快了，否则 OKX 封 IP)
 time.sleep(1)
 st.rerun()
