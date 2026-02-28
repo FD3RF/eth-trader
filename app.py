@@ -285,7 +285,7 @@ def generate_signal(df, ls_ratio):
     return prob, direction, entry_zone, sl, tp, reason_str
 
 # ====================== 侧边栏UI ======================
-def render_sidebar():
+def render_sidebar(df):
     with st.sidebar:
         st.title("📊 专业量化引擎·完美版")
         st.caption("基于OKX实时数据 | 多因子模型")
@@ -310,12 +310,14 @@ def render_sidebar():
 
         st.divider()
 
-        # 仓位计算器
+        # 仓位计算器（入场价默认使用最新价格）
         with st.expander("💰 仓位计算器 (固定风险)", expanded=True):
             risk_pct = st.slider("单笔风险 (%)", 0.1, 5.0, 1.0, 0.1)
             account_balance = st.number_input("账户余额 (USDT)", 1000.0, 1000000.0, 10000.0)
-            entry_price = st.number_input("计划入场价", value=3000.0)
-            stop_price = st.number_input("止损价", value=entry_price*0.98)
+            # 默认入场价取最新价格，若无数据则用3000
+            default_entry = float(df['c'].iloc[-1]) if df is not None and not df.empty else 3000.0
+            entry_price = st.number_input("计划入场价", value=default_entry, format="%.2f")
+            stop_price = st.number_input("止损价", value=entry_price * 0.98, format="%.2f")
             if abs(entry_price - stop_price) < 0.01:
                 st.warning("止损价过近，请调整")
                 position_size = 0
@@ -342,10 +344,16 @@ def main():
     if not ls_history.empty:
         st.session_state.ls_history = ls_history
 
-    # 侧边栏
-    hb, pause, symbol, tf, f_ema, s_ema = render_sidebar()
+    # 先获取初始K线数据（用于侧边栏默认价格）
+    df_init = get_candles(bar="15m", limit=100, f_ema=12, s_ema=26)
+    if df_init is None:
+        st.error("无法获取K线数据，请检查网络或API")
+        st.stop()
 
-    # 获取K线数据
+    # 侧边栏（传入df_init用于默认价格）
+    hb, pause, symbol, tf, f_ema, s_ema = render_sidebar(df_init)
+
+    # 根据用户选择的参数重新获取K线数据
     df = get_candles(bar=tf, limit=100, f_ema=f_ema, s_ema=s_ema)
     if df is None:
         st.error("无法获取K线数据，请检查网络或API")
@@ -362,6 +370,7 @@ def main():
         else:
             emoji = "⚠️"
             side = "空头"
+        rr = abs((tp - df['c'].iloc[-1]) / (df['c'].iloc[-1] - sl)) if sl and tp else 0
         msg = f"""{emoji} {side}信号！
 交易对: {symbol} | {tf}
 胜率: {prob:.1f}%
@@ -369,6 +378,7 @@ def main():
 入场区: {entry_zone}
 止损: ${sl:.2f}
 止盈: ${tp:.2f}
+盈亏比: 1:{rr:.2f}
 理由: {reason}"""
         send_telegram(msg)
         st.session_state.last_signal_prob = prob
@@ -408,6 +418,7 @@ def main():
         box_color = "#FFD700"
         action = "⚖️ 观望"
 
+    rr_value = abs((tp - df['c'].iloc[-1]) / (df['c'].iloc[-1] - sl)) if sl and tp and abs(df['c'].iloc[-1] - sl) > 0 else 0
     st.markdown(f"""
     <div style="border:2px solid {box_color}; border-radius:15px; padding:20px; margin-bottom:20px; background:rgba(0,0,0,0.3);">
         <h2 style="color:{box_color}; margin:0;">{action}</h2>
@@ -418,7 +429,7 @@ def main():
             <div><span style="color:#aaa;">💰 动态止盈</span><br><b style="color:#00ff88;">{f'${tp:.2f}' if tp else '无'}</b></div>
         </div>
         <div style="margin-top:15px;">
-            <span style="color:#aaa;">📊 盈亏比: </span><b>{abs((tp-df['c'].iloc[-1])/(df['c'].iloc[-1]-sl)):.2f}</b>
+            <span style="color:#aaa;">📊 盈亏比: </span><b>{rr_value:.2f}</b>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -455,7 +466,7 @@ def main():
 
     fig.update_layout(
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
-        height=800,
+        height=750,  # 略降低高度以适配更多屏幕
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=30, b=10),
         hovermode='x unified'
