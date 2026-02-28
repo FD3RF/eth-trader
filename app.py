@@ -5,7 +5,7 @@ import requests
 import plotly.graph_objects as go
 
 # ==================== 1. 系统核心配置 ====================
-st.set_page_config(page_title="ETH V81 战略指挥版", layout="wide")
+st.set_page_config(page_title="ETH V85 全自动战术终端", layout="wide")
 
 def fetch_okx_data(endpoint, params=""):
     url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
@@ -14,64 +14,47 @@ def fetch_okx_data(endpoint, params=""):
         return r if r.get('code') == '0' else None
     except: return None
 
-# ==================== 2. 深度分析函数 (恢复 AI 建议模块) ====================
-def generate_ai_strategy(sig, curr_p, atr, f_score, net_flow, buy_ratio, is_real):
-    if not sig['type']:
-        return None
+# ==================== 2. V85 决策与执行引擎 ====================
+def strategy_engine_v85(df, net_flow, buy_ratio):
+    # --- 核心指标 ---
+    df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
+    df['atr'] = (df['h'] - df['l']).rolling(14).mean()
+    curr = df.iloc[-1]
+    atr = curr['atr']
+    vol_mean = df['v'].rolling(20).mean().iloc[-1]
     
-    # 计算风控位
-    sl_multiplier = 1.5 if sig['dir'] == "LONG" else 1.5
-    tp_multiplier = 3.0
-    sl = curr_p - (sl_multiplier * atr) if sig['dir'] == "LONG" else curr_p + (sl_multiplier * atr)
-    tp = curr_p + (tp_multiplier * atr) if sig['dir'] == "LONG" else curr_p - (tp_multiplier * atr)
+    # --- 辨伪识别 ---
+    price_move = abs(curr['c'] - curr['o']) / atr
+    vol_surge = curr['v'] / vol_mean
+    is_real = vol_surge > 1.1 or price_move < 1.5
+    is_spoofing = buy_ratio > 88 and net_flow < 1.5  # 对敲识别
     
-    # 策略话术库
-    strat = {
-        "dir_text": "反手做多" if sig['dir'] == "LONG" else "反手做空",
-        "logic": f"当前1min买压 {buy_ratio:.1f}%，且动能验证为 {('真实' if is_real else '虚假')}。资金净流入 {net_flow:.2f} ETH，显示主力{'正在扫货' if net_flow > 0 else '正在砸盘'}。",
-        "action": f"建议在 ${curr_p:.2f} 附近{'入场跟进' if is_real else '轻仓试探'}，跟随主力步伐。",
-        "stop_loss": f"若价格回落/反弹至 ${sl:.2f}，说明{'多头' if sig['dir'] == 'LONG' else '空头'}动能衰竭，需止损离场。",
-        "target": f"第一目标点位看到 ${tp:.2f}，此处存在{'压力' if sig['dir'] == 'LONG' else '支撑'}。"
-    }
-    return strat
-
-# ==================== 3. 核心辨伪引擎 (V80 逻辑) ====================
-def engine_v81(df1, net_flow, buy_ratio):
-    df1['ema20'] = df1['c'].ewm(span=20, adjust=False).mean()
-    df1['atr'] = (df1['h'] - df1['l']).rolling(14).mean()
-    curr = df1.iloc[-1]
-    vol_mean = df1['v'].rolling(20).mean().iloc[-1]
-    
-    # 辨伪因子
-    price_move_ratio = abs(curr['c'] - curr['o']) / curr['atr']
-    vol_surge_ratio = curr['v'] / vol_mean
-    is_real = vol_surge_ratio > 1.1 or price_move_ratio < 1.5
-    is_spoofing = buy_ratio > 90 and net_flow < 2.0
-    
+    # --- 资金权重 ---
     f_score = 0
-    if net_flow > 4 and not is_spoofing: f_score += 3
-    if net_flow < -4: f_score -= 3
+    if net_flow > 5 and not is_spoofing: f_score += 4
+    if net_flow < -5: f_score -= 4
     if buy_ratio > 60: f_score += 1
     if buy_ratio < 40: f_score -= 1
 
-    sig = {"type": None, "dir": None, "score": 0, "warning": ""}
-    if is_real and abs(f_score) >= 3:
-        if curr['c'] > df1['ema20'].iloc[-1] and f_score > 0:
-            sig = {"type": "真·趋势突破", "dir": "LONG", "score": 7 + f_score}
-        elif curr['c'] < df1['ema20'].iloc[-1] and f_score < 0:
-            sig = {"type": "真·趋势崩塌", "dir": "SHORT", "score": 7 + abs(f_score)}
+    # --- 信号决策 ---
+    sig = {"type": None, "dir": None, "score": 0, "warn": ""}
+    if is_real and abs(f_score) >= 4:
+        if curr['c'] > df['ema20'].iloc[-1] and f_score > 0:
+            sig = {"type": "战略做多", "dir": "LONG", "score": 6 + f_score}
+        elif curr['c'] < df['ema20'].iloc[-1] and f_score < 0:
+            sig = {"type": "战略做空", "dir": "SHORT", "score": 6 + abs(f_score)}
     
-    if is_spoofing: sig["warning"] = "🚨 监测到虚假对敲诱多！"
-    elif not is_real and price_move_ratio > 2.0: sig["warning"] = "⚠️ 无量异动，谨防假突破！"
+    if is_spoofing: sig["warn"] = "🚨 捕捉到庄家对敲，切勿盲目跟单！"
+    elif not is_real and price_move > 2.0: sig["warn"] = "⚠️ 无量虚涨，谨防冲高回落！"
     
-    return sig, curr['atr'], f_score, is_real
+    return sig, atr, f_score, is_real
 
-# ==================== 4. 渲染 ====================
-k1 = fetch_okx_data("market/candles", "&bar=1m&limit=100")
+# ==================== 3. 渲染层 ====================
+k_data = fetch_okx_data("market/candles", "&bar=1m&limit=100")
 t_data = fetch_okx_data("market/trades", "&limit=50")
 
-if k1 and t_data:
-    df = pd.DataFrame(k1['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQ','confirm'])
+if k_data and t_data:
+    df = pd.DataFrame(k_data['data'], columns=['ts','o', 'h', 'l', 'c', 'v', 'volCcy', 'volCcyQ', 'confirm'])
     df[['o','h','l','c','v']] = df[['o','h','l','c','v']].astype(float)
     df = df[::-1].reset_index(drop=True)
     
@@ -81,33 +64,43 @@ if k1 and t_data:
     net_f = buy_v - sell_v
     buy_r = (buy_v / (buy_v + sell_v)) * 100 if (buy_v + sell_v) > 0 else 50
     
-    sig, atr, f_score, is_real = engine_v81(df, net_f, buy_r)
+    sig, atr, f_score, is_real = strategy_engine_v85(df, net_f, buy_r)
     curr_p = df.iloc[-1]['c']
-    ai_plan = generate_ai_strategy(sig, curr_p, atr, f_score, net_f, buy_r, is_real)
 
     with st.sidebar:
-        st.header("🧠 AI 参谋部 V81")
-        if sig['warning']: st.error(sig['warning'])
+        st.header("🎯 V85 战术指挥中心")
+        if sig['warn']: st.warning(sig['warn'])
         
-        if ai_plan:
+        if sig['type']:
+            color = "#00FFCC" if sig['dir'] == "LONG" else "#FF4B4B"
+            # 战术计划书
+            sl = curr_p - 1.5*atr if sig['dir']=="LONG" else curr_p + 1.5*atr
+            tp1 = curr_p + 1.8*atr if sig['dir']=="LONG" else curr_p - 1.8*atr
+            tp2 = curr_p + 3.5*atr if sig['dir']=="LONG" else curr_p - 3.5*atr
+            
             st.markdown(f"""
-                <div style="background:rgba(255,75,75,0.1); padding:15px; border-radius:10px; border-left:5px solid #ff4b4b">
-                    <h3 style="margin:0; color:#ff4b4b">🤖 AI 建议：{ai_plan['dir_text']}</h3>
-                    <p style="font-size:14px; margin-top:10px"><b>● 大白话理由：</b>{ai_plan['logic']}</p>
-                    <p style="font-size:14px"><b>📍 在哪进场：</b>{ai_plan['action']}</p>
-                    <p style="font-size:14px"><b>❌ 在哪认输：</b>{ai_plan['stop_loss']}</p>
-                    <p style="font-size:14px"><b>💰 目标收钱：</b>{ai_plan['target']}</p>
+                <div style="background:rgba(0,255,204,0.1); padding:15px; border-radius:10px; border:2px solid {color}">
+                    <h2 style="color:{color}; margin:0">🚀 {sig['type']}</h2>
+                    <p style="font-size:14px">评分: {sig['score']} | 品质: {'真实' if is_real else '待定'}</p>
+                    <hr>
+                    <p><b>📍 入场：${curr_p:.2f}</b></p>
+                    <p><b>❌ 止损：${sl:.2f}</b> (1.5倍ATR)</p>
+                    <p><b>💰 止盈1：${tp1:.2f}</b> (减仓50%)</p>
+                    <p><b>💎 止盈2：${tp2:.2f}</b> (博取大趋势)</p>
+                    <p style="color:#FFA500">🛡️ 策略：一旦TP1达成，请将剩余止损移至保本位。</p>
                 </div>
             """, unsafe_allow_html=True)
         else:
-            st.info("🔭 正在深度扫描资金动能，暂无确定性策略。建议空仓观察主力下一步动作。")
+            st.info("🔭 1min 高频过滤中，当前未达到开仓标准。")
 
-    st.title("🛡️ ETH 战略执行终端 V81")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("现价", f"${curr_p}")
-    col2.metric("1min 净流", f"{net_f:+.2f} ETH")
-    col3.metric("动能品质", "✅ 真实" if is_real else "❌ 虚假")
+    st.title("🛡️ ETH 战术自动终端 V85")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("1min 净流", f"{net_f:+.2f} ETH")
+    c2.metric("实时买压", f"{buy_r:.1f}%")
+    c3.metric("ATR 波动", f"{atr:.2f}")
+    c4.metric("资金动能", f_score)
 
     fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c'])])
-    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+    fig.add_trace(go.Scatter(x=df.index, y=df['ema20'], line=dict(color='yellow', width=1), name="EMA20"))
+    fig.update_layout(template="plotly_dark", height=650, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
