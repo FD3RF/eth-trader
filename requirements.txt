@@ -1,6 +1,6 @@
-streamlit
-pandas
+streamlit>=1.30.0
+pandas>=2.0.0
+numpy
 requests
 plotly
-numpy
 python-telegram-bot
