@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from sklearn.ensemble import IsolationForest
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 
 # ================================
-# 数据获取
+# 1. 数据获取（OKX）
 # ================================
 def fetch_okx(endpoint, params=""):
     url = f"https://www.okx.com/api/v5/{endpoint}?instId=ETH-USDT{params}"
@@ -18,147 +18,156 @@ def fetch_okx(endpoint, params=""):
     except:
         return []
 
-def get_data():
-    k1 = fetch_okx("market/candles", "&bar=1m&limit=200")
-    if not k1:
+def get_multi():
+    k1 = fetch_okx("market/candles", "&bar=1m&limit=100")
+    k5 = fetch_okx("market/candles", "&bar=5m&limit=100")
+    k15 = fetch_okx("market/candles", "&bar=15m&limit=100")
+
+    if not (k1 and k5 and k15):
         return None
 
-    df = pd.DataFrame(k1, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1]
+    df1 = pd.DataFrame(k1, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
+    df5 = pd.DataFrame(k5, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
+    df15 = pd.DataFrame(k15, columns=['ts','o','h','l','c','v','volC','volCQ','cf'])[::-1].reset_index(drop=True)
+
+    return df1, df5, df15
+
+
+# ================================
+# 2. 特征工程
+# ================================
+def build_features(df):
+    df = df.copy()
     for col in ['o','h','l','c','v']:
         df[col] = df[col].astype(float)
 
-    return df.reset_index(drop=True)
+    # EMA
+    df['ema20'] = df['c'].ewm(span=20).mean()
+    df['ema60'] = df['c'].ewm(span=60).mean()
 
+    # RSI
+    diff = df['c'].diff()
+    gain = diff.clip(lower=0).rolling(14).mean()
+    loss = -diff.clip(upper=0).rolling(14).mean().replace(0, np.nan)
+    df['rsi'] = 100 - (100 / (1 + (gain / loss)))
 
-# ================================
-# 特征与序列
-# ================================
-def make_label(df):
-    df = df.copy()
+    # ATR
+    tr = np.maximum(df['h'] - df['l'],
+                   np.maximum(abs(df['h'] - df['c'].shift(1)),
+                              abs(df['l'] - df['c'].shift(1))))
+    df['atr'] = tr.rolling(14).mean()
+
+    # 标签：未来收益是否为正
     df['future'] = df['c'].pct_change().shift(-1)
     df['label'] = (df['future'] > 0).astype(int)
-    return df
 
-def build_seq(df, window=20):
-    seq = []
-    for i in range(len(df) - window):
-        block = df[['o','h','l','c','v']].iloc[i:i+window].values
-        seq.append(block)
-    return np.array(seq)
+    features = df[['ema20','ema60','rsi','atr','v']].dropna()
+    labels = df['label'].loc[features.index]
+
+    return features, labels, df
 
 
 # ================================
-# 深度学习模型
+# 3. AI 模型
 # ================================
-def build_model(input_shape):
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=input_shape),
-        Dropout(0.2),
-        LSTM(32),
-        Dense(16, activation='relu'),
-        Dense(1, activation='sigmoid')
-    ])
+def train_ai(df):
+    X, y, _ = build_features(df)
 
-    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-    return model
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
+    model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=8,
+        random_state=42
+    )
 
-# ================================
-# 异常检测
-# ================================
-def detect_anomaly(df):
-    model = IsolationForest(contamination=0.02, random_state=42)
-    df['anomaly'] = model.fit_predict(df[['o','h','l','c','v']])
-    return df
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+
+    report = classification_report(y_test, pred)
+    return model, report
 
 
-# ================================
-# 回测
-# ================================
-def backtest(df):
-    df = make_label(df)
-    win = df[df['label'] == 1].shape[0]
-    total = df.shape[0]
+def ai_infer(model, df):
+    last = df.iloc[-1]
+
+    features = pd.DataFrame([{
+        "ema20": last['ema20'],
+        "ema60": last['ema60'],
+        "rsi": last['rsi'],
+        "atr": last['atr'],
+        "v": last['v']
+    }])
+
+    prob = model.predict_proba(features)[0][1]
+
     return {
-        "win_rate": win / total if total > 0 else 0,
-        "total": total
+        "confidence": prob,
+        "suggestion": "看多" if prob > 0.6 else "看空" if prob < 0.4 else "观望"
     }
 
 
 # ================================
-# AI 建议
+# 4. 多周期评分
 # ================================
-def ai_advice(model, seq):
-    prob = model.predict(seq.reshape(1, *seq.shape))[0][0]
-    if prob > 0.65:
-        return "看多（结构概率优势）"
-    elif prob < 0.35:
-        return "看空（结构概率劣势）"
-    else:
-        return "观望"
+def score(df1, df5, df15):
+    def calc(df):
+        df = build_features(df)[2]
+        last = df.iloc[-1]
+        score = 0
+        if last['ema20'] > last['ema60']: score += 1
+        if last['rsi'] < 30 or last['rsi'] > 70: score += 1
+        if last['v'] > df['v'].rolling(20).mean().iloc[-1]: score += 1
+        return score
+
+    return {
+        "high": calc(df1),
+        "swing": calc(df5),
+        "trend": calc(df15)
+    }
 
 
 # ================================
-# Streamlit 面板
+# 5. Streamlit 面板
 # ================================
-st.set_page_config(page_title="AI 深度分析 V700", layout="wide")
+st.set_page_config(page_title="AI 分析 V600", layout="wide")
 
-st.title("🧠 AI 深度学习分析 V700")
+data = get_multi()
+if data:
+    df1, df5, df15 = data
 
-df = get_data()
-
-if df is not None:
-    df = detect_anomaly(df)
-
-    df = make_label(df)
-    seq = build_seq(df)
-
-    if len(seq) == 0:
-        st.warning("序列数据不足")
-        st.stop()
-
-    # 训练模型（轻量）
-    model = build_model(seq.shape[1:])
-    labels = df['label'].iloc[len(df) - len(seq):].values
-    model.fit(seq, labels, epochs=3, batch_size=16, verbose=0)
-
-    # 回测
-    bt = backtest(df)
+    # AI 训练（轻量）
+    model, report = train_ai(df1)
 
     # AI 推断
-    last = seq[-1]
-    advice = ai_advice(model, last)
+    _, _, df1b = build_features(df1)
+    ai = ai_infer(model, df1b)
 
-    # 面板
+    # 评分
+    sc = score(df1, df5, df15)
+
+    st.title("🧠 AI 多周期分析 V600（只分析）")
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("回测胜率", f"{bt['win_rate']*100:.1f}%")
-    col2.metric("样本数", bt['total'])
-    col3.metric("AI 建议", advice)
+    col1.metric("高频评分", sc['high'])
+    col2.metric("波段评分", sc['swing'])
+    col3.metric("趋势评分", sc['trend'])
+
+    st.metric("AI 置信度", f"{ai['confidence']*100:.1f}%")
+    st.metric("AI 建议", ai['suggestion'])
 
     st.write("---")
+    st.subheader("模型报告")
+    st.code(report)
 
     # 图表
     fig = go.Figure(data=[go.Candlestick(
-        x=df.index, open=df['o'], high=df['h'], low=df['l'], close=df['c']
+        x=df1.index, open=df1['o'], high=df1['h'], low=df1['l'], close=df1['c']
     )])
-
-    # 异常点
-    anom = df[df['anomaly'] == -1]
-    fig.add_trace(go.Scatter(
-        x=anom.index, y=anom['c'],
-        mode='markers',
-        marker=dict(size=8),
-        name="异常"
-    ))
-
-    fig.update_layout(template="plotly_dark", height=600)
+    fig.add_trace(go.Scatter(x=df1.index, y=df1b['ema20'], name="EMA20"))
+    fig.add_trace(go.Scatter(x=df1.index, y=df1b['ema60'], name="EMA60"))
+    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("异常统计")
-    st.write(anom[['c']].describe())
-
-    st.write("---")
-    st.info(f"AI 建议：{advice}")
 
 else:
     st.warning("数据获取失败")
