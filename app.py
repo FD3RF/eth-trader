@@ -229,7 +229,6 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         st.error(f"K线获取异常: {e}")
         return None
 
-# 新增：获取4H趋势数据（用于EMA50过滤）
 @st.cache_data(ttl=300, max_entries=10)
 def get_trend_candles(bar="4H", limit=200):
     try:
@@ -244,7 +243,6 @@ def get_trend_candles(bar="4H", limit=200):
         df.dropna(inplace=True)
         if len(df) < 50:
             return None
-        # 计算EMA50
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
         return df
     except Exception as e:
@@ -295,10 +293,9 @@ def generate_signal(df, ls_ratio, mvrv_z, trend_ema50, weights=None):
         'fib_618': 5,
         'mvrv_low': 12,
         'mvrv_high': -15,
-        # 新增权重
-        'trend_low': 8,        # 价格低于EMA50（低位）加分
-        'trend_high': -8,      # 价格高于EMA50（高位）减分
-        'breakout': 10,        # 极点突破加分
+        'trend_low': 8,
+        'trend_high': -8,
+        'breakout': 10,
     }
     if weights is None:
         weights = default_weights
@@ -471,7 +468,6 @@ def generate_signal(df, ls_ratio, mvrv_z, trend_ema50, weights=None):
     else:
         details.append({"因子": "MVRV", "状态": f"{mvrv_z:.2f}", "贡献": "0"})
 
-    # ========== 新增因子 ==========
     # 4H趋势过滤（EMA50）
     if trend_ema50 is not None and not pd.isna(trend_ema50):
         if last['c'] < trend_ema50:
@@ -759,7 +755,6 @@ def render_sidebar(df):
             backtest_risk = st.slider("回测风险 (%)", 0.1, 5.0, 1.0, 0.1, key="backtest_risk")
             st.caption("⚠️ 回测基于简化EMA策略")
             if st.button("🚀 开始回测"):
-                # 实际应启动线程，此处简化
                 st.info("回测功能已简化，实际部署请完善")
         return hb, pause, symbol, tf, f_ema, s_ema
 
@@ -859,45 +854,61 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # 精准进场策略卡
+    # 精准进场策略卡（带方向标识，紧凑）
     st.markdown("---")
     st.subheader("🎯 精准进场策略")
+    if direction == 1:
+        dir_label = "🔥 做多"
+        dir_color = "#00ff88"
+    elif direction == -1:
+        dir_label = "❄️ 做空"
+        dir_color = "#ff4b4b"
+    else:
+        dir_label = "⚪ 观望"
+        dir_color = "#888888"
+
+    st.markdown(f"""
+    <div style="text-align:center; margin-bottom:10px;">
+        <span style="color:{dir_color}; font-size:1.5rem; font-weight:bold; border-bottom:2px solid {dir_color}; padding-bottom:5px;">{dir_label}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
         st.markdown(f"""
-        <div style="border:2px solid #00ff88; border-radius:10px; padding:10px; text-align:center; background:rgba(0,255,136,0.1);">
-            <p style="color:#aaa;">最佳入场区</p>
-            <h4 style="color:#00ff88;">{entry_zone}</h4>
+        <div style="border:1px solid #00ff88; border-radius:8px; padding:8px; text-align:center; background:rgba(0,255,136,0.1);">
+            <p style="color:#aaa; font-size:0.8rem;">入场区</p>
+            <h5 style="color:#00ff88; margin:0;">{entry_zone}</h5>
         </div>
         """, unsafe_allow_html=True)
     with col_b:
         sl_color = "#ff4b4b" if sl else "#888"
         sl_text = f"${sl:.2f}" if sl else "无"
         st.markdown(f"""
-        <div style="border:2px solid {sl_color}; border-radius:10px; padding:10px; text-align:center; background:rgba(255,75,75,0.1);">
-            <p style="color:#aaa;">动态止损</p>
-            <h4 style="color:{sl_color};">{sl_text}</h4>
+        <div style="border:1px solid {sl_color}; border-radius:8px; padding:8px; text-align:center; background:rgba(255,75,75,0.1);">
+            <p style="color:#aaa; font-size:0.8rem;">止损</p>
+            <h5 style="color:{sl_color}; margin:0;">{sl_text}</h5>
         </div>
         """, unsafe_allow_html=True)
     with col_c:
         tp_color = "#00ff88" if tp else "#888"
         tp_text = f"${tp:.2f}" if tp else "无"
         st.markdown(f"""
-        <div style="border:2px solid {tp_color}; border-radius:10px; padding:10px; text-align:center; background:rgba(0,255,136,0.1);">
-            <p style="color:#aaa;">动态止盈</p>
-            <h4 style="color:{tp_color};">{tp_text}</h4>
+        <div style="border:1px solid {tp_color}; border-radius:8px; padding:8px; text-align:center; background:rgba(0,255,136,0.1);">
+            <p style="color:#aaa; font-size:0.8rem;">止盈</p>
+            <h5 style="color:{tp_color}; margin:0;">{tp_text}</h5>
         </div>
         """, unsafe_allow_html=True)
     with col_d:
         rr = abs((tp - current_price) / (current_price - sl)) if sl and tp and abs(current_price - sl) > 1e-8 else 0
         st.markdown(f"""
-        <div style="border:2px solid #FFD700; border-radius:10px; padding:10px; text-align:center; background:rgba(255,215,0,0.1);">
-            <p style="color:#aaa;">盈亏比</p>
-            <h4 style="color:#FFD700;">{rr:.2f}</h4>
+        <div style="border:1px solid #FFD700; border-radius:8px; padding:8px; text-align:center; background:rgba(255,215,0,0.1);">
+            <p style="color:#aaa; font-size:0.8rem;">盈亏比</p>
+            <h5 style="color:#FFD700; margin:0;">{rr:.2f}</h5>
         </div>
         """, unsafe_allow_html=True)
 
-    # 实时仓位建议（左侧）+ 雷达图（右侧）
+    # 实时仓位建议 + 雷达图
     st.markdown("---")
     col_l, col_r = st.columns([1, 2])
     with col_l:
@@ -1039,7 +1050,7 @@ def main():
 
     # 主图表（K线 + 指标）
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02,
-                        row_heights=[0.6, 0.15, 0.15, 0.1],  # 主图占比提高
+                        row_heights=[0.6, 0.15, 0.15, 0.1],
                         subplot_titles=("价格 & 指标", "Stochastic", "ADX", "资金净流"))
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
                                  name="K线", showlegend=False), row=1, col=1)
