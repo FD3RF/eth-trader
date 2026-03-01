@@ -1,13 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-工程级看盘终端（最终整合 + 自动判断）
-功能：
-- 实时K线
-- FVG 标注
-- 多周期方向
-- 自动交易条件
-- 进场/止损/止盈
-- 自动仓位计算
+工程级看盘终端（优化K线清爽版）
+接近 OKX K线风格
 """
 
 import streamlit as st
@@ -50,10 +44,8 @@ def detect_fvg(df):
     fvg = []
     for i in range(2, len(df)):
         prev = df.iloc[i-2]
-        mid = df.iloc[i-1]
         cur = df.iloc[i]
 
-        # Bull FVG（上涨缺口）
         if prev["h"] < cur["l"]:
             fvg.append({
                 "type":"bull",
@@ -62,7 +54,6 @@ def detect_fvg(df):
                 "ts": cur["ts"]
             })
 
-        # Bear FVG（下跌缺口）
         if prev["l"] > cur["h"]:
             fvg.append({
                 "type":"bear",
@@ -81,7 +72,7 @@ def sweep_levels(df):
     return highs.dropna().iloc[-1], lows.dropna().iloc[-1]
 
 # ===========================
-# 波段评分（5m）
+# 波段评分
 # ===========================
 def swing_score(df):
     df["ema20"] = df["c"].ewm(span=20).mean()
@@ -103,7 +94,7 @@ def swing_score(df):
     return score
 
 # ===========================
-# 高周期方向（1H）
+# 多周期方向
 # ===========================
 def higher_tf_score():
     df = fetch_okx(bar="1H", limit=100)
@@ -126,72 +117,59 @@ def trade_condition(df):
     high, low = sweep_levels(df)
     last = df["c"].iloc[-1]
 
-    # 做多条件
     long_cond = (
-        score_5m > 1 and
-        score_1h > 0 and
-        last <= low * 1.005 and
-        last >= low * 0.995
+        score_5m > 1 and score_1h > 0 and
+        last <= low * 1.005 and last >= low * 0.995
     )
 
-    # 做空条件
     short_cond = (
-        score_5m < -1 and
-        score_1h < 0 and
-        last >= high * 0.995 and
-        last <= high * 1.005
+        score_5m < -1 and score_1h < 0 and
+        last >= high * 0.995 and last <= high * 1.005
     )
 
     if long_cond:
         return "long"
     elif short_cond:
         return "short"
-    else:
-        return "wait"
+    return "wait"
 
 # ===========================
-# 仓位计算（风险1%）
+# 仓位计算
 # ===========================
 def calc_position_size(account, entry, stop):
     risk = account * 0.01
     distance = abs(entry - stop)
-    if distance == 0:
-        return 0
-    return risk / distance
+    return risk / distance if distance else 0
 
 # ===========================
-# 动态止损 / 止盈
+# 动态止损/止盈
 # ===========================
 def dynamic_levels(high, low):
-    sl_long = low * 0.997
-    sl_short = high * 1.003
-
-    tp_long = low * 1.015
-    tp_short = high * 0.985
-
-    return sl_long, tp_long, sl_short, tp_short
+    return (
+        low * 0.997,        # 多止损
+        low * 1.015,        # 多止盈
+        high * 1.003,        # 空止损
+        high * 0.985         # 空止盈
+    )
 
 # ===========================
 # 主界面
 # ===========================
 def main():
-    st.title("工程级看盘终端（自动判断版）")
+    st.title("工程级看盘终端（K线优化版）")
 
     df = fetch_okx()
     if df is None or df.empty:
         st.warning("暂无数据")
         return
 
-    # 关键计算
     high, low = sweep_levels(df)
     sl_long, tp_long, sl_short, tp_short = dynamic_levels(high, low)
     score_5m = swing_score(df)
     score_1h = higher_tf_score()
-
-    # 自动交易条件
     signal = trade_condition(df)
 
-    st.subheader("自动交易判断")
+    # 多周期提示
     if signal == "long":
         st.success("自动判断：做多")
     elif signal == "short":
@@ -199,27 +177,22 @@ def main():
     else:
         st.info("自动判断：观望")
 
-    # 多周期一致性
-    if score_1h > 0 and score_5m > 1:
-        st.success("多周期一致：做多倾向")
-    elif score_1h < 0 and score_5m < -1:
-        st.error("多周期一致：做空倾向")
-    else:
-        st.info("周期分歧")
-
-    # K线图
+    # K线图（清爽版）
     fig = go.Figure()
+
     fig.add_trace(go.Candlestick(
         x=df["ts"],
         open=df["o"],
         high=df["h"],
         low=df["l"],
-        close=df["c"]
+        close=df["c"],
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350"
     ))
 
     last_ts = df["ts"].iloc[-1]
 
-    # FVG 标注
+    # FVG（半透明）
     fvg = detect_fvg(df)
     for gap in fvg:
         fig.add_shape(
@@ -228,58 +201,60 @@ def main():
             x1=last_ts,
             y0=gap["low"],
             y1=gap["high"],
-            fillcolor="rgba(0,255,0,0.12)" if gap["type"]=="bull" else "rgba(255,0,0,0.12)",
+            fillcolor="rgba(0,255,0,0.10)" if gap["type"]=="bull" else "rgba(255,0,0,0.10)",
             line_width=0
         )
 
-    # 进场标记
+    # 轻量进场标记
     fig.add_trace(go.Scatter(
         x=[last_ts],
         y=[low],
-        mode="markers+text",
-        text=["多单进场"],
-        textposition="top center"
+        mode="markers",
+        marker=dict(size=8, symbol="triangle-up")
     ))
 
     fig.add_trace(go.Scatter(
         x=[last_ts],
         y=[high],
-        mode="markers+text",
-        text=["空单进场"],
-        textposition="bottom center"
+        mode="markers",
+        marker=dict(size=8, symbol="triangle-down")
     ))
 
-    # 止损 / 止盈
-    fig.add_hline(y=sl_long, line_dash="dash", annotation_text="多单止损")
-    fig.add_hline(y=tp_long, line_dash="dot", annotation_text="多单止盈")
+    # 轻量止损/止盈（水平线）
+    fig.add_hline(y=sl_long, line_dash="dash")
+    fig.add_hline(y=tp_long, line_dash="dot")
+    fig.add_hline(y=sl_short, line_dash="dash")
+    fig.add_hline(y=tp_short, line_dash="dot")
 
-    fig.add_hline(y=sl_short, line_dash="dash", annotation_text="空单止损")
-    fig.add_hline(y=tp_short, line_dash="dot", annotation_text="空单止盈")
+    fig.update_layout(
+        xaxis_rangeslider_visible=False,
+        template="plotly_dark"
+    )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # 仓位计算
-    st.subheader("自动仓位计算（风险1%）")
+    # 信息面板
+    st.subheader("多周期")
+    if score_1h > 0 and score_5m > 1:
+        st.success("多周期一致：做多")
+    elif score_1h < 0 and score_5m < -1:
+        st.error("多周期一致：做空")
+    else:
+        st.info("周期分歧")
+
+    st.subheader("仓位建议")
     account = st.number_input("账户资金", value=10000)
     entry = df["c"].iloc[-1]
     stop = sl_long if score_5m > 1 else sl_short
-
     size = calc_position_size(account, entry, stop)
-    st.write(f"建议仓位（合约价值）：{size:.2f}")
+    st.write(f"建议仓位：{size:.2f}")
 
-    # 关键价格
     st.subheader("关键价格")
     st.write(f"扫单高点: {high:.2f}")
     st.write(f"扫单低点: {low:.2f}")
-    st.write(f"多单止损: {sl_long:.2f}")
-    st.write(f"多单止盈: {tp_long:.2f}")
-    st.write(f"空单止损: {sl_short:.2f}")
-    st.write(f"空单止盈: {tp_short:.2f}")
+    st.write(f"止损: {stop:.2f}")
+    st.write(f"止盈: {tp_long if score_5m>1 else tp_short:.2f}")
     st.write(f"最新价: {entry:.2f}")
-
-    st.subheader("波段评分")
-    st.write(f"5m评分: {score_5m}")
-    st.write(f"1h评分: {score_1h}")
 
 if __name__ == "__main__":
     main()
