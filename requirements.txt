@@ -1,6 +1,7 @@
-streamlit==1.54.0
-pandas==2.3.3
-numpy==2.4.2
-plotly==6.5.2
-requests==2.32.5
-streamlit-autorefresh==1.0.1
+pandas
+numpy
+requests
+plotly
+vectorbt
+streamlit
+streamlit_autorefresh
