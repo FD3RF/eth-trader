@@ -26,7 +26,7 @@ except Exception:
 # ====================== 页面配置 ======================
 st.set_page_config(layout="wide", page_title="专业量化决策引擎·至尊版", page_icon="📊")
 
-# ====================== 全局样式（完美紧凑布局）======================
+# ====================== 全局样式 ======================
 st.markdown("""
 <style>
     /* 基础重置 */
@@ -194,12 +194,12 @@ st.markdown("""
         margin: 2px 0;
     }
 
-    /* 情绪温度计 */
+    /* 情绪温度计内部样式（用于折叠区） */
     .sentiment-bar {
         background: #333;
         border-radius: 3px;
         height: 9px;
-        width: 97%;
+        width: 100%;
         margin: 2px 0;
     }
     .sentiment-fill {
@@ -219,34 +219,6 @@ st.markdown("""
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-    }
-
-    /* 技术指标卡 */
-    .indicator-card {
-        background: rgba(255,255,255,0.015);
-        border-radius: 6px;
-        padding: 2px 2px;
-        text-align: center;
-        height: 42px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-    .indicator-card p {
-        color: #aaa;
-        font-size: 0.62rem;
-        margin: 0;
-    }
-    .indicator-card h4 {
-        font-size: 1.55rem;
-        margin: -4px 0 0 0;
-        line-height: 1;
-        font-weight: 500;
-    }
-    .indicator-emoji {
-        font-size: 0.75rem;
-        float: right;
-        margin-left: 4px;
     }
 
     /* 信号历史表格 */
@@ -272,9 +244,6 @@ st.markdown("""
     }
     .signal-table .latest {
         background: rgba(0,204,119,0.12);
-    }
-    .signal-table .pnl-positive {
-        color: #00cc77;
     }
 
     /* 新闻区 */
@@ -302,7 +271,6 @@ st.markdown("""
     /* 响应式 */
     @media (max-width: 768px) {
         .compact-card { width: calc(33.33% - 8px); }
-        .indicator-card { width: calc(50% - 8px); }
         .entry-card { width: calc(50% - 8px); }
     }
     @media (max-width: 600px) {
@@ -311,12 +279,8 @@ st.markdown("""
         .hero-right { width: 100%; }
         .position-card { height: auto; }
         [data-testid="column"] { width: 100% !important; }
-        .sentiment-bar { width: 100%; }
     }
 
-    /* 通用间距 */
-    .row-gap { margin-bottom: 4px; }
-    .col-gap { gap: 6px; }
     hr { margin: 4px 0; border: 0; border-top: 0.5px solid #333; }
 </style>
 """, unsafe_allow_html=True)
@@ -1152,7 +1116,7 @@ def main():
         hero_title = "⚖️ 均衡观望"
 
     # 环形进度条 (prob作为百分比)
-    dash_array = prob * 3.14  # 近似周长比例
+    dash_array = prob * 3.14
     st.markdown(f"""
     <div class="hero-card" style="border-color:{hero_color};">
         <div class="hero-left">
@@ -1249,94 +1213,120 @@ def main():
             )
             st.plotly_chart(fig_radar, use_container_width=True, config={'displayModeBar': False})
 
-    # ====================== 市场情绪温度计 ======================
+    # ====================== 技术指标状态（合并版） ======================
     st.markdown("---")
-    ratio = ls_ratio
-    if ratio < 0.92:
-        status = "❄️ 空头极端"
-        bar_color = "#ff6b6b"
-    elif ratio > 1.08:
-        status = "🔥 多头极端"
-        bar_color = "#00cc77"
-    else:
-        status = "⚖️ 中性"
-        bar_color = "#888888"
-    bar_width = min(100, ratio * 50)  # 映射到0-100%
-    st.markdown(f"""
-    <div>
-        <div class="sentiment-text">
-            <span style="color:{bar_color};">{status}</span>
-            <span>{ratio:.2f}</span>
-        </div>
-        <div class="sentiment-bar">
-            <div class="sentiment-fill" style="width:{bar_width}%; background:{bar_color};"></div>
-        </div>
-        <div class="sentiment-sub">多空比 < 0.92 或 > 1.08 为极端</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ====================== 技术指标状态卡 ======================
-    st.markdown("---")
-    cols_ind = st.columns(4, gap="small")
-    with cols_ind[0]:
+    st.markdown("##### 📊 技术指标")
+    col_ind1, col_ind2, col_ind3, col_ind4 = st.columns(4, gap="small")
+    with col_ind1:
         rsi_val = df['rsi'].iloc[-1] if not pd.isna(df['rsi'].iloc[-1]) else 50
         rsi_color = "#00cc77" if 32 < rsi_val < 68 else ("#ff6b6b" if rsi_val >= 68 else "#ffcc00")
         rsi_emoji = "⚪" if 32 < rsi_val < 68 else ("🔴" if rsi_val >= 68 else "🟢")
         st.markdown(f"""
-        <div class="indicator-card">
-            <p>RSI {rsi_emoji} <span class="indicator-emoji"></span></p>
-            <h4 style="color:{rsi_color};">{rsi_val:.1f}</h4>
+        <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); border-radius:6px; padding:2px 8px; height:36px;">
+            <span style="color:#aaa;">RSI {rsi_emoji}</span>
+            <span style="color:{rsi_color}; font-weight:bold;">{rsi_val:.1f}</span>
         </div>
         """, unsafe_allow_html=True)
-    with cols_ind[1]:
+    with col_ind2:
         macd_val = df['macd_hist'].iloc[-1]
         macd_color = "#00cc77" if macd_val > 0 else "#ff6b6b"
         macd_emoji = "📈" if macd_val > 0 else "📉"
         st.markdown(f"""
-        <div class="indicator-card">
-            <p>MACD {macd_emoji}</p>
-            <h4 style="color:{macd_color};">{macd_val:.2f}</h4>
+        <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); border-radius:6px; padding:2px 8px; height:36px;">
+            <span style="color:#aaa;">MACD {macd_emoji}</span>
+            <span style="color:{macd_color}; font-weight:bold;">{macd_val:.2f}</span>
         </div>
         """, unsafe_allow_html=True)
-    with cols_ind[2]:
+    with col_ind3:
         bb_pos = "上轨" if current_price > df['bb_upper'].iloc[-1] else ("下轨" if current_price < df['bb_lower'].iloc[-1] else "中轨")
         bb_color = "#ff6b6b" if bb_pos == "上轨" else ("#00cc77" if bb_pos == "下轨" else "#888")
         bb_emoji = "⬆️" if bb_pos == "上轨" else ("⬇️" if bb_pos == "下轨" else "⚪")
         st.markdown(f"""
-        <div class="indicator-card">
-            <p>布林 {bb_emoji}</p>
-            <h4 style="color:{bb_color};">{bb_pos}</h4>
+        <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); border-radius:6px; padding:2px 8px; height:36px;">
+            <span style="color:#aaa;">布林 {bb_emoji}</span>
+            <span style="color:{bb_color}; font-weight:bold;">{bb_pos}</span>
         </div>
         """, unsafe_allow_html=True)
-    with cols_ind[3]:
+    with col_ind4:
         vol_ratio = df['v'].iloc[-1] / df['vol_ma'].iloc[-1] if df['vol_ma'].iloc[-1] > 0 else 1
         vol_color = "#00cc77" if vol_ratio > 1.3 else "#888"
         vol_emoji = "🔥" if vol_ratio > 1.3 else "💧"
         st.markdown(f"""
-        <div class="indicator-card">
-            <p>成交量 {vol_emoji}</p>
-            <h4 style="color:{vol_color};">{'放量' if vol_ratio>1.3 else '缩量'}</h4>
+        <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); border-radius:6px; padding:2px 8px; height:36px;">
+            <span style="color:#aaa;">成交量 {vol_emoji}</span>
+            <span style="color:{vol_color};">{'放量' if vol_ratio>1.3 else '缩量'}</span>
         </div>
         """, unsafe_allow_html=True)
 
-    # ====================== 信号历史记录 ======================
+    # ====================== 信号历史记录（折叠） ======================
     st.markdown("---")
-    if st.session_state.signal_history:
-        html = '<table class="signal-table"><tr><th>时间</th><th>方向</th><th>胜率</th><th>价格</th><th>理由</th></tr>'
-        for i, row in enumerate(st.session_state.signal_history):
-            cls = 'latest' if i == 0 else ''
-            html += f'<tr class="{cls}"><td>{row["时间"]}</td><td>{row["方向"]}</td><td>{row["胜率"]}</td><td>{row["价格"]}</td><td>{row["理由"]}</td></tr>'
-        html += '</table>'
-        st.markdown(html, unsafe_allow_html=True)
-    else:
-        st.info("暂无信号记录")
+    with st.expander("📜 信号历史记录", expanded=False):
+        if st.session_state.signal_history:
+            html = '<table class="signal-table"><tr><th>时间</th><th>方向</th><th>胜率</th><th>价格</th><th>理由</th></tr>'
+            for i, row in enumerate(st.session_state.signal_history):
+                cls = 'latest' if i == 0 else ''
+                html += f'<tr class="{cls}"><td>{row["时间"]}</td><td>{row["方向"]}</td><td>{row["胜率"]}</td><td>{row["价格"]}</td><td>{row["理由"]}</td></tr>'
+            html += '</table>'
+            st.markdown(html, unsafe_allow_html=True)
+        else:
+            st.info("暂无信号记录")
 
-    # ====================== K线图 ======================
+    # ====================== 市场洞察（情绪+新闻）折叠 ======================
     st.markdown("---")
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.0045,
-                        row_heights=[0.76, 0.08, 0.08, 0.08],
-                        subplot_titles=("", "", "", ""))  # 不显示子图标题
-    # 主K线
+    with st.expander("📊 市场洞察", expanded=False):
+        # 情绪温度计
+        ratio = ls_ratio
+        if ratio < 0.92:
+            status = "❄️ 空头极端"
+            bar_color = "#ff6b6b"
+        elif ratio > 1.08:
+            status = "🔥 多头极端"
+            bar_color = "#00cc77"
+        else:
+            status = "⚖️ 中性"
+            bar_color = "#888888"
+        bar_width = min(100, ratio * 50)
+        st.markdown(f"""
+        <div style="margin-bottom:10px;">
+            <div class="sentiment-text">
+                <span style="color:{bar_color};">{status}</span>
+                <span>{ratio:.2f}</span>
+            </div>
+            <div class="sentiment-bar">
+                <div class="sentiment-fill" style="width:{bar_width}%; background:{bar_color};"></div>
+            </div>
+            <div class="sentiment-sub">多空比 < 0.92 或 > 1.08 为极端</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 新闻
+        if news:
+            for article in news:
+                st.markdown(f"""
+                <div class="news-item">
+                    <span class="news-bullet">•</span>
+                    <a href="{article['link']}" target="_blank">{article['title']}</a>
+                    <span class="news-time">{article['published']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("无法获取新闻，请稍后再试。")
+
+    # ====================== K线图（简化版，3子图，双Y轴） ======================
+    st.markdown("---")
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.7, 0.15, 0.15],
+        specs=[
+            [{"secondary_y": False}],
+            [{"secondary_y": True}],   # 第二子图启用双Y轴
+            [{"secondary_y": False}]
+        ]
+    )
+
+    # 主图
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
                                  name="K线", showlegend=False,
                                  increasing_line_color='#00cc77', decreasing_line_color='#ff6b6b',
@@ -1360,37 +1350,27 @@ def main():
     fig.add_hline(y=recent_high, line_dash="dot", line_color="#ffcc00", row=1, col=1, annotation_text="压力", annotation_position="top left")
     fig.add_hline(y=recent_low, line_dash="dot", line_color="#ffcc00", row=1, col=1, annotation_text="支撑", annotation_position="bottom left")
 
-    # Stochastic
-    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_k'], line=dict(color='#00cc77', width=1), name="%K"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_d'], line=dict(color='#ff6b6b', width=1), name="%D"), row=2, col=1)
-    fig.add_hline(y=80, line_dash="dash", line_color="#888", row=2, col=1)
-    fig.add_hline(y=20, line_dash="dash", line_color="#888", row=2, col=1)
+    # 第二子图：动量指标（ADX主轴 + Stochastic次轴）
+    fig.add_trace(go.Scatter(x=df['time'], y=df['adx'], line=dict(color='#00cc77', width=1.2), name="ADX"), row=2, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_k'], line=dict(color='#ff6b6b', width=1), name="%K"), row=2, col=1, secondary_y=True)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_d'], line=dict(color='#ffcc00', width=1), name="%D"), row=2, col=1, secondary_y=True)
+    fig.add_hline(y=25, line_dash="dash", line_color="#888", row=2, col=1, secondary_y=False)  # ADX阈值
+    fig.add_hline(y=80, line_dash="dash", line_color="#888", row=2, col=1, secondary_y=True)
+    fig.add_hline(y=20, line_dash="dash", line_color="#888", row=2, col=1, secondary_y=True)
 
-    # ADX
-    fig.add_trace(go.Scatter(x=df['time'], y=df['adx'], line=dict(color='#00cc77', width=1), name="ADX"), row=3, col=1)
-    fig.add_hline(y=25, line_dash="dash", line_color="#ffcc00", row=3, col=1)
-
-    # 资金净流
+    # 第三子图：资金净流
     flow_colors = ['#00cc77' if x > 0 else '#ff6b6b' for x in df['net_flow']]
-    fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=4, col=1)
+    fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=3, col=1)
 
-    # 子图标签（修复：使用域坐标，避免无效的 yref）
-    fig.add_annotation(x=0.02, y=0.95, xref="x domain", yref="y domain", text="Stochastic", showarrow=False,
-                       font=dict(size=9, color="#888"), row=2, col=1)
-    fig.add_annotation(x=0.02, y=0.95, xref="x domain", yref="y domain", text="ADX", showarrow=False,
-                       font=dict(size=9, color="#888"), row=3, col=1)
-    fig.add_annotation(x=0.02, y=0.95, xref="x domain", yref="y domain", text="资金净流", showarrow=False,
-                       font=dict(size=9, color="#888"), row=4, col=1)
-
-    # 隐藏子图刻度标签
-    fig.update_yaxes(title_text="", row=2, col=1, showticklabels=False, showgrid=False)
+    # 布局调整
+    fig.update_yaxes(title_text="ADX", row=2, col=1, secondary_y=False, showticklabels=False, showgrid=False)
+    fig.update_yaxes(title_text="Stochastic", row=2, col=1, secondary_y=True, showticklabels=False, showgrid=False)
     fig.update_yaxes(title_text="", row=3, col=1, showticklabels=False, showgrid=False)
-    fig.update_yaxes(title_text="", row=4, col=1, showticklabels=False, showgrid=False)
-    fig.update_xaxes(title_text="", row=4, col=1)
+    fig.update_xaxes(title_text="", row=3, col=1)
 
     fig.update_layout(
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
-        height=480,
+        height=500,
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=10, b=10),
         hovermode='x unified',
@@ -1417,22 +1397,7 @@ def main():
         )
         st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
 
-    # ====================== 底部新闻 ======================
-    st.markdown("---")
-    with st.expander("📰 加密新闻", expanded=False):
-        if news:
-            for article in news:
-                st.markdown(f"""
-                <div class="news-item">
-                    <span class="news-bullet">•</span>
-                    <a href="{article['link']}" target="_blank">{article['title']}</a>
-                    <span class="news-time">{article['published']}</span>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("无法获取新闻，请稍后再试。")
-
-    # 回测/优化结果折叠（保持原有）
+    # ====================== 回测/优化折叠 ======================
     with st.expander("📈 回测结果", expanded=False):
         if st.session_state.get('backtest_metrics'):
             metrics = st.session_state['backtest_metrics']
