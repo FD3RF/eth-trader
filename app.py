@@ -1,3 +1,7 @@
+import os
+# 禁用 Streamlit 文件监控，避免 inotify 限制
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -18,13 +22,11 @@ except Exception:
 # ====================== 页面配置 ======================
 st.set_page_config(layout="wide", page_title="交易级分析终端", page_icon="📊")
 
-# ====================== 全局样式（紧凑）======================
+# ====================== 全局样式 =======================
 st.markdown("""
 <style>
-    /* 压缩整体间距 */
     .main > div { padding: 0; }
     .block-container { max-width: 100%; padding: 0 0.25rem; }
-    /* 指标卡片 */
     .metric-card {
         background: rgba(255,255,255,0.05);
         border-radius: 6px;
@@ -37,16 +39,6 @@ st.markdown("""
     }
     .metric-card p { color: #aaa; font-size: 0.7rem; margin: 0; }
     .metric-card h3 { font-size: 1.6rem; margin: -2px 0 0 0; line-height: 1.2; font-weight: 500; }
-    /* 方向标签 */
-    .dir-badge {
-        display: inline-block;
-        padding: 0.2rem 0.6rem;
-        border-radius: 20px;
-        font-size: 0.9rem;
-        font-weight: bold;
-        text-align: center;
-    }
-    /* 进场策略卡片 */
     .strategy-card {
         background: rgba(0,0,0,0.2);
         border-left: 4px solid;
@@ -57,7 +49,6 @@ st.markdown("""
         align-items: center;
         justify-content: space-between;
     }
-    /* 因子贡献条 */
     .factor-bar {
         display: flex;
         align-items: center;
@@ -116,7 +107,7 @@ def get_ls_ratio():
             pass
     return 1.0
 
-@st.cache_data(ttl=60, max_entries=50)
+@st.cache_data(ttl=60, max_entries=50)  # 60秒缓存，自动刷新时数据会更新
 def get_candles(bar="5m", limit=500):
     """获取K线并计算所需技术指标"""
     try:
@@ -236,7 +227,7 @@ def get_trend_4h():
         return 0
 
 def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
-    """生成信号（精简版，返回必要数据）"""
+    """生成信号"""
     if df is None or len(df) < 50:
         return 50.0, 0, None, None, None, "", [], None, None
 
@@ -270,7 +261,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
     reasons = []
     details = []
 
-    # 4H趋势
     trend4h = get_trend_4h()
     if trend4h == 1:
         score += weights['trend4h']
@@ -283,7 +273,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
     else:
         details.append({"因子": "4H趋势", "状态": "不明", "贡献": 0})
 
-    # EMA
     ema_pos, ema_neg = weights['ema_cross']
     if last['ema_f'] > last['ema_s']:
         score += ema_pos
@@ -294,7 +283,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
         reasons.append("EMA死叉")
         details.append({"因子": "EMA", "状态": "死叉", "贡献": ema_neg})
 
-    # RSI
     if not pd.isna(last['rsi']):
         if 30 < last['rsi'] < 70:
             score += weights['rsi_mid']
@@ -311,7 +299,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
     else:
         details.append({"因子": "RSI", "状态": "NA", "贡献": 0})
 
-    # MACD
     if last['macd_hist'] > 0:
         score += weights['macd_hist_pos']
         reasons.append("MACD柱为正")
@@ -321,7 +308,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
         reasons.append("MACD柱为负")
         details.append({"因子": "MACD", "状态": "柱负", "贡献": weights['macd_hist_neg']})
 
-    # 极点突破
     extreme_break = False
     if last['c'] > last['bb_upper'] and last['v'] > last['vol_ma'] * 1.5:
         extreme_break = True
@@ -336,7 +322,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
     else:
         details.append({"因子": "突破", "状态": "非极点", "贡献": 0})
 
-    # 成交量
     if last['v'] > last['vol_ma'] * 1.3:
         score += weights['volume_surge']
         details.append({"因子": "成交量", "状态": "放量", "贡献": weights['volume_surge']})
@@ -344,7 +329,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
         score += weights['volume_shrink']
         details.append({"因子": "成交量", "状态": "缩量", "贡献": weights['volume_shrink']})
 
-    # 资金净流
     if last['net_flow'] > 0:
         score += weights['net_flow_pos']
         details.append({"因子": "资金净流", "状态": "净流入", "贡献": weights['net_flow_pos']})
@@ -352,7 +336,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
         score += weights['net_flow_neg']
         details.append({"因子": "资金净流", "状态": "净流出", "贡献": weights['net_flow_neg']})
 
-    # 多空比
     if ls_ratio < 0.95:
         score += weights['ls_ratio_low']
         reasons.append("多空比极端空")
@@ -364,7 +347,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
     else:
         details.append({"因子": "多空比", "状态": "中性", "贡献": 0})
 
-    # Stochastic
     if not pd.isna(last['stoch_k']) and not pd.isna(last['stoch_d']):
         if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 20:
             score += weights['stoch_cross']
@@ -375,12 +357,10 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
             reasons.append("Stoch超买死叉")
             details.append({"因子": "Stoch", "状态": "超买死叉", "贡献": -weights['stoch_cross']})
 
-    # ADX
     if not pd.isna(last['adx']) and last['adx'] > 25:
         score += weights['adx_strong']
         details.append({"因子": "ADX", "状态": "强趋势", "贡献": weights['adx_strong']})
 
-    # MVRV
     if mvrv_z < 0:
         score += weights['mvrv_low']
         details.append({"因子": "MVRV", "状态": "低估", "贡献": weights['mvrv_low']})
@@ -390,7 +370,6 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
 
     prob = max(min(score, 95), 5)
 
-    # 方向判定
     if trend4h == 1 and extreme_break and prob > 60:
         direction = 1
     elif trend4h == -1 and extreme_break and prob < 40:
@@ -418,8 +397,18 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
 
 # ====================== 主界面 ======================
 def main():
+    # 如果用户需要手动刷新，可以添加一个按钮
     st.title("交易级分析终端")
     st.caption("基于OKX实时数据 | 多因子模型 | 不自动交易")
+
+    # 侧边栏控制刷新
+    with st.sidebar:
+        st.header("控制面板")
+        auto_refresh = st.checkbox("开启自动刷新", value=True)
+        refresh_interval = st.slider("刷新间隔 (秒)", 5, 60, 15)
+        if st.button("🔄 立即刷新数据"):
+            st.cache_data.clear()
+            st.rerun()
 
     # 获取数据
     df = get_candles(bar="5m", limit=500)
@@ -432,7 +421,7 @@ def main():
 
     prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio, mvrv_z)
 
-    # ====================== 顶部指标卡片（5个） ======================
+    # ====================== 顶部指标卡片 ======================
     cols = st.columns(5, gap="small")
     with cols[0]:
         st.markdown(f"""
@@ -473,7 +462,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # ====================== 进场策略卡片（简洁） ======================
+    # ====================== 进场策略卡片 ======================
     if direction != 0:
         strategy_color = "#00cc77" if direction==1 else "#ff6b6b"
         st.markdown(f"""
@@ -490,14 +479,14 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # ====================== 多因子贡献（进度条形式） ======================
+    # ====================== 多因子贡献 ======================
     if details:
         st.markdown("---")
         st.subheader("📊 因子贡献")
-        # 只显示贡献绝对值较大的前8个因子，避免杂乱
         df_details = pd.DataFrame(details)
         df_details['abs'] = df_details['贡献'].abs()
-        df_details = df_details.sort_values('abs', ascending=False).head(8)
+        # 显示所有非零因子
+        df_details = df_details[df_details['贡献'] != 0].sort_values('abs', ascending=False)
 
         for _, row in df_details.iterrows():
             val = row['贡献']
@@ -513,23 +502,33 @@ def main():
             </div>
             """, unsafe_allow_html=True)
 
-    # ====================== K线图（紧凑） ======================
+    # ====================== K线图（添加EMA线）======================
     st.markdown("---")
     st.subheader("📈 K线图")
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"],
         increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-        line=dict(width=0.8)
+        line=dict(width=0.8), name="K线"
     ))
+    # 添加EMA快慢线，帮助分析
+    fig.add_trace(go.Scatter(x=df["time"], y=df["ema_f"], line=dict(color='#00cc77', width=1), name="EMA12"))
+    fig.add_trace(go.Scatter(x=df["time"], y=df["ema_s"], line=dict(color='#ff6b6b', width=1), name="EMA26"))
+
     fig.update_layout(
         xaxis_rangeslider_visible=False,
-        height=450,  # 适当降低高度
+        height=450,
         margin=dict(l=10, r=10, t=10, b=10),
         hovermode='x unified',
-        template="plotly_dark"
+        template="plotly_dark",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    # 自动刷新
+    if auto_refresh:
+        time.sleep(refresh_interval)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
