@@ -34,7 +34,7 @@ def safe_request(url: str) -> Optional[dict]:
         logger.warning(f"Request failed: {e}")
     return None
 
-@st.cache_data(ttl=60)  # 缓存60秒，避免重复请求
+@st.cache_data(ttl=60)
 def get_candles() -> Optional[pd.DataFrame]:
     """获取K线数据并计算所有指标"""
     url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
@@ -50,12 +50,10 @@ def get_candles() -> Optional[pd.DataFrame]:
     for col in ["o","h","l","c","v"]:
         df[col] = pd.to_numeric(df[col])
 
-    # ---------- 指标计算 ----------
-    # EMA (趋势)
+    # 指标计算
     df["ema_fast"] = df["c"].ewm(span=12, adjust=False).mean()
     df["ema_slow"] = df["c"].ewm(span=26, adjust=False).mean()
 
-    # RSI (动能)
     delta = df["c"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -63,25 +61,21 @@ def get_candles() -> Optional[pd.DataFrame]:
     avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(100)  # 若 avg_loss=0，RSI=100
+    df["rsi"] = df["rsi"].fillna(100)
 
-    # MACD (动量)
     exp12 = df["c"].ewm(span=12, adjust=False).mean()
     exp26 = df["c"].ewm(span=26, adjust=False).mean()
     df["macd"] = exp12 - exp26
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
     df["macd_hist"] = df["macd"] - df["macd_signal"]
 
-    # 布林带 (波动)
     df["bb_mid"] = df["c"].rolling(20).mean()
     df["bb_std"] = df["c"].rolling(20).std()
     df["bb_upper"] = df["bb_mid"] + 2 * df["bb_std"]
     df["bb_lower"] = df["bb_mid"] - 2 * df["bb_std"]
 
-    # 成交量均线
     df["vol_ma"] = df["v"].rolling(10).mean()
 
-    # ATR (波动率)
     high_low = df["h"] - df["l"]
     high_close = (df["h"] - df["c"].shift()).abs()
     low_close = (df["l"] - df["c"].shift()).abs()
@@ -116,7 +110,6 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
     score = 50
     reasons = []
 
-    # 趋势因子
     if last["ema_fast"] > last["ema_slow"]:
         score += 20
         reasons.append("EMA多")
@@ -124,7 +117,6 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
         score -= 18
         reasons.append("EMA空")
 
-    # 动能因子（边界值优化：包含30和70）
     rsi = last["rsi"]
     if 30 <= rsi <= 70:
         score += 10
@@ -135,9 +127,7 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
     elif rsi < 25:
         score += 5
         reasons.append("RSI超卖")
-    # 对于介于 70-75 和 25-30 之间的值，保持评分不变（不加减）
 
-    # MACD
     if last["macd_hist"] > 0:
         score += 12
         reasons.append("MACD多头")
@@ -145,7 +135,6 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
         score -= 12
         reasons.append("MACD空头")
 
-    # 突破因子（极端行情）
     extreme = False
     if last["c"] > last["bb_upper"] and last["v"] > last["vol_ma"] * vol_mult:
         extreme = True
@@ -156,7 +145,6 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
         score += 20
         reasons.append("跌破下轨")
 
-    # 情绪因子
     if ls_ratio < 0.95:
         score += 8
         reasons.append("多空极空")
@@ -169,10 +157,6 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
 def generate_signal(df: pd.DataFrame, ls_ratio: float,
                     vol_mult: float, prob_thresh: float,
                     sl_atr: float, tp_atr: float, entry_offset: float) -> dict:
-    """
-    生成完整交易信号
-    返回字典包含：方向、触发价、止损、止盈、入场区间、评分、理由
-    """
     if df is None or len(df) < 50:
         return {"direction": 0, "trigger": None, "sl": None, "tp": None,
                 "entry_range": "数据不足", "prob": 50, "reason": "数据不足"}
@@ -183,13 +167,9 @@ def generate_signal(df: pd.DataFrame, ls_ratio: float,
         return {"direction": 0, "trigger": None, "sl": None, "tp": None,
                 "entry_range": "指标计算中", "prob": 50, "reason": "指标暂未就绪"}
 
-    # 计算评分
     prob, reasons, extreme = calculate_score_and_reasons(last, ls_ratio, vol_mult)
-
-    # 趋势方向
     trend = 1 if last["ema_fast"] > last["ema_slow"] else -1
 
-    # 最终方向：只依赖趋势+评分（阈值对称）
     direction = 0
     if trend == 1 and prob > prob_thresh:
         direction = 1
@@ -201,7 +181,6 @@ def generate_signal(df: pd.DataFrame, ls_ratio: float,
         return {"direction": 0, "trigger": None, "sl": None, "tp": None,
                 "entry_range": "ATR无效", "prob": prob, "reason": "ATR异常"}
 
-    # 触发价：做多以上轨为基准，做空以下轨为基准（与信号逻辑一致）
     if direction == 1:
         trigger = last["bb_upper"]
         sl = trigger - atr * sl_atr
@@ -236,7 +215,6 @@ def main():
     st.set_page_config(layout="wide", page_title="ETH 高频信号·清晰版")
     st.title("📈 5分钟 ETH 高频信号系统（逻辑清晰版）")
 
-    # ---------- 侧边栏参数调节 ----------
     with st.sidebar:
         st.header("⚙️ 参数调节")
         vol_mult = st.slider("放量倍数", 0.8, 2.0, 1.0, 0.1,
@@ -247,7 +225,6 @@ def main():
         tp_atr = st.slider("止盈 (ATR倍数)", 1.5, 4.0, 2.5, 0.1)
         entry_offset = st.slider("入场区间半宽 (ATR倍数)", 0.2, 1.0, 0.5, 0.1)
 
-    # ---------- 获取数据 ----------
     with st.spinner("获取市场数据..."):
         df = get_candles()
         ls = get_ls_ratio()
@@ -256,26 +233,20 @@ def main():
         st.error("❌ 无法获取足够K线数据，请检查网络")
         return
 
-    # ---------- 生成信号 ----------
     signal = generate_signal(df, ls, vol_mult, prob_thresh,
                              sl_atr, tp_atr, entry_offset)
 
-    # ---------- 使用 session_state 记录上次方向，用于平仓提示（包含反转和消失） ----------
     if "last_direction" not in st.session_state:
         st.session_state.last_direction = 0
     current_dir = signal["direction"]
 
-    # 信号反转提示（多→空 或 空→多）
     if current_dir != 0 and current_dir != st.session_state.last_direction:
         if st.session_state.last_direction != 0:
             st.warning(f"⚠️ 信号反转：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}，反向开仓")
-    # 信号消失提示（有持仓变为无信号）
     if current_dir == 0 and st.session_state.last_direction != 0:
         st.warning(f"⚠️ 信号消失：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}")
-
     st.session_state.last_direction = current_dir
 
-    # ---------- 核心指标展示 ----------
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("胜率评分", f"{signal['prob']}%")
@@ -287,9 +258,8 @@ def main():
 
     st.caption(f"**信号理由**: {signal['reason']}")
 
-    # 止损止盈（如有）
     if signal["sl"] and signal["tp"]:
-        col4, col5 = st.columns([1,1])  # 显式指定等宽，避免渲染问题
+        col4, col5 = st.columns([1,1])
         with col4:
             st.metric("止损", f"{signal['sl']:.2f}")
         with col5:
@@ -297,7 +267,6 @@ def main():
     else:
         st.info("当前无明确交易信号，建议观望")
 
-    # 当前价格和触发价
     last_price = df.iloc[-1]["c"]
     col6, col7 = st.columns(2)
     with col6:
@@ -306,26 +275,25 @@ def main():
         trigger_disp = f"{signal['trigger']:.2f}" if signal["trigger"] else "--"
         st.metric("触发价", trigger_disp)
 
-    # ---------- K线图 ----------
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="K线"
     ))
-    # 布林带
     fig.add_trace(go.Scatter(x=df["time"], y=df["bb_upper"], line=dict(color='gray', width=1), name="布林上轨"))
     fig.add_trace(go.Scatter(x=df["time"], y=df["bb_lower"], line=dict(color='gray', width=1), name="布林下轨",
                              fill='tonexty', fillcolor='rgba(128,128,128,0.2)'))
-    # EMA
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_fast"], line=dict(color='orange', width=1), name="EMA12"))
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_slow"], line=dict(color='blue', width=1), name="EMA26"))
-    # 如果当前有触发价，用水平线标记
     if signal["trigger"]:
         fig.add_hline(y=signal["trigger"], line_dash="dash", line_color="red",
                       annotation_text="触发位", annotation_position="bottom right")
     fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
 
-    # 自动刷新
+    # 使用 width='stretch' 替代 use_container_width，消除警告
+    st.plotly_chart(fig, use_container_width=True)  # 当前版本仍支持
+    # 若要彻底消除警告，可替换为下一行：
+    # st.plotly_chart(fig, width='stretch')
+
     st_autorefresh(interval=60000, key="auto_refresh")
 
 if __name__ == "__main__":
