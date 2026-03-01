@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-工程级看盘 + 回测 + 胜率（最终版本）
+工程级看盘终端（最终整合 + 自动判断）
+功能：
+- 实时K线
+- FVG 标注
+- 多周期方向
+- 自动交易条件
+- 进场/止损/止盈
+- 自动仓位计算
 """
 
 import streamlit as st
@@ -14,20 +21,8 @@ from datetime import datetime
 # 配置
 # ===========================
 SYMBOL = "ETH-USDT"
-LIMIT = 300
+LIMIT = 200
 INTERVAL = "5m"
-
-# ===========================
-# 交易日志
-# ===========================
-trade_log = []
-
-def record_trade(entry, direction, result):
-    trade_log.append({"entry": entry, "direction": direction, "result": result})
-
-def win_rate():
-    total = len(trade_log)
-    return 0 if total == 0 else sum(1 for t in trade_log if t["result"] == "win") / total
 
 # ===========================
 # 数据获取
@@ -44,46 +39,82 @@ def fetch_okx(bar=INTERVAL, limit=LIMIT):
         df[["o","h","l","c"]] = df[["o","h","l","c"]].astype(float)
         df = df.sort_values("ts")
         return df
-    except:
+    except Exception as e:
+        st.error(f"数据获取失败: {e}")
         return None
 
 # ===========================
-# FVG
+# FVG 检测
 # ===========================
 def detect_fvg(df):
     fvg = []
     for i in range(2, len(df)):
         prev = df.iloc[i-2]
+        mid = df.iloc[i-1]
         cur = df.iloc[i]
 
+        # Bull FVG（上涨缺口）
         if prev["h"] < cur["l"]:
-            fvg.append({"type":"bull","low":prev["h"],"high":cur["l"],"ts":cur["ts"]})
+            fvg.append({
+                "type":"bull",
+                "low": prev["h"],
+                "high": cur["l"],
+                "ts": cur["ts"]
+            })
+
+        # Bear FVG（下跌缺口）
         if prev["l"] > cur["h"]:
-            fvg.append({"type":"bear","low":cur["h"],"high":prev["l"],"ts":cur["ts"]})
+            fvg.append({
+                "type":"bear",
+                "low": cur["h"],
+                "high": prev["l"],
+                "ts": cur["ts"]
+            })
     return fvg
 
 # ===========================
-# 多周期
+# 扫单极值
+# ===========================
+def sweep_levels(df):
+    highs = df["h"].rolling(10).max()
+    lows = df["l"].rolling(10).min()
+    return highs.dropna().iloc[-1], lows.dropna().iloc[-1]
+
+# ===========================
+# 波段评分（5m）
+# ===========================
+def swing_score(df):
+    df["ema20"] = df["c"].ewm(span=20).mean()
+    df["ema50"] = df["c"].ewm(span=50).mean()
+
+    last = df.iloc[-1]
+    score = 0
+
+    if last["ema20"] > last["ema50"]:
+        score += 2
+    else:
+        score -= 2
+
+    if last["c"] > last["ema20"]:
+        score += 1
+    else:
+        score -= 1
+
+    return score
+
+# ===========================
+# 高周期方向（1H）
 # ===========================
 def higher_tf_score():
     df = fetch_okx(bar="1H", limit=100)
     if df is None or df.empty:
         return 0
-    df["ema20"] = df["c"].ewm(span=20).mean()
-    df["ema50"] = df["c"].ewm(span=50).mean()
-    return 1 if df.iloc[-1]["ema20"] > df.iloc[-1]["ema50"] else -1
 
-# ===========================
-# 波段评分
-# ===========================
-def swing_score(df):
     df["ema20"] = df["c"].ewm(span=20).mean()
     df["ema50"] = df["c"].ewm(span=50).mean()
+
     last = df.iloc[-1]
-    score = 0
-    score += 2 if last["ema20"] > last["ema50"] else -2
-    score += 1 if last["c"] > last["ema20"] else -1
-    return score
+    return 1 if last["ema20"] > last["ema50"] else -1
 
 # ===========================
 # 自动交易条件
@@ -91,127 +122,106 @@ def swing_score(df):
 def trade_condition(df):
     score_5m = swing_score(df)
     score_1h = higher_tf_score()
-    high = df["h"].rolling(10).max().dropna().iloc[-1]
-    low = df["l"].rolling(10).min().dropna().iloc[-1]
+
+    high, low = sweep_levels(df)
     last = df["c"].iloc[-1]
 
-    long = score_5m > 1 and score_1h > 0 and last <= low * 1.005
-    short = score_5m < -1 and score_1h < 0 and last >= high * 0.995
+    # 做多条件
+    long_cond = (
+        score_5m > 1 and
+        score_1h > 0 and
+        last <= low * 1.005 and
+        last >= low * 0.995
+    )
 
-    return "long" if long else "short" if short else "wait"
+    # 做空条件
+    short_cond = (
+        score_5m < -1 and
+        score_1h < 0 and
+        last >= high * 0.995 and
+        last <= high * 1.005
+    )
+
+    if long_cond:
+        return "long"
+    elif short_cond:
+        return "short"
+    else:
+        return "wait"
+
+# ===========================
+# 仓位计算（风险1%）
+# ===========================
+def calc_position_size(account, entry, stop):
+    risk = account * 0.01
+    distance = abs(entry - stop)
+    if distance == 0:
+        return 0
+    return risk / distance
 
 # ===========================
 # 动态止损 / 止盈
 # ===========================
 def dynamic_levels(high, low):
-    return (
-        low * 0.997,  # 多止损
-        low * 1.015,  # 多止盈
-        high * 1.003, # 空止损
-        high * 0.985  # 空止盈
-    )
+    sl_long = low * 0.997
+    sl_short = high * 1.003
 
-# ===========================
-# 回测（历史胜率）
-# ===========================
-def backtest(df):
-    wins = 0
-    total = 0
+    tp_long = low * 1.015
+    tp_short = high * 0.985
 
-    for i in range(20, len(df)):
-        window = df.iloc[:i]
-        signal = trade_condition(window)
-
-        if signal == "wait":
-            continue
-
-        entry = window["c"].iloc[-1]
-        high = window["h"].rolling(10).max().dropna().iloc[-1]
-        low = window["l"].rolling(10).min().dropna().iloc[-1]
-        sl_long, tp_long, sl_short, tp_short = dynamic_levels(high, low)
-
-        future = df.iloc[i:i+50]
-
-        if signal == "long":
-            total += 1
-            if any(future["c"] >= tp_long):
-                wins += 1
-            elif any(future["c"] <= sl_long):
-                pass
-
-        if signal == "short":
-            total += 1
-            if any(future["c"] <= tp_short):
-                wins += 1
-            elif any(future["c"] >= sl_short):
-                pass
-
-    return 0 if total == 0 else wins / total
+    return sl_long, tp_long, sl_short, tp_short
 
 # ===========================
 # 主界面
 # ===========================
 def main():
-    st.set_page_config(layout="wide")
-    st.title("工程级看盘 + 回测终版")
+    st.title("工程级看盘终端（自动判断版）")
 
     df = fetch_okx()
     if df is None or df.empty:
         st.warning("暂无数据")
         return
 
-    # 回测
-    bt_rate = backtest(df)
-    st.subheader("回测胜率")
-    st.write(f"{bt_rate * 100:.2f}%")
-
-    # 实时
+    # 关键计算
+    high, low = sweep_levels(df)
+    sl_long, tp_long, sl_short, tp_short = dynamic_levels(high, low)
     score_5m = swing_score(df)
     score_1h = higher_tf_score()
+
+    # 自动交易条件
     signal = trade_condition(df)
 
-    st.subheader("实时判断")
+    st.subheader("自动交易判断")
     if signal == "long":
-        st.success("做多")
+        st.success("自动判断：做多")
     elif signal == "short":
-        st.error("做空")
+        st.error("自动判断：做空")
     else:
-        st.info("观望")
+        st.info("自动判断：观望")
 
-    # 胜率统计
-    result = None
-    if signal != "wait":
-        high = df["h"].rolling(10).max().dropna().iloc[-1]
-        low = df["l"].rolling(10).min().dropna().iloc[-1]
-        sl_long, tp_long, sl_short, tp_short = dynamic_levels(high, low)
-        price = df["c"].iloc[-1]
+    # 多周期一致性
+    if score_1h > 0 and score_5m > 1:
+        st.success("多周期一致：做多倾向")
+    elif score_1h < 0 and score_5m < -1:
+        st.error("多周期一致：做空倾向")
+    else:
+        st.info("周期分歧")
 
-        if signal == "long":
-            result = "win" if price >= tp_long else "lose" if price <= sl_long else None
-        if signal == "short":
-            result = "win" if price <= tp_short else "lose" if price >= sl_short else None
-
-        if result:
-            record_trade(price, signal, result)
-
-    st.subheader("胜率统计")
-    st.write(f"总交易: {len(trade_log)}")
-    st.write(f"胜率: {win_rate() * 100:.2f}%")
-
-    # K线
+    # K线图
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["ts"],
         open=df["o"],
         high=df["h"],
         low=df["l"],
-        close=df["c"],
-        increasing_line_color="#26a69a",
-        decreasing_line_color="#ef5350"
+        close=df["c"]
     ))
 
     last_ts = df["ts"].iloc[-1]
-    for gap in detect_fvg(df):
+
+    # FVG 标注
+    fvg = detect_fvg(df)
+    for gap in fvg:
         fig.add_shape(
             type="rect",
             x0=gap["ts"],
@@ -222,21 +232,54 @@ def main():
             line_width=0
         )
 
-    fig.update_layout(xaxis_rangeslider_visible=False)
+    # 进场标记
+    fig.add_trace(go.Scatter(
+        x=[last_ts],
+        y=[low],
+        mode="markers+text",
+        text=["多单进场"],
+        textposition="top center"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[last_ts],
+        y=[high],
+        mode="markers+text",
+        text=["空单进场"],
+        textposition="bottom center"
+    ))
+
+    # 止损 / 止盈
+    fig.add_hline(y=sl_long, line_dash="dash", annotation_text="多单止损")
+    fig.add_hline(y=tp_long, line_dash="dot", annotation_text="多单止盈")
+
+    fig.add_hline(y=sl_short, line_dash="dash", annotation_text="空单止损")
+    fig.add_hline(y=tp_short, line_dash="dot", annotation_text="空单止盈")
+
     st.plotly_chart(fig, use_container_width=True)
 
-    # 信息
-    st.subheader("多周期")
-    if score_1h > 0 and score_5m > 1:
-        st.success("多周期一致：做多")
-    elif score_1h < 0 and score_5m < -1:
-        st.error("多周期一致：做空")
-    else:
-        st.info("周期分歧")
+    # 仓位计算
+    st.subheader("自动仓位计算（风险1%）")
+    account = st.number_input("账户资金", value=10000)
+    entry = df["c"].iloc[-1]
+    stop = sl_long if score_5m > 1 else sl_short
 
-    st.subheader("评分")
-    st.write(f"5m: {score_5m}")
-    st.write(f"1h: {score_1h}")
+    size = calc_position_size(account, entry, stop)
+    st.write(f"建议仓位（合约价值）：{size:.2f}")
+
+    # 关键价格
+    st.subheader("关键价格")
+    st.write(f"扫单高点: {high:.2f}")
+    st.write(f"扫单低点: {low:.2f}")
+    st.write(f"多单止损: {sl_long:.2f}")
+    st.write(f"多单止盈: {tp_long:.2f}")
+    st.write(f"空单止损: {sl_short:.2f}")
+    st.write(f"空单止盈: {tp_short:.2f}")
+    st.write(f"最新价: {entry:.2f}")
+
+    st.subheader("波段评分")
+    st.write(f"5m评分: {score_5m}")
+    st.write(f"1h评分: {score_1h}")
 
 if __name__ == "__main__":
     main()
