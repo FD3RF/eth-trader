@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-OKX UI 风格复刻看盘终端（工程级）
+工程级看盘 + 回测 + 胜率（最终版本）
 """
 
 import streamlit as st
@@ -8,16 +8,29 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 import numpy as np
+from datetime import datetime
 
 # ===========================
 # 配置
 # ===========================
 SYMBOL = "ETH-USDT"
-LIMIT = 200
+LIMIT = 300
 INTERVAL = "5m"
 
 # ===========================
-# 数据
+# 交易日志
+# ===========================
+trade_log = []
+
+def record_trade(entry, direction, result):
+    trade_log.append({"entry": entry, "direction": direction, "result": result})
+
+def win_rate():
+    total = len(trade_log)
+    return 0 if total == 0 else sum(1 for t in trade_log if t["result"] == "win") / total
+
+# ===========================
+# 数据获取
 # ===========================
 def fetch_okx(bar=INTERVAL, limit=LIMIT):
     url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={bar}&limit={limit}"
@@ -61,7 +74,7 @@ def higher_tf_score():
     return 1 if df.iloc[-1]["ema20"] > df.iloc[-1]["ema50"] else -1
 
 # ===========================
-# 评分
+# 波段评分
 # ===========================
 def swing_score(df):
     df["ema20"] = df["c"].ewm(span=20).mean()
@@ -73,7 +86,7 @@ def swing_score(df):
     return score
 
 # ===========================
-# 自动判断
+# 自动交易条件
 # ===========================
 def trade_condition(df):
     score_5m = swing_score(df)
@@ -88,42 +101,76 @@ def trade_condition(df):
     return "long" if long else "short" if short else "wait"
 
 # ===========================
-# 仓位
+# 动态止损 / 止盈
 # ===========================
-def calc_position_size(account, entry, stop):
-    risk = account * 0.01
-    distance = abs(entry - stop)
-    return risk / distance if distance else 0
-
-# ===========================
-# UI
-# ===========================
-def main():
-    st.set_page_config(
-        page_title="OKX 看盘终端",
-        layout="wide",
-        initial_sidebar_state="collapsed"
+def dynamic_levels(high, low):
+    return (
+        low * 0.997,  # 多止损
+        low * 1.015,  # 多止盈
+        high * 1.003, # 空止损
+        high * 0.985  # 空止盈
     )
 
-    st.markdown("""
-    <style>
-    body { background-color: #0b0f19; }
-    .stApp { background: #0b0f19; }
-    </style>
-    """, unsafe_allow_html=True)
+# ===========================
+# 回测（历史胜率）
+# ===========================
+def backtest(df):
+    wins = 0
+    total = 0
 
-    st.title("OKX 风格看盘终端")
+    for i in range(20, len(df)):
+        window = df.iloc[:i]
+        signal = trade_condition(window)
+
+        if signal == "wait":
+            continue
+
+        entry = window["c"].iloc[-1]
+        high = window["h"].rolling(10).max().dropna().iloc[-1]
+        low = window["l"].rolling(10).min().dropna().iloc[-1]
+        sl_long, tp_long, sl_short, tp_short = dynamic_levels(high, low)
+
+        future = df.iloc[i:i+50]
+
+        if signal == "long":
+            total += 1
+            if any(future["c"] >= tp_long):
+                wins += 1
+            elif any(future["c"] <= sl_long):
+                pass
+
+        if signal == "short":
+            total += 1
+            if any(future["c"] <= tp_short):
+                wins += 1
+            elif any(future["c"] >= sl_short):
+                pass
+
+    return 0 if total == 0 else wins / total
+
+# ===========================
+# 主界面
+# ===========================
+def main():
+    st.set_page_config(layout="wide")
+    st.title("工程级看盘 + 回测终版")
 
     df = fetch_okx()
     if df is None or df.empty:
         st.warning("暂无数据")
         return
 
+    # 回测
+    bt_rate = backtest(df)
+    st.subheader("回测胜率")
+    st.write(f"{bt_rate * 100:.2f}%")
+
+    # 实时
     score_5m = swing_score(df)
     score_1h = higher_tf_score()
     signal = trade_condition(df)
 
-    # 信号
+    st.subheader("实时判断")
     if signal == "long":
         st.success("做多")
     elif signal == "short":
@@ -131,9 +178,28 @@ def main():
     else:
         st.info("观望")
 
+    # 胜率统计
+    result = None
+    if signal != "wait":
+        high = df["h"].rolling(10).max().dropna().iloc[-1]
+        low = df["l"].rolling(10).min().dropna().iloc[-1]
+        sl_long, tp_long, sl_short, tp_short = dynamic_levels(high, low)
+        price = df["c"].iloc[-1]
+
+        if signal == "long":
+            result = "win" if price >= tp_long else "lose" if price <= sl_long else None
+        if signal == "short":
+            result = "win" if price <= tp_short else "lose" if price >= sl_short else None
+
+        if result:
+            record_trade(price, signal, result)
+
+    st.subheader("胜率统计")
+    st.write(f"总交易: {len(trade_log)}")
+    st.write(f"胜率: {win_rate() * 100:.2f}%")
+
     # K线
     fig = go.Figure()
-
     fig.add_trace(go.Candlestick(
         x=df["ts"],
         open=df["o"],
@@ -144,7 +210,6 @@ def main():
         decreasing_line_color="#ef5350"
     ))
 
-    # FVG
     last_ts = df["ts"].iloc[-1]
     for gap in detect_fvg(df):
         fig.add_shape(
@@ -157,16 +222,10 @@ def main():
             line_width=0
         )
 
-    fig.update_layout(
-        xaxis_rangeslider_visible=False,
-        template="plotly_dark",
-        margin=dict(l=0, r=0, t=20, b=0)
-    )
-
+    fig.update_layout(xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
     # 信息
-    st.markdown("---")
     st.subheader("多周期")
     if score_1h > 0 and score_5m > 1:
         st.success("多周期一致：做多")
@@ -178,9 +237,6 @@ def main():
     st.subheader("评分")
     st.write(f"5m: {score_5m}")
     st.write(f"1h: {score_1h}")
-
-    st.subheader("最新价")
-    st.write(f"{df['c'].iloc[-1]:.2f}")
 
 if __name__ == "__main__":
     main()
