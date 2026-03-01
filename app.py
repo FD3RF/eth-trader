@@ -1374,15 +1374,19 @@ def main():
     flow_colors = ['#00cc77' if x > 0 else '#ff6b6b' for x in df['net_flow']]
     fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=4, col=1)
 
-    # 子图标签设置（左侧中上，淡色）
+    # 子图标签（修复：使用域坐标，避免无效的 yref）
+    fig.add_annotation(x=0.02, y=0.95, xref="x domain", yref="y domain", text="Stochastic", showarrow=False,
+                       font=dict(size=9, color="#888"), row=2, col=1)
+    fig.add_annotation(x=0.02, y=0.95, xref="x domain", yref="y domain", text="ADX", showarrow=False,
+                       font=dict(size=9, color="#888"), row=3, col=1)
+    fig.add_annotation(x=0.02, y=0.95, xref="x domain", yref="y domain", text="资金净流", showarrow=False,
+                       font=dict(size=9, color="#888"), row=4, col=1)
+
+    # 隐藏子图刻度标签
     fig.update_yaxes(title_text="", row=2, col=1, showticklabels=False, showgrid=False)
     fig.update_yaxes(title_text="", row=3, col=1, showticklabels=False, showgrid=False)
     fig.update_yaxes(title_text="", row=4, col=1, showticklabels=False, showgrid=False)
     fig.update_xaxes(title_text="", row=4, col=1)
-    # 添加子图名称（淡灰）
-    fig.add_annotation(x=0, y=0.38, xref="paper", yref="row2 domain", text="Stochastic", showarrow=False, font=dict(size=9, color="#888"))
-    fig.add_annotation(x=0, y=0.38, xref="paper", yref="row3 domain", text="ADX", showarrow=False, font=dict(size=9, color="#888"))
-    fig.add_annotation(x=0, y=0.38, xref="paper", yref="row4 domain", text="资金净流", showarrow=False, font=dict(size=9, color="#888"))
 
     fig.update_layout(
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
