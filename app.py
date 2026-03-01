@@ -7,39 +7,43 @@ import time
 from datetime import datetime, timedelta
 import numpy as np
 import plotly.io as pio
+from itertools import product
 
-# ====================== 安全配置（必须使用secrets）======================
+# ====================== 安全配置 ======================
+# 强制使用 secrets.toml，不得硬编码
 try:
     API_KEY = st.secrets["API_KEY"]
     API_SECRET = st.secrets["API_SECRET"]
     PASSPHRASE = st.secrets["PASSPHRASE"]
-except Exception as e:
+except Exception:
     st.error("❌ 请在 .streamlit/secrets.toml 中配置您的OKX API密钥")
     st.stop()
 
 # ====================== 页面配置 ======================
-st.set_page_config(layout="wide", page_title="专业量化决策引擎·完美版", page_icon="📊")
+st.set_page_config(layout="wide", page_title="专业量化决策引擎·终版", page_icon="📊")
 
-# 自定义主题模板
 pio.templates['custom_dark'] = pio.templates['plotly_dark']
 pio.templates['custom_light'] = pio.templates['plotly']
 
 # ====================== 状态初始化 ======================
 def init_state():
+    """初始化所有会话状态变量"""
     defaults = {
         'ls_ratio': 1.0,
         'ls_history': pd.DataFrame(),
         'last_cleanup': time.time(),
         'theme': 'dark',
         'alarm_on': False,
-        'logs': [],
         'tg_token': '',
         'tg_chat_id': '',
-        'equity_curve': [10000.0],          # 模拟账户净值曲线
-        'balance': 10000.0,                  # 模拟余额
-        'position': 0.0,                      # 模拟持仓
-        'trade_history': [],                  # 交易记录
-        'last_signal_prob': 50.0               # 上次信号胜率，用于去重推送
+        'last_signal_prob': 50.0,
+        'backtest_trades': None,
+        'backtest_equity': None,
+        'backtest_metrics': None,
+        'opt_params': None,
+        'opt_metrics': None,
+        'opt_trades': None,
+        'opt_equity': None
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -49,37 +53,24 @@ init_state()
 
 # ====================== 工具函数 ======================
 def light_cleanup():
-    """轻量级内存清理（每24小时清缓存）"""
+    """每日清理缓存，防止内存膨胀"""
     if time.time() - st.session_state.last_cleanup > 86400:
         st.cache_data.clear()
         st.session_state.last_cleanup = time.time()
 
 def send_telegram(msg):
-    """发送Telegram消息"""
+    """发送 Telegram 消息，失败静默"""
     if st.session_state.tg_token and st.session_state.tg_chat_id:
         try:
             url = f"https://api.telegram.org/bot{st.session_state.tg_token}/sendMessage"
-            requests.post(url, json={"chat_id": st.session_state.tg_chat_id, "text": msg, "parse_mode": "HTML"})
-        except Exception as e:
-            st.warning(f"Telegram发送失败: {e}")
+            requests.post(url, json={"chat_id": st.session_state.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=3)
+        except:
+            pass  # 静默失败，不影响主程序
 
-def bayesian_update(prior, evidence):
-    """
-    贝叶斯更新函数
-    prior: 先验概率（0-1之间）
-    evidence: 新证据（0-1之间）
-    返回后验概率（百分比）
-    """
-    denominator = prior * evidence + (1 - prior) * (1 - evidence)
-    if denominator == 0:
-        return 50.0
-    posterior = (prior * evidence) / denominator
-    return posterior * 100
-
-# ====================== 数据获取（带缓存和降级）======================
+# ====================== 数据获取 ======================
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
-    """获取最新多空比，失败时返回上次有效值"""
+    """获取最新多空比，失败返回上次有效值"""
     for attempt in range(3):
         try:
             url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
@@ -88,8 +79,7 @@ def get_ls_ratio():
                 return float(res['data'][0][1])
             time.sleep(0.3)
         except:
-            pass
-    # 返回上次存储的值
+            continue
     return st.session_state.get('ls_ratio', 1.0)
 
 @st.cache_data(ttl=300, max_entries=20)
@@ -105,15 +95,14 @@ def get_ls_history(limit=24):
             df['ts'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
             df['ratio'] = df['long'].astype(float) / df['short'].astype(float)
             return df[['ts', 'ratio']]
-    except Exception as e:
-        st.warning(f"多空比历史获取失败: {e}")
+    except Exception:
+        pass
     return pd.DataFrame()
 
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
-    """获取K线并计算所有技术指标"""
+    """获取K线并计算实时技术指标"""
     try:
-        # 获取K线
         url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit={limit}"
         res = requests.get(url, timeout=6).json()
         if res.get('code') != '0':
@@ -124,149 +113,224 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(inplace=True)
 
-        # ---------- 技术指标计算 ----------
-        # EMA
+        # 基础指标
         df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
         df['ema_s'] = df['c'].ewm(span=s_ema, adjust=False).mean()
-
-        # RSI (14)
         delta = df['c'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
         rs = gain / loss.replace(0, np.nan)
         df['rsi'] = 100 - (100 / (1 + rs))
-
-        # MACD (12,26,9)
         ema12 = df['c'].ewm(span=12, adjust=False).mean()
         ema26 = df['c'].ewm(span=26, adjust=False).mean()
         df['macd'] = ema12 - ema26
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
-
-        # 布林带 (20,2)
         df['bb_mid'] = df['c'].rolling(20).mean()
         df['bb_std'] = df['c'].rolling(20).std()
         df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
         df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
-
-        # 成交量移动平均
         df['vol_ma'] = df['v'].rolling(10).mean()
-
-        # ATR (14)
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
 
-        # 资金净流入（基于最近100笔成交数据）
+        # 资金净流入（基于最近100笔成交）
         trades_res = requests.get("https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100", timeout=5).json()
         if trades_res.get('code') == '0':
             trades_df = pd.DataFrame(trades_res['data'], columns=['ts', 'px', 'sz', 'side'])
             trades_df['ts'] = pd.to_datetime(trades_df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
             trades_df['sz'] = trades_df['sz'].astype(float)
-            # 按分钟聚合净流入（主动买 - 主动卖）
             trades_df['minute'] = trades_df['ts'].dt.floor('min')
             agg = trades_df.groupby('minute').apply(
                 lambda x: x[x['side'] == 'buy']['sz'].sum() - x[x['side'] == 'sell']['sz'].sum()
             ).reset_index(name='net_flow')
-            df = df.merge(agg, left_on='time', right_on='minute', how='left')
-            df['net_flow'].fillna(0, inplace=True)
+            if not agg.empty:
+                df = df.merge(agg, left_on='time', right_on='minute', how='left')
+                df['net_flow'].fillna(0, inplace=True)
+            else:
+                df['net_flow'] = 0
         else:
             df['net_flow'] = 0
-
         return df
     except Exception as e:
         st.error(f"K线获取失败: {e}")
         return None
 
-# ====================== 信号生成与策略计划 ======================
-def generate_signal(df, ls_ratio):
+@st.cache_data(ttl=3600, max_entries=10)
+def fetch_historical_candles(bar, start_date, end_date, f_ema, s_ema):
+    """获取历史K线用于回测（自动分页）"""
+    all_dfs = []
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
+    current_end = end_ts
+    request_count = 0
+    max_requests = 200
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    try:
+        while current_end > start_ts and request_count < max_requests:
+            url = f"https://www.okx.com/api/v5/market/history-candles?instId=ETH-USDT&bar={bar}&limit=100&after={current_end}"
+            res = requests.get(url, timeout=10).json()
+            if res.get('code') != '0':
+                st.error(f"历史数据获取失败: {res.get('msg')}")
+                break
+            data = res.get('data', [])
+            if not data:
+                break
+            df_seg = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
+            df_seg = df_seg[::-1]
+            df_seg['time'] = pd.to_datetime(df_seg['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
+            for col in ['o','h','l','c','v']:
+                df_seg[col] = pd.to_numeric(df_seg[col], errors='coerce')
+            df_seg.dropna(inplace=True)
+            all_dfs.append(df_seg)
+            current_end = int(df_seg['ts'].iloc[0]) - 1
+            request_count += 1
+            progress_bar.progress(min(request_count / (max_requests * 0.1), 1.0))
+            if current_end <= start_ts:
+                break
+    except Exception as e:
+        st.error(f"请求历史数据出错: {e}")
+    finally:
+        progress_bar.empty()
+        status_text.empty()
+
+    if not all_dfs:
+        return None
+
+    df = pd.concat(all_dfs, ignore_index=True)
+    df = df.sort_values('time').reset_index(drop=True)
+    df = df[df['time'] >= pd.Timestamp(start_date).tz_localize('Asia/Shanghai')].reset_index(drop=True)
+
+    # 计算指标（同实时）
+    df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
+    df['ema_s'] = df['c'].ewm(span=s_ema, adjust=False).mean()
+    delta = df['c'].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['rsi'] = 100 - (100 / (1 + rs))
+    ema12 = df['c'].ewm(span=12, adjust=False).mean()
+    ema26 = df['c'].ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    df['bb_mid'] = df['c'].rolling(20).mean()
+    df['bb_std'] = df['c'].rolling(20).std()
+    df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
+    df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
+    df['vol_ma'] = df['v'].rolling(10).mean()
+    tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(14).mean()
+    df['net_flow'] = 0  # 历史无法获取
+    return df
+
+# ====================== 信号生成（权重参数化）======================
+def generate_signal(df, ls_ratio, weights=None):
     """
-    多因子模型计算胜率，并返回详细交易计划
-    返回: (胜率, 方向(1多/-1空/0观望), 入场区字符串, 止损价, 止盈价, 理由字符串)
+    多因子信号生成，返回 (胜率, 方向, 入场区, 止损, 止盈, 理由)
+    weights 可自定义，默认使用内部权重
     """
     if df is None or len(df) < 30:
         return 50.0, 0, "数据不足", None, None, "数据不足"
+
+    # 默认权重（与原始逻辑一致）
+    default_weights = {
+        'ema_cross': (20, -18),
+        'rsi_mid': 10,
+        'rsi_overbought': -10,
+        'rsi_oversold': 5,
+        'macd_hist_pos': 12,
+        'macd_hist_neg': -12,
+        'bb_upper': -15,
+        'bb_lower': 10,
+        'volume_surge': 8,
+        'volume_shrink': -4,
+        'net_flow_pos': 15,
+        'net_flow_neg': -15,
+        'ls_ratio_low': 8,
+        'ls_ratio_high': -8
+    }
+    if weights is None:
+        weights = default_weights
 
     last = df.iloc[-1]
     score = 50.0
     reasons = []
 
-    # 1. EMA金叉/死叉
+    # EMA
+    ema_pos, ema_neg = weights['ema_cross']
     if last['ema_f'] > last['ema_s']:
-        score += 20
+        score += ema_pos
         reasons.append("EMA金叉")
     else:
-        score -= 18
+        score += ema_neg
         reasons.append("EMA死叉")
 
-    # 2. RSI
+    # RSI
     if 30 < last['rsi'] < 70:
-        score += 10
+        score += weights['rsi_mid']
         reasons.append(f"RSI中性({last['rsi']:.1f})")
     elif last['rsi'] > 75:
-        score -= 10
+        score += weights['rsi_overbought']
         reasons.append(f"RSI超买({last['rsi']:.1f})")
     elif last['rsi'] < 25:
-        score += 5
+        score += weights['rsi_oversold']
         reasons.append(f"RSI超卖({last['rsi']:.1f})")
     else:
         reasons.append(f"RSI={last['rsi']:.1f}")
 
-    # 3. MACD柱状图
+    # MACD
     if last['macd_hist'] > 0:
-        score += 12
+        score += weights['macd_hist_pos']
         reasons.append("MACD柱为正")
     else:
-        score -= 12
+        score += weights['macd_hist_neg']
         reasons.append("MACD柱为负")
 
-    # 4. 布林带位置
+    # 布林带
     if last['c'] > last['bb_upper']:
-        score -= 15
+        score += weights['bb_upper']
         reasons.append("价格突破上轨")
     elif last['c'] < last['bb_lower']:
-        score += 10
+        score += weights['bb_lower']
         reasons.append("价格跌破下轨")
     else:
         reasons.append("价格在布林带内")
 
-    # 5. 成交量确认
+    # 成交量
     if last['v'] > last['vol_ma'] * 1.3:
-        score += 8
+        score += weights['volume_surge']
         reasons.append("放量")
     else:
-        score -= 4
+        score += weights['volume_shrink']
         reasons.append("缩量")
 
-    # 6. 资金净流入
+    # 资金净流
     if last['net_flow'] > 0:
-        score += 15
+        score += weights['net_flow_pos']
         reasons.append("资金净流入")
     else:
-        score -= 15
+        score += weights['net_flow_neg']
         reasons.append("资金净流出")
 
-    # 7. 多空比（作为反向指标）
+    # 多空比
     if ls_ratio < 0.95:
-        score += 8
+        score += weights['ls_ratio_low']
         reasons.append("多空比<0.95(空头极端)")
     elif ls_ratio > 1.05:
-        score -= 8
+        score += weights['ls_ratio_high']
         reasons.append("多空比>1.05(多头极端)")
     else:
         reasons.append(f"多空比={ls_ratio:.2f}")
 
     prob = max(min(score, 95), 5)  # 限制在5~95之间
 
-    # 判断方向
-    if prob > 55:
-        direction = 1
-    elif prob < 45:
-        direction = -1
-    else:
-        direction = 0
+    # 方向判断
+    direction = 1 if prob > 55 else (-1 if prob < 45 else 0)
 
-    # 基于ATR计算动态止损止盈
+    # 基于ATR的止损止盈
     atr = last['atr'] if not pd.isna(last['atr']) else df['atr'].mean() if not df['atr'].isna().all() else 10.0
     if direction == 1:
         entry_zone = f"{last['c']-atr*0.5:.1f} ~ {last['c']+atr*0.5:.1f}"
@@ -278,16 +342,257 @@ def generate_signal(df, ls_ratio):
         tp = last['c'] - atr * 2.5
     else:
         entry_zone = "观望"
-        sl = None
-        tp = None
+        sl = tp = None
 
     reason_str = " | ".join(reasons)
     return prob, direction, entry_zone, sl, tp, reason_str
 
+# ====================== 回测核心 ======================
+def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
+    """
+    在历史数据上执行回测，返回交易记录和权益曲线
+    注意：回测中多空比固定为1.0（历史不可得）
+    """
+    if df is None or len(df) < 50:
+        return None, None, "数据不足"
+
+    balance = initial_balance
+    position = 0.0
+    equity_curve = [balance]
+    trades = []
+    in_trade = False
+    entry_price = 0.0
+    stop_loss = 0.0
+    take_profit = 0.0
+    direction = 0
+    entry_index = 0
+
+    for i in range(30, len(df)):
+        row = df.iloc[i]
+        # 使用历史数据生成信号（多空比固定1.0）
+        prob, sig_dir, _, _, _, _ = generate_signal(df.iloc[:i+1], 1.0, weights=weights)
+
+        if not in_trade:
+            # 开仓逻辑
+            if sig_dir == 1:
+                entry_price = row['c']
+                atr = row['atr'] if not pd.isna(row['atr']) else df['atr'].mean()
+                stop_loss = entry_price - atr * 1.5
+                take_profit = entry_price + atr * 2.5
+                direction = 1
+                risk_amount = balance * risk_percent / 100
+                if abs(entry_price - stop_loss) > 1e-8:
+                    position = risk_amount / abs(entry_price - stop_loss)
+                else:
+                    position = 0
+                if position > 0:
+                    in_trade = True
+                    entry_index = i
+            elif sig_dir == -1:
+                entry_price = row['c']
+                atr = row['atr'] if not pd.isna(row['atr']) else df['atr'].mean()
+                stop_loss = entry_price + atr * 1.5
+                take_profit = entry_price - atr * 2.5
+                direction = -1
+                risk_amount = balance * risk_percent / 100
+                if abs(entry_price - stop_loss) > 1e-8:
+                    position = risk_amount / abs(entry_price - stop_loss)
+                else:
+                    position = 0
+                if position > 0:
+                    in_trade = True
+                    entry_index = i
+        else:
+            # 持仓中检查止损止盈
+            high, low = row['h'], row['l']
+            exit_price = None
+            exit_reason = ""
+            if direction == 1:
+                if low <= stop_loss:
+                    exit_price = stop_loss
+                    exit_reason = "止损"
+                elif high >= take_profit:
+                    exit_price = take_profit
+                    exit_reason = "止盈"
+            else:
+                if high >= stop_loss:
+                    exit_price = stop_loss
+                    exit_reason = "止损"
+                elif low <= take_profit:
+                    exit_price = take_profit
+                    exit_reason = "止盈"
+            if exit_price is not None:
+                pnl = (exit_price - entry_price) * position if direction == 1 else (entry_price - exit_price) * position
+                balance += pnl
+                trades.append({
+                    'entry_time': df.iloc[entry_index]['time'],
+                    'exit_time': row['time'],
+                    'direction': '多' if direction == 1 else '空',
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'position': position,
+                    'pnl': pnl,
+                    'pnl_pct': (pnl / (entry_price * position) * 100) if position != 0 else 0,
+                    'reason': exit_reason
+                })
+                position = 0
+                in_trade = False
+
+        # 更新权益曲线（持仓按市价）
+        current_equity = balance
+        if in_trade:
+            if direction == 1:
+                current_equity += position * row['c']
+            else:
+                current_equity -= position * row['c']
+        equity_curve.append(current_equity)
+
+    # 最后平仓
+    if in_trade:
+        last_row = df.iloc[-1]
+        exit_price = last_row['c']
+        pnl = (exit_price - entry_price) * position if direction == 1 else (entry_price - exit_price) * position
+        balance += pnl
+        trades.append({
+            'entry_time': df.iloc[entry_index]['time'],
+            'exit_time': last_row['time'],
+            'direction': '多' if direction == 1 else '空',
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'position': position,
+            'pnl': pnl,
+            'pnl_pct': (pnl / (entry_price * position) * 100) if position != 0 else 0,
+            'reason': '期末平仓'
+        })
+        equity_curve[-1] = balance  # 修正最后一刻的权益
+
+    trades_df = pd.DataFrame(trades)
+    return trades_df, equity_curve, "回测完成"
+
+def calculate_metrics(trades_df, equity_curve, initial_balance):
+    """计算回测绩效指标"""
+    if trades_df is None or len(trades_df) == 0:
+        return {}
+    win_trades = trades_df[trades_df['pnl'] > 0]
+    win_rate = len(win_trades) / len(trades_df) * 100
+    final_balance = equity_curve[-1] if equity_curve else initial_balance
+    total_return = (final_balance - initial_balance) / initial_balance * 100
+
+    # 年化收益率（基于实际交易天数）
+    if len(trades_df) > 0 and 'exit_time' in trades_df.columns:
+        start_date = trades_df['entry_time'].min()
+        end_date = trades_df['exit_time'].max()
+        days = (end_date - start_date).days
+        if days > 0:
+            annual_return = ((final_balance / initial_balance) ** (365 / days) - 1) * 100
+        else:
+            annual_return = 0
+    else:
+        annual_return = 0
+
+    # 最大回撤
+    equity_series = pd.Series(equity_curve)
+    rolling_max = equity_series.expanding().max()
+    drawdown = (equity_series - rolling_max) / rolling_max * 100
+    max_drawdown = drawdown.min()
+
+    # 夏普比率（年化，无风险利率0）
+    if len(equity_curve) > 1:
+        returns = pd.Series(equity_curve).pct_change().dropna()
+        sharpe = returns.mean() / returns.std() * np.sqrt(365) if returns.std() > 0 else 0
+    else:
+        sharpe = 0
+
+    # 盈利因子
+    avg_win = win_trades['pnl'].mean() if len(win_trades) > 0 else 0
+    avg_loss = trades_df[trades_df['pnl'] < 0]['pnl'].mean() if len(trades_df[trades_df['pnl'] < 0]) > 0 else 0
+    profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else np.inf
+
+    return {
+        '胜率 (%)': f"{win_rate:.2f}",
+        '总收益率 (%)': f"{total_return:.2f}",
+        '年化收益率 (%)': f"{annual_return:.2f}",
+        '最大回撤 (%)': f"{max_drawdown:.2f}",
+        '夏普比率': f"{sharpe:.2f}",
+        '盈利因子': f"{profit_factor:.2f}",
+        '交易次数': len(trades_df)
+    }
+
+# ====================== 网格搜索 ======================
+def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_grid, metric='sharpe'):
+    """
+    网格搜索最优权重组合
+    param_grid 需包含固定的15个键（顺序固定）
+    """
+    keys = ['ema_cross_pos', 'ema_cross_neg', 'rsi_mid', 'rsi_overbought', 'rsi_oversold',
+            'macd_hist_pos', 'macd_hist_neg', 'bb_upper', 'bb_lower',
+            'volume_surge', 'volume_shrink', 'net_flow_pos', 'net_flow_neg',
+            'ls_ratio_low', 'ls_ratio_high']
+    values = [param_grid[k] for k in keys]
+    combinations = list(product(*values))
+    total = len(combinations)
+    if total > 5000:
+        st.warning(f"组合数过多 ({total})，可能耗时很长。建议减少搜索范围。")
+    best_score = -np.inf
+    best_params = None
+    best_metrics = None
+    best_trades = None
+    best_equity = None
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, combo in enumerate(combinations):
+        # 构建权重字典
+        weights = {
+            'ema_cross': (combo[0], combo[1]),
+            'rsi_mid': combo[2],
+            'rsi_overbought': combo[3],
+            'rsi_oversold': combo[4],
+            'macd_hist_pos': combo[5],
+            'macd_hist_neg': combo[6],
+            'bb_upper': combo[7],
+            'bb_lower': combo[8],
+            'volume_surge': combo[9],
+            'volume_shrink': combo[10],
+            'net_flow_pos': combo[11],
+            'net_flow_neg': combo[12],
+            'ls_ratio_low': combo[13],
+            'ls_ratio_high': combo[14]
+        }
+        trades_df, equity_curve, msg = run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights)
+        if trades_df is None or len(trades_df) == 0:
+            continue
+        metrics = calculate_metrics(trades_df, equity_curve, initial_balance)
+        # 提取目标指标
+        if metric == 'sharpe':
+            score = float(metrics.get('夏普比率', 0))
+        elif metric == 'return':
+            score = float(metrics.get('总收益率 (%)', 0))
+        elif metric == 'win_rate':
+            score = float(metrics.get('胜率 (%)', 0))
+        elif metric == 'profit_factor':
+            score = float(metrics.get('盈利因子', 0))
+        else:
+            score = float(metrics.get('夏普比率', 0))
+
+        if score > best_score:
+            best_score = score
+            best_params = combo
+            best_metrics = metrics
+            best_trades = trades_df
+            best_equity = equity_curve
+
+        progress_bar.progress((idx + 1) / total)
+        status_text.text(f"已测试 {idx+1}/{total} 组，当前最优 {metric}={best_score:.2f}")
+
+    progress_bar.empty()
+    status_text.empty()
+    return best_params, best_metrics, best_trades, best_equity
+
 # ====================== 侧边栏UI ======================
 def render_sidebar(df):
     with st.sidebar:
-        st.title("📊 专业量化引擎·完美版")
+        st.title("📊 专业量化引擎·终版")
         st.caption("基于OKX实时数据 | 多因子模型")
 
         # 刷新控制
@@ -310,11 +615,10 @@ def render_sidebar(df):
 
         st.divider()
 
-        # 仓位计算器（入场价默认使用最新价格）
+        # 仓位计算器
         with st.expander("💰 仓位计算器 (固定风险)", expanded=True):
             risk_pct = st.slider("单笔风险 (%)", 0.1, 5.0, 1.0, 0.1)
             account_balance = st.number_input("账户余额 (USDT)", 1000.0, 1000000.0, 10000.0)
-            # 默认入场价取最新价格，若无数据则用3000
             default_entry = float(df['c'].iloc[-1]) if df is not None and not df.empty else 3000.0
             entry_price = st.number_input("计划入场价", value=default_entry, format="%.2f")
             stop_price = st.number_input("止损价", value=entry_price * 0.98, format="%.2f")
@@ -331,6 +635,109 @@ def render_sidebar(df):
             st.session_state.tg_chat_id = st.text_input("Chat ID", value=st.session_state.get('tg_chat_id', ''))
             st.caption("创建Bot后 /myid 获取Chat ID")
 
+        # 历史回测
+        with st.expander("📈 历史回测", expanded=False):
+            st.caption("选择时间段进行策略回测")
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("开始日期", datetime.now() - timedelta(days=30))
+            with col2:
+                end_date = st.date_input("结束日期", datetime.now())
+            backtest_balance = st.number_input("初始资金 (USDT)", 1000.0, 1000000.0, 10000.0, key="backtest_balance")
+            backtest_risk = st.slider("回测风险 (%)", 0.1, 5.0, 1.0, 0.1, key="backtest_risk")
+            if st.button("🚀 开始回测"):
+                with st.spinner("正在获取历史数据并回测..."):
+                    df_hist = fetch_historical_candles(tf, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"), f_ema, s_ema)
+                    if df_hist is not None:
+                        trades_df, equity_curve, msg = run_backtest(df_hist, backtest_balance, backtest_risk, f_ema, s_ema)
+                        if trades_df is not None:
+                            metrics = calculate_metrics(trades_df, equity_curve, backtest_balance)
+                            st.session_state['backtest_trades'] = trades_df
+                            st.session_state['backtest_equity'] = equity_curve
+                            st.session_state['backtest_metrics'] = metrics
+                            st.success("回测完成！")
+                        else:
+                            st.error(msg)
+                    else:
+                        st.error("无法获取历史数据")
+
+        # 因子优化
+        with st.expander("⚙️ 因子权重优化 (网格搜索)", expanded=False):
+            st.caption("设置各因子权重的搜索范围，点击开始优化（可能耗时较长）")
+            col1, col2 = st.columns(2)
+            with col1:
+                ema_pos_range = st.text_input("EMA金叉加分", "15,20,25")
+                ema_neg_range = st.text_input("EMA死叉减分", "-20,-18,-15")
+                rsi_mid_range = st.text_input("RSI中性加分", "5,10,15")
+                rsi_overbought_range = st.text_input("RSI超买减分", "-15,-10,-5")
+                rsi_oversold_range = st.text_input("RSI超卖加分", "0,5,10")
+                macd_pos_range = st.text_input("MACD柱正加分", "8,12,15")
+                macd_neg_range = st.text_input("MACD柱负减分", "-15,-12,-8")
+            with col2:
+                bb_upper_range = st.text_input("突破上轨减分", "-20,-15,-10")
+                bb_lower_range = st.text_input("跌破下轨加分", "5,10,15")
+                vol_surge_range = st.text_input("放量加分", "5,8,12")
+                vol_shrink_range = st.text_input("缩量减分", "-6,-4,-2")
+                flow_pos_range = st.text_input("净流入加分", "10,15,20")
+                flow_neg_range = st.text_input("净流出减分", "-20,-15,-10")
+                ls_low_range = st.text_input("多空比<0.95加分", "5,8,12")
+                ls_high_range = st.text_input("多空比>1.05减分", "-12,-8,-5")
+
+            metric_opt = st.selectbox("优化目标", ["夏普比率", "总收益率", "胜率", "盈利因子"])
+            opt_balance = st.number_input("优化初始资金 (USDT)", 1000.0, 1000000.0, 10000.0, key="opt_balance")
+            opt_risk = st.slider("优化风险 (%)", 0.1, 5.0, 1.0, 0.1, key="opt_risk")
+
+            def parse_range(s):
+                items = [x.strip() for x in s.split(',') if x.strip()]
+                return [float(x) for x in items]
+
+            if st.button("🚀 开始优化"):
+                param_grid = {
+                    'ema_cross_pos': parse_range(ema_pos_range),
+                    'ema_cross_neg': parse_range(ema_neg_range),
+                    'rsi_mid': parse_range(rsi_mid_range),
+                    'rsi_overbought': parse_range(rsi_overbought_range),
+                    'rsi_oversold': parse_range(rsi_oversold_range),
+                    'macd_hist_pos': parse_range(macd_pos_range),
+                    'macd_hist_neg': parse_range(macd_neg_range),
+                    'bb_upper': parse_range(bb_upper_range),
+                    'bb_lower': parse_range(bb_lower_range),
+                    'volume_surge': parse_range(vol_surge_range),
+                    'volume_shrink': parse_range(vol_shrink_range),
+                    'net_flow_pos': parse_range(flow_pos_range),
+                    'net_flow_neg': parse_range(flow_neg_range),
+                    'ls_ratio_low': parse_range(ls_low_range),
+                    'ls_ratio_high': parse_range(ls_high_range)
+                }
+                for k, v in param_grid.items():
+                    if not v:
+                        st.error(f"{k} 输入不能为空")
+                        st.stop()
+                with st.spinner("正在优化，请耐心等待..."):
+                    df_hist = fetch_historical_candles(
+                        tf,
+                        (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"),
+                        datetime.now().strftime("%Y-%m-%d"),
+                        f_ema, s_ema
+                    )
+                    if df_hist is None:
+                        st.error("无法获取历史数据")
+                        st.stop()
+                    best_params, best_metrics, best_trades, best_equity = grid_search_weights(
+                        df_hist, opt_balance, opt_risk, f_ema, s_ema, param_grid,
+                        metric='sharpe' if metric_opt == '夏普比率' else
+                               'return' if metric_opt == '总收益率' else
+                               'win_rate' if metric_opt == '胜率' else 'profit_factor'
+                    )
+                    if best_params:
+                        st.session_state['opt_params'] = best_params
+                        st.session_state['opt_metrics'] = best_metrics
+                        st.session_state['opt_trades'] = best_trades
+                        st.session_state['opt_equity'] = best_equity
+                        st.success("优化完成！")
+                    else:
+                        st.error("优化失败，未找到有效参数组合")
+
         return hb, pause, symbol, tf, f_ema, s_ema
 
 # ====================== 主界面 ======================
@@ -344,25 +751,25 @@ def main():
     if not ls_history.empty:
         st.session_state.ls_history = ls_history
 
-    # 先获取初始K线数据（用于侧边栏默认价格）
+    # 初始数据（用于侧边栏默认价格）
     df_init = get_candles(bar="15m", limit=100, f_ema=12, s_ema=26)
     if df_init is None:
-        st.error("无法获取K线数据，请检查网络或API")
+        st.error("无法获取初始K线数据")
         st.stop()
 
-    # 侧边栏（传入df_init用于默认价格）
+    # 侧边栏
     hb, pause, symbol, tf, f_ema, s_ema = render_sidebar(df_init)
 
-    # 根据用户选择的参数重新获取K线数据
+    # 获取最新K线（按用户参数）
     df = get_candles(bar=tf, limit=100, f_ema=f_ema, s_ema=s_ema)
     if df is None:
-        st.error("无法获取K线数据，请检查网络或API")
+        st.error("无法获取K线数据")
         st.stop()
 
-    # 生成信号
+    # 生成实时信号
     prob, direction, entry_zone, sl, tp, reason = generate_signal(df, ls_ratio)
 
-    # Telegram推送（仅当胜率变化超过阈值且与上次不同）
+    # Telegram推送（避免重复）
     if (prob > 70 or prob < 30) and abs(prob - st.session_state.last_signal_prob) > 5:
         if prob > 70:
             emoji = "🚀"
@@ -370,7 +777,7 @@ def main():
         else:
             emoji = "⚠️"
             side = "空头"
-        rr = abs((tp - df['c'].iloc[-1]) / (df['c'].iloc[-1] - sl)) if sl and tp else 0
+        rr = abs((tp - df['c'].iloc[-1]) / (df['c'].iloc[-1] - sl)) if sl and tp and abs(df['c'].iloc[-1] - sl) > 1e-8 else 0
         msg = f"""{emoji} {side}信号！
 交易对: {symbol} | {tf}
 胜率: {prob:.1f}%
@@ -390,7 +797,7 @@ def main():
     # 标题
     st.markdown(f"""
         <h1 style='text-align: center; color: #00ff88; font-family: "Courier New", monospace;'>
-            专业量化决策引擎·完美版
+            专业量化决策引擎·终版
         </h1>
         <h4 style='text-align: center; color: #aaa; margin-top: -10px;'>
             {symbol} | {tf} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -407,7 +814,7 @@ def main():
 
     st.divider()
 
-    # 详细策略计划卡片
+    # 策略卡片
     if direction == 1:
         box_color = "#00ff88"
         action = "🔥 多头策略"
@@ -417,8 +824,7 @@ def main():
     else:
         box_color = "#FFD700"
         action = "⚖️ 观望"
-
-    rr_value = abs((tp - df['c'].iloc[-1]) / (df['c'].iloc[-1] - sl)) if sl and tp and abs(df['c'].iloc[-1] - sl) > 0 else 0
+    rr_value = abs((tp - df['c'].iloc[-1]) / (df['c'].iloc[-1] - sl)) if sl and tp and abs(df['c'].iloc[-1] - sl) > 1e-8 else 0
     st.markdown(f"""
     <div style="border:2px solid {box_color}; border-radius:15px; padding:20px; margin-bottom:20px; background:rgba(0,0,0,0.3);">
         <h2 style="color:{box_color}; margin:0;">{action}</h2>
@@ -435,41 +841,25 @@ def main():
     """, unsafe_allow_html=True)
 
     # 主图表（K线 + 指标）
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.02,
-        row_heights=[0.6, 0.2, 0.2],
-        subplot_titles=("价格 & 指标", "MACD", "资金净流")
-    )
-
-    # 主图
-    fig.add_trace(go.Candlestick(
-        x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
-        name="K线", showlegend=False
-    ), row=1, col=1)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.02,
+                        row_heights=[0.6, 0.2, 0.2],
+                        subplot_titles=("价格 & 指标", "MACD", "资金净流"))
+    fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
+                                 name="K线", showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['ema_f'], line=dict(color='#00ff88', width=2), name="EMA快线"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['ema_s'], line=dict(color='#ff4b4b', width=2), name="EMA慢线"), row=1, col=1)
-    # 布林带填充
     fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB上轨"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB下轨", fill='tonexty', fillcolor='rgba(255,255,255,0.05)'), row=1, col=1)
-
-    # MACD
+    fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB下轨",
+                             fill='tonexty', fillcolor='rgba(255,255,255,0.05)'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], line=dict(color='#00ff88', width=1.5), name="MACD"), row=2, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['macd_signal'], line=dict(color='#ff4b4b', width=1.5), name="信号线"), row=2, col=1)
     colors_hist = ['#00ff88' if val > 0 else '#ff4b4b' for val in df['macd_hist']]
     fig.add_trace(go.Bar(x=df['time'], y=df['macd_hist'], marker_color=colors_hist, name="MACD柱"), row=2, col=1)
-
-    # 净流
     flow_colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
     fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=3, col=1)
-
     fig.update_layout(
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
-        height=750,  # 略降低高度以适配更多屏幕
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=30, b=10),
-        hovermode='x unified'
+        height=750, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10), hovermode='x unified'
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -478,21 +868,63 @@ def main():
         st.subheader("🌡️ 多空情绪温度计 (过去24小时)")
         ls_df = st.session_state.ls_history
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(
-            x=ls_df['ts'], y=ls_df['ratio'],
-            mode='lines+markers',
-            line=dict(color='cyan', width=2),
-            fill='tozeroy',
-            fillcolor='rgba(0,255,255,0.1)',
-            name='多空比'
-        ))
+        fig2.add_trace(go.Scatter(x=ls_df['ts'], y=ls_df['ratio'], mode='lines+markers',
+                                  line=dict(color='cyan', width=2), fill='tozeroy',
+                                  fillcolor='rgba(0,255,255,0.1)', name='多空比'))
         fig2.add_hline(y=1.0, line_dash="dash", line_color="gray", annotation_text="多空平衡")
         fig2.update_layout(
             template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
-            height=250,
-            margin=dict(l=0, r=0, t=10, b=0)
+            height=250, margin=dict(l=0, r=0, t=10, b=0)
         )
         st.plotly_chart(fig2, use_container_width=True)
+
+    # 显示回测结果
+    if st.session_state.get('backtest_metrics'):
+        with st.expander("📊 回测结果", expanded=False):
+            metrics = st.session_state['backtest_metrics']
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("胜率", metrics['胜率 (%)'])
+            col2.metric("总收益率", metrics['总收益率 (%)'])
+            col3.metric("最大回撤", metrics['最大回撤 (%)'])
+            col4.metric("夏普比率", metrics['夏普比率'])
+            col1.metric("年化收益率", metrics['年化收益率 (%)'])
+            col2.metric("盈利因子", metrics['盈利因子'])
+            col3.metric("交易次数", metrics['交易次数'])
+            if st.session_state.get('backtest_equity'):
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(y=st.session_state['backtest_equity'], mode='lines', name='权益曲线', line=dict(color='#00ff88')))
+                fig_eq.update_layout(title="账户权益曲线", height=300, template='plotly_dark' if st.session_state.theme == 'dark' else 'plotly')
+                st.plotly_chart(fig_eq, use_container_width=True)
+            if st.session_state.get('backtest_trades') is not None:
+                st.subheader("交易记录")
+                display_df = st.session_state['backtest_trades'][['entry_time', 'exit_time', 'direction', 'entry_price', 'exit_price', 'pnl', 'pnl_pct', 'reason']].copy()
+                display_df['entry_time'] = display_df['entry_time'].dt.strftime('%m-%d %H:%M')
+                display_df['exit_time'] = display_df['exit_time'].dt.strftime('%m-%d %H:%M')
+                display_df['pnl'] = display_df['pnl'].round(2)
+                display_df['pnl_pct'] = display_df['pnl_pct'].round(2)
+                st.dataframe(display_df, use_container_width=True)
+
+    # 显示优化结果
+    if st.session_state.get('opt_metrics'):
+        with st.expander("🏆 最优权重组合", expanded=False):
+            st.subheader("最优权重")
+            param_names = ['EMA金叉', 'EMA死叉', 'RSI中性', 'RSI超买', 'RSI超卖',
+                           'MACD柱正', 'MACD柱负', '突破上轨', '跌破下轨',
+                           '放量', '缩量', '净流入', '净流出', '多空比低', '多空比高']
+            param_df = pd.DataFrame({'因子': param_names, '权重': st.session_state['opt_params']})
+            st.dataframe(param_df, use_container_width=True)
+            st.subheader("优化指标")
+            metrics = st.session_state['opt_metrics']
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("胜率", metrics['胜率 (%)'])
+            col2.metric("总收益率", metrics['总收益率 (%)'])
+            col3.metric("最大回撤", metrics['最大回撤 (%)'])
+            col4.metric("夏普比率", metrics['夏普比率'])
+            if st.session_state.get('opt_equity'):
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(y=st.session_state['opt_equity'], mode='lines', name='最优权益', line=dict(color='#ffaa00')))
+                fig_eq.update_layout(title="最优参数权益曲线", height=300, template='plotly_dark' if st.session_state.theme == 'dark' else 'plotly')
+                st.plotly_chart(fig_eq, use_container_width=True)
 
     # 刷新控制
     if not pause:
