@@ -1,130 +1,132 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import ta
+import requests
 import plotly.graph_objects as go
+import pandas_ta as ta
+from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 
-st.set_page_config(layout="wide")
+# =========================
+# 配置
+# =========================
+SYMBOL = "ETH-USDT"
+INTERVAL = "5m"
+LIMIT = 300
 
-st.title("5分钟高频趋势+震荡策略回测系统")
+# OKX API
+KLINE_URL = "https://www.okx.com/api/v5/market/candles"
 
-uploaded_file = st.file_uploader("上传5分钟K线CSV文件")
 
-risk_per_trade = st.sidebar.slider("单笔风险 %", 0.1, 5.0, 1.0)
-rr_ratio = st.sidebar.slider("止盈倍数 (R)", 0.3, 2.0, 0.6)
-initial_capital = st.sidebar.number_input("初始资金", value=10000)
+# =========================
+# 数据获取
+# =========================
+def fetch_kline(symbol=SYMBOL, interval=INTERVAL, limit=LIMIT):
+    params = {
+        "instId": symbol,
+        "bar": interval,
+        "limit": str(limit)
+    }
+    try:
+        r = requests.get(KLINE_URL, params=params, timeout=5)
+        data = r.json()
+        if data.get("code") != "0":
+            return pd.DataFrame()
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df.set_index('timestamp', inplace=True)
+        rows = data["data"]
+        df = pd.DataFrame(rows, columns=[
+            "ts", "o", "h", "l", "c", "vol", "volCcy", "volCcyQuote", "confirm"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+        df = df.sort_values("ts")
+        df[["o", "h", "l", "c", "vol"]] = df[["o", "h", "l", "c", "vol"]].astype(float)
+        return df
+    except Exception as e:
+        st.error(f"数据获取异常: {e}")
+        return pd.DataFrame()
 
-    # === 指标 ===
-    df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-    df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
-    df['bb_upper'] = ta.volatility.BollingerBands(df['close']).bollinger_hband()
-    df['bb_lower'] = ta.volatility.BollingerBands(df['close']).bollinger_lband()
-    df['bb_width'] = df['bb_upper'] - df['bb_lower']
 
-    df.dropna(inplace=True)
+# =========================
+# 技术指标
+# =========================
+def add_indicators(df):
+    if df.empty:
+        return df
 
-    capital = initial_capital
-    equity_curve = []
-    trades = []
+    df["ema20"] = ta.ema(df["c"], length=20)
+    df["ema50"] = ta.ema(df["c"], length=50)
+    df["rsi"] = ta.rsi(df["c"], length=14)
+    df["atr"] = ta.atr(df["h"], df["l"], df["c"], length=14)
 
-    position = None
+    return df
 
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i-1]
 
-        # === 趋势多单条件 ===
-        trend_long = (
-            row['ema9'] > row['ema21'] and
-            row['rsi'] > 52 and
-            prev['low'] <= prev['ema9'] and
-            row['close'] > prev['high']
-        )
+# =========================
+# 策略信号（基础）
+# =========================
+def signal(df):
+    if df.empty or len(df) < 50:
+        return "NO SIGNAL"
 
-        # === 趋势空单条件 ===
-        trend_short = (
-            row['ema9'] < row['ema21'] and
-            row['rsi'] < 48 and
-            prev['high'] >= prev['ema9'] and
-            row['close'] < prev['low']
-        )
+    last = df.iloc[-1]
 
-        # === 震荡模块 ===
-        range_long = (
-            row['close'] <= row['bb_lower'] and
-            row['bb_width'] < df['bb_width'].rolling(50).mean().iloc[i]
-        )
+    if last["ema20"] > last["ema50"] and last["rsi"] < 70:
+        return "LONG"
+    if last["ema20"] < last["ema50"] and last["rsi"] > 30:
+        return "SHORT"
 
-        range_short = (
-            row['close'] >= row['bb_upper'] and
-            row['bb_width'] < df['bb_width'].rolling(50).mean().iloc[i]
-        )
+    return "NO SIGNAL"
 
-        if position is None:
 
-            if trend_long or range_long:
-                entry = row['close']
-                stop = entry - row['atr']
-                target = entry + row['atr'] * rr_ratio
-                risk = capital * (risk_per_trade / 100)
-                position = ("long", entry, stop, target, risk)
-
-            elif trend_short or range_short:
-                entry = row['close']
-                stop = entry + row['atr']
-                target = entry - row['atr'] * rr_ratio
-                risk = capital * (risk_per_trade / 100)
-                position = ("short", entry, stop, target, risk)
-
-        else:
-            side, entry, stop, target, risk = position
-
-            if side == "long":
-                if row['low'] <= stop:
-                    capital -= risk
-                    trades.append(-risk)
-                    position = None
-                elif row['high'] >= target:
-                    profit = risk * rr_ratio
-                    capital += profit
-                    trades.append(profit)
-                    position = None
-
-            if side == "short":
-                if row['high'] >= stop:
-                    capital -= risk
-                    trades.append(-risk)
-                    position = None
-                elif row['low'] <= target:
-                    profit = risk * rr_ratio
-                    capital += profit
-                    trades.append(profit)
-                    position = None
-
-        equity_curve.append(capital)
-
-    df = df.iloc[-len(equity_curve):]
-    df['equity'] = equity_curve
-
-    # === 输出结果 ===
-    st.subheader("回测结果")
-
-    total_trades = len(trades)
-    win_rate = len([t for t in trades if t > 0]) / total_trades if total_trades > 0 else 0
-    net_profit = capital - initial_capital
-
-    st.write("总交易次数:", total_trades)
-    st.write("胜率:", round(win_rate * 100, 2), "%")
-    st.write("净利润:", round(net_profit, 2))
-    st.write("最终资金:", round(capital, 2))
-
+# =========================
+# 绘图
+# =========================
+def plot_chart(df):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['equity'], name="Equity Curve"))
+
+    fig.add_trace(go.Candlestick(
+        x=df["ts"],
+        open=df["o"],
+        high=df["h"],
+        low=df["l"],
+        close=df["c"]
+    ))
+
+    if "ema20" in df:
+        fig.add_trace(go.Scatter(x=df["ts"], y=df["ema20"], name="EMA20"))
+    if "ema50" in df:
+        fig.add_trace(go.Scatter(x=df["ts"], y=df["ema50"], name="EMA50"))
+
     st.plotly_chart(fig, use_container_width=True)
+
+
+# =========================
+# 主界面
+# =========================
+def main():
+    st.set_page_config(layout="wide", page_title="ETH Trader")
+
+    st.title("ETH 交易监控")
+
+    # 自动刷新
+    st_autorefresh(interval=60 * 1000, limit=None)
+
+    df = fetch_kline()
+    if df.empty:
+        st.warning("暂无数据")
+        return
+
+    df = add_indicators(df)
+    sig = signal(df)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("最新价格", f"{df.iloc[-1]['c']:.2f}")
+    with col2:
+        st.metric("信号", sig)
+
+    plot_chart(df)
+
+
+if __name__ == "__main__":
+    main()
