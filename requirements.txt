@@ -3,6 +3,3 @@ pandas
 numpy
 requests
 plotly
-hmmlearn
-sqlite3
-streamlit_autorefresh
