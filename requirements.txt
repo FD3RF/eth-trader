@@ -2,6 +2,6 @@ streamlit
 pandas
 numpy
 requests
-websocket-client
 plotly
+pandas-ta
 streamlit-autorefresh
