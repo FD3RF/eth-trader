@@ -1,5 +1,5 @@
 import os
-# 禁用 Streamlit 文件监控，避免 inotify 限制
+# 禁用文件监控，避免 inotify 限制
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import streamlit as st
@@ -20,7 +20,7 @@ except Exception:
     st.stop()
 
 # ====================== 页面配置 ======================
-st.set_page_config(layout="wide", page_title="交易级分析终端", page_icon="📊")
+st.set_page_config(layout="wide", page_title="交易级分析终端·极简版", page_icon="📊")
 
 # ====================== 全局样式 =======================
 st.markdown("""
@@ -55,7 +55,7 @@ st.markdown("""
         margin: 2px 0;
         font-size: 0.75rem;
     }
-    .factor-name { width: 70px; color: #aaa; }
+    .factor-name { width: 80px; color: #aaa; }
     .factor-bar-bg {
         flex: 1;
         height: 14px;
@@ -96,7 +96,7 @@ def safe_request(url, timeout=5, retries=2):
 
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
-    """获取最新多空比"""
+    """获取最新多空比（保留但权重已移除，仅用于展示）"""
     for _ in range(3):
         try:
             url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
@@ -107,9 +107,9 @@ def get_ls_ratio():
             pass
     return 1.0
 
-@st.cache_data(ttl=60, max_entries=50)  # 60秒缓存，自动刷新时数据会更新
+@st.cache_data(ttl=60, max_entries=50)
 def get_candles(bar="5m", limit=500):
-    """获取K线并计算所需技术指标"""
+    """获取K线并计算核心技术指标"""
     try:
         url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit={limit}"
         data = safe_request(url, timeout=6, retries=1)
@@ -123,26 +123,30 @@ def get_candles(bar="5m", limit=500):
         if len(df) < 50:
             return None
 
-        # 计算基础指标
+        # 核心指标计算
         df['ema_f'] = df['c'].ewm(span=12, adjust=False).mean()
         df['ema_s'] = df['c'].ewm(span=26, adjust=False).mean()
+
         delta = df['c'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
         rs = gain / loss.replace(0, np.nan)
         df['rsi'] = 100 - (100 / (1 + rs))
+
         ema12 = df['c'].ewm(span=12, adjust=False).mean()
         ema26 = df['c'].ewm(span=26, adjust=False).mean()
         df['macd'] = ema12 - ema26
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
+
         df['bb_mid'] = df['c'].rolling(20).mean()
         df['bb_std'] = df['c'].rolling(20).std()
         df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
         df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
+
         df['vol_ma'] = df['v'].rolling(10).mean()
 
-        # 资金净流入
+        # 资金净流（可选，保留用于参考）
         trades_url = "https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100"
         trades_data = safe_request(trades_url, timeout=5)
         if trades_data and trades_data.get('code') == '0':
@@ -162,24 +166,8 @@ def get_candles(bar="5m", limit=500):
         else:
             df['net_flow'] = 0
 
-        # Stochastic
-        low_14 = df['l'].rolling(14).min()
-        high_14 = df['h'].rolling(14).max()
-        df['stoch_k'] = 100 * (df['c'] - low_14) / (high_14 - low_14).replace(0, np.nan)
-        df['stoch_d'] = df['stoch_k'].rolling(3).mean()
-
-        # ADX
-        tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
-        df['+dm'] = np.where((df['h'] - df['h'].shift()) > (df['l'].shift() - df['l']), 
-                             np.maximum(df['h'] - df['h'].shift(), 0), 0)
-        df['-dm'] = np.where((df['l'].shift() - df['l']) > (df['h'] - df['h'].shift()), 
-                             np.maximum(df['l'].shift() - df['l'], 0), 0)
-        df['+di'] = 100 * (df['+dm'].rolling(14).mean() / tr.rolling(14).mean())
-        df['-di'] = 100 * (df['-dm'].rolling(14).mean() / tr.rolling(14).mean())
-        df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di']).replace(0, np.nan)
-        df['adx'] = df['dx'].rolling(14).mean()
-
         # ATR
+        tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
 
         return df
@@ -226,157 +214,107 @@ def get_trend_4h():
     except:
         return 0
 
-def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
-    """生成信号"""
+def generate_signal(df, ls_ratio):
+    """
+    极简信号生成：
+    - 仅保留核心因子：4H趋势、EMA、RSI、MACD、成交量、极点突破
+    - 方向判定：4H趋势确认 + 极点放量突破
+    - 胜率仅用于参考，不作为入场条件
+    """
     if df is None or len(df) < 50:
         return 50.0, 0, None, None, None, "", [], None, None
-
-    default_weights = {
-        'ema_cross': (20, -18),
-        'rsi_mid': 10,
-        'rsi_overbought': -10,
-        'rsi_oversold': 5,
-        'macd_hist_pos': 12,
-        'macd_hist_neg': -12,
-        'bb_upper': -15,
-        'bb_lower': 10,
-        'volume_surge': 8,
-        'volume_shrink': -4,
-        'net_flow_pos': 15,
-        'net_flow_neg': -15,
-        'ls_ratio_low': 8,
-        'ls_ratio_high': -8,
-        'trend4h': 18,
-        'extreme_break': 20,
-        'stoch_cross': 8,
-        'adx_strong': 6,
-        'mvrv_low': 12,
-        'mvrv_high': -15,
-    }
-    if weights is None:
-        weights = default_weights
 
     last = df.iloc[-1]
     score = 50.0
     reasons = []
     details = []
 
+    # 1. 4H趋势（权重最高）
     trend4h = get_trend_4h()
     if trend4h == 1:
-        score += weights['trend4h']
+        score += 20
         reasons.append("4H趋势多头")
-        details.append({"因子": "4H趋势", "状态": "多头", "贡献": weights['trend4h']})
+        details.append({"因子": "4H趋势", "状态": "多头", "贡献": 20})
     elif trend4h == -1:
-        score -= weights['trend4h']
+        score -= 20
         reasons.append("4H趋势空头")
-        details.append({"因子": "4H趋势", "状态": "空头", "贡献": -weights['trend4h']})
+        details.append({"因子": "4H趋势", "状态": "空头", "贡献": -20})
     else:
         details.append({"因子": "4H趋势", "状态": "不明", "贡献": 0})
 
-    ema_pos, ema_neg = weights['ema_cross']
+    # 2. EMA金叉/死叉
     if last['ema_f'] > last['ema_s']:
-        score += ema_pos
+        score += 15
         reasons.append("EMA金叉")
-        details.append({"因子": "EMA", "状态": "金叉", "贡献": ema_pos})
+        details.append({"因子": "EMA", "状态": "金叉", "贡献": 15})
     else:
-        score += ema_neg
+        score -= 15
         reasons.append("EMA死叉")
-        details.append({"因子": "EMA", "状态": "死叉", "贡献": ema_neg})
+        details.append({"因子": "EMA", "状态": "死叉", "贡献": -15})
 
+    # 3. RSI
     if not pd.isna(last['rsi']):
         if 30 < last['rsi'] < 70:
-            score += weights['rsi_mid']
+            score += 5
             reasons.append(f"RSI中性({last['rsi']:.1f})")
-            details.append({"因子": "RSI", "状态": "中性", "贡献": weights['rsi_mid']})
+            details.append({"因子": "RSI", "状态": "中性", "贡献": 5})
         elif last['rsi'] > 75:
-            score += weights['rsi_overbought']
+            score -= 10
             reasons.append(f"RSI超买({last['rsi']:.1f})")
-            details.append({"因子": "RSI", "状态": "超买", "贡献": weights['rsi_overbought']})
+            details.append({"因子": "RSI", "状态": "超买", "贡献": -10})
         elif last['rsi'] < 25:
-            score += weights['rsi_oversold']
+            score += 10
             reasons.append(f"RSI超卖({last['rsi']:.1f})")
-            details.append({"因子": "RSI", "状态": "超卖", "贡献": weights['rsi_oversold']})
+            details.append({"因子": "RSI", "状态": "超卖", "贡献": 10})
     else:
         details.append({"因子": "RSI", "状态": "NA", "贡献": 0})
 
+    # 4. MACD柱
     if last['macd_hist'] > 0:
-        score += weights['macd_hist_pos']
+        score += 10
         reasons.append("MACD柱为正")
-        details.append({"因子": "MACD", "状态": "柱正", "贡献": weights['macd_hist_pos']})
+        details.append({"因子": "MACD", "状态": "柱正", "贡献": 10})
     else:
-        score += weights['macd_hist_neg']
+        score -= 10
         reasons.append("MACD柱为负")
-        details.append({"因子": "MACD", "状态": "柱负", "贡献": weights['macd_hist_neg']})
+        details.append({"因子": "MACD", "状态": "柱负", "贡献": -10})
 
+    # 5. 成交量
+    if last['v'] > last['vol_ma'] * 1.3:
+        score += 8
+        reasons.append("放量")
+        details.append({"因子": "成交量", "状态": "放量", "贡献": 8})
+    else:
+        score -= 5
+        reasons.append("缩量")
+        details.append({"因子": "成交量", "状态": "缩量", "贡献": -5})
+
+    # 6. 极点突破（布林带+放量）
     extreme_break = False
     if last['c'] > last['bb_upper'] and last['v'] > last['vol_ma'] * 1.5:
         extreme_break = True
-        score += weights['extreme_break']
+        score += 15
         reasons.append("突破上轨放量")
-        details.append({"因子": "突破", "状态": "上轨放量", "贡献": weights['extreme_break']})
+        details.append({"因子": "极点突破", "状态": "上轨放量", "贡献": 15})
     elif last['c'] < last['bb_lower'] and last['v'] > last['vol_ma'] * 1.5:
         extreme_break = True
-        score += weights['extreme_break']
+        score += 15
         reasons.append("跌破下轨放量")
-        details.append({"因子": "突破", "状态": "下轨放量", "贡献": weights['extreme_break']})
+        details.append({"因子": "极点突破", "状态": "下轨放量", "贡献": 15})
     else:
-        details.append({"因子": "突破", "状态": "非极点", "贡献": 0})
-
-    if last['v'] > last['vol_ma'] * 1.3:
-        score += weights['volume_surge']
-        details.append({"因子": "成交量", "状态": "放量", "贡献": weights['volume_surge']})
-    else:
-        score += weights['volume_shrink']
-        details.append({"因子": "成交量", "状态": "缩量", "贡献": weights['volume_shrink']})
-
-    if last['net_flow'] > 0:
-        score += weights['net_flow_pos']
-        details.append({"因子": "资金净流", "状态": "净流入", "贡献": weights['net_flow_pos']})
-    else:
-        score += weights['net_flow_neg']
-        details.append({"因子": "资金净流", "状态": "净流出", "贡献": weights['net_flow_neg']})
-
-    if ls_ratio < 0.95:
-        score += weights['ls_ratio_low']
-        reasons.append("多空比极端空")
-        details.append({"因子": "多空比", "状态": "极空", "贡献": weights['ls_ratio_low']})
-    elif ls_ratio > 1.05:
-        score += weights['ls_ratio_high']
-        reasons.append("多空比极端多")
-        details.append({"因子": "多空比", "状态": "极多", "贡献": weights['ls_ratio_high']})
-    else:
-        details.append({"因子": "多空比", "状态": "中性", "贡献": 0})
-
-    if not pd.isna(last['stoch_k']) and not pd.isna(last['stoch_d']):
-        if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 20:
-            score += weights['stoch_cross']
-            reasons.append("Stoch超卖金叉")
-            details.append({"因子": "Stoch", "状态": "超卖金叉", "贡献": weights['stoch_cross']})
-        elif last['stoch_k'] < last['stoch_d'] and last['stoch_k'] > 80:
-            score -= weights['stoch_cross']
-            reasons.append("Stoch超买死叉")
-            details.append({"因子": "Stoch", "状态": "超买死叉", "贡献": -weights['stoch_cross']})
-
-    if not pd.isna(last['adx']) and last['adx'] > 25:
-        score += weights['adx_strong']
-        details.append({"因子": "ADX", "状态": "强趋势", "贡献": weights['adx_strong']})
-
-    if mvrv_z < 0:
-        score += weights['mvrv_low']
-        details.append({"因子": "MVRV", "状态": "低估", "贡献": weights['mvrv_low']})
-    elif mvrv_z > 7:
-        score += weights['mvrv_high']
-        details.append({"因子": "MVRV", "状态": "泡沫", "贡献": weights['mvrv_high']})
+        details.append({"因子": "极点突破", "状态": "无", "贡献": 0})
 
     prob = max(min(score, 95), 5)
 
-    if trend4h == 1 and extreme_break and prob > 60:
+    # 方向判定：必须同时满足4H趋势和极点突破
+    if trend4h == 1 and extreme_break and prob > 55:
         direction = 1
-    elif trend4h == -1 and extreme_break and prob < 40:
+    elif trend4h == -1 and extreme_break and prob < 45:
         direction = -1
     else:
         direction = 0
 
+    # 动态止损止盈（基于ATR）
     atr = last['atr'] if not pd.isna(last['atr']) else df['atr'].mean()
     if direction == 1:
         entry_zone = f"{last['c']-atr*0.5:.1f} ~ {last['c']+atr*0.5:.1f}"
@@ -397,11 +335,9 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
 
 # ====================== 主界面 ======================
 def main():
-    # 如果用户需要手动刷新，可以添加一个按钮
-    st.title("交易级分析终端")
-    st.caption("基于OKX实时数据 | 多因子模型 | 不自动交易")
+    st.title("交易级分析终端·极简版")
+    st.caption("基于OKX实时数据 | 核心因子 | 趋势+风控")
 
-    # 侧边栏控制刷新
     with st.sidebar:
         st.header("控制面板")
         auto_refresh = st.checkbox("开启自动刷新", value=True)
@@ -410,18 +346,15 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # 获取数据
     df = get_candles(bar="5m", limit=500)
     if df is None:
         st.error("无法获取K线数据")
         return
 
-    ls_ratio = get_ls_ratio()
-    mvrv_z = np.random.uniform(-1, 3)  # 模拟MVRV
+    ls_ratio = get_ls_ratio()  # 仅用于展示，不参与评分
+    prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio)
 
-    prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio, mvrv_z)
-
-    # ====================== 顶部指标卡片 ======================
+    # 顶部指标卡片
     cols = st.columns(5, gap="small")
     with cols[0]:
         st.markdown(f"""
@@ -462,7 +395,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # ====================== 进场策略卡片 ======================
+    # 进场策略卡片
     if direction != 0:
         strategy_color = "#00cc77" if direction==1 else "#ff6b6b"
         st.markdown(f"""
@@ -479,19 +412,16 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # ====================== 多因子贡献 ======================
+    # 因子贡献（仅显示非零因子）
     if details:
         st.markdown("---")
         st.subheader("📊 因子贡献")
         df_details = pd.DataFrame(details)
-        df_details['abs'] = df_details['贡献'].abs()
-        # 显示所有非零因子
-        df_details = df_details[df_details['贡献'] != 0].sort_values('abs', ascending=False)
-
+        df_details = df_details[df_details['贡献'] != 0]  # 只显示有影响的因子
         for _, row in df_details.iterrows():
             val = row['贡献']
             color = "#00cc77" if val > 0 else "#ff6b6b"
-            width = min(abs(val)/2, 100)  # 缩放显示
+            width = min(abs(val)/2, 100)
             st.markdown(f"""
             <div class="factor-bar">
                 <span class="factor-name">{row['因子']}</span>
@@ -502,7 +432,7 @@ def main():
             </div>
             """, unsafe_allow_html=True)
 
-    # ====================== K线图（添加EMA线）======================
+    # K线图
     st.markdown("---")
     st.subheader("📈 K线图")
     fig = go.Figure()
@@ -511,7 +441,6 @@ def main():
         increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
         line=dict(width=0.8), name="K线"
     ))
-    # 添加EMA快慢线，帮助分析
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_f"], line=dict(color='#00cc77', width=1), name="EMA12"))
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_s"], line=dict(color='#ff6b6b', width=1), name="EMA26"))
 
