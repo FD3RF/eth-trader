@@ -10,7 +10,6 @@ import plotly.graph_objects as go
 from collections import deque
 import websocket
 from streamlit_autorefresh import st_autorefresh
-import queue
 
 # ===============================
 # 配置参数
@@ -40,7 +39,7 @@ except Exception:
 if "df" not in st.session_state:
     st.session_state.df = pd.DataFrame()
 if "data_queue" not in st.session_state:
-    st.session_state.data_queue = queue.Queue(maxsize=20)  # 改用线程安全队列
+    st.session_state.data_queue = deque(maxlen=20)
 if "ws_status" not in st.session_state:
     st.session_state.ws_status = "连接中..."
 if "last_signal" not in st.session_state:
@@ -64,8 +63,7 @@ def on_message(ws, message):
                     "close": float(item[4]),
                     "volume": float(item[5])
                 }
-                # 将数据放入队列，主线程处理
-                st.session_state.data_queue.put(candle)
+                st.session_state.data_queue.append(candle)
     except Exception as e:
         print(f"消息解析错误: {e}")
 
@@ -101,8 +99,7 @@ def start_ws():
         time.sleep(WS_RETRY_INTERVAL)
 
 # 启动WebSocket线程（仅一次）
-if "ws_thread_started" not in st.session_state:
-    st.session_state.ws_thread_started = True
+if not any(thread.name == "OKX_WS" for thread in threading.enumerate()):
     thread = threading.Thread(target=start_ws, daemon=True, name="OKX_WS")
     thread.start()
 
@@ -154,13 +151,11 @@ def get_1h_trend():
 # 数据处理
 # ===============================
 def update_dataframe():
-    """从队列中取出新K线，更新DataFrame（去重、限长）"""
+    if not st.session_state.data_queue:
+        return False
     new_rows = []
-    while not st.session_state.data_queue.empty():
-        try:
-            new_rows.append(st.session_state.data_queue.get_nowait())
-        except queue.Empty:
-            break
+    while st.session_state.data_queue:
+        new_rows.append(st.session_state.data_queue.popleft())
     if not new_rows:
         return False
     new_df = pd.DataFrame(new_rows).drop_duplicates(subset=["time"]).sort_values("time")
@@ -217,7 +212,7 @@ def compute_indicators(df):
     return df
 
 # ===============================
-# 信号生成
+# 信号生成（多因子 + 趋势过滤 + 盈亏比检查）
 # ===============================
 def generate_signal(df, trend_1h, current_index):
     if len(df) < 50 or current_index < 50:
@@ -410,7 +405,7 @@ if len(df) >= 50:
         xaxis_rangeslider_visible=False,
         hovermode='x unified'
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')  # 替代 use_container_width=True
 
     # 信号历史
     if st.session_state.signal_history:
@@ -418,7 +413,7 @@ if len(df) >= 50:
         hist = list(st.session_state.signal_history)[-10:]
         hist_df = pd.DataFrame(hist)[['time','side','entry','stop','tp','rr']]
         hist_df['time'] = hist_df['time'].dt.strftime('%m-%d %H:%M')
-        st.dataframe(hist_df, use_container_width=True)
+        st.dataframe(hist_df, width='stretch')
 
 else:
     st.info("等待数据接入...")
