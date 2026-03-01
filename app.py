@@ -10,8 +10,6 @@ import plotly.io as pio
 from itertools import product
 import threading
 import traceback
-import math
-import random
 
 # ====================== 安全配置 ======================
 try:
@@ -91,12 +89,11 @@ def safe_request(url, timeout=5, retries=2):
             if res.status_code == 200:
                 return res.json()
             elif res.status_code == 429:
-                # 限流：尝试读取 Retry-After 头
                 retry_after = res.headers.get('Retry-After')
                 if retry_after:
                     wait = int(retry_after)
                 else:
-                    wait = 2 ** i  # 指数退避
+                    wait = 2 ** i
                 print(f"HTTP 429 限流，等待 {wait} 秒后重试")
                 time.sleep(wait)
                 continue
@@ -138,6 +135,7 @@ def get_ls_history(limit=24):
 
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
+    """获取K线并计算实时技术指标"""
     try:
         url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit={limit}"
         data = safe_request(url, timeout=6, retries=1)
@@ -172,7 +170,7 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
 
-        # 资金净流入
+        # 资金净流入（基于最近100笔成交）
         trades_url = "https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100"
         trades_data = safe_request(trades_url, timeout=5)
         if trades_data and trades_data.get('code') == '0':
@@ -180,12 +178,15 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
             trades_df['ts'] = pd.to_datetime(trades_df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
             trades_df['sz'] = trades_df['sz'].astype(float)
             trades_df['minute'] = trades_df['ts'].dt.floor('min')
+            # 修复：添加 include_groups=False
             agg = trades_df.groupby('minute').apply(
-                lambda x: x[x['side'] == 'buy']['sz'].sum() - x[x['side'] == 'sell']['sz'].sum()
+                lambda x: x[x['side'] == 'buy']['sz'].sum() - x[x['side'] == 'sell']['sz'].sum(),
+                include_groups=False
             ).reset_index(name='net_flow')
             if not agg.empty:
                 df = df.merge(agg, left_on='time', right_on='minute', how='left')
-                df['net_flow'].fillna(0, inplace=True)
+                # 修复：不使用 inplace
+                df['net_flow'] = df['net_flow'].fillna(0)
             else:
                 df['net_flow'] = 0
         else:
@@ -197,16 +198,18 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
 
 @st.cache_resource(ttl=3600, max_entries=5)
 def fetch_historical_candles(bar, start_date, end_date, f_ema, s_ema):
-    """获取历史K线，使用资源缓存，返回DataFrame"""
+    """获取历史K线用于回测（自动分页）"""
     all_dfs = []
     start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
     end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
     current_end = end_ts
-    max_requests = 200
     request_count = 0
+    max_requests = 200
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    while current_end > start_ts and request_count < max_requests:
-        try:
+    try:
+        while current_end > start_ts and request_count < max_requests:
             url = f"https://www.okx.com/api/v5/market/history-candles?instId=ETH-USDT&bar={bar}&limit=100&after={current_end}"
             data = safe_request(url, timeout=10, retries=1)
             if not data or data.get('code') != '0':
@@ -223,11 +226,14 @@ def fetch_historical_candles(bar, start_date, end_date, f_ema, s_ema):
             all_dfs.append(df_seg)
             current_end = int(df_seg['ts'].iloc[0]) - 1
             request_count += 1
+            progress_bar.progress(min(request_count / (max_requests * 0.1), 1.0))
             if current_end <= start_ts:
                 break
-        except Exception as e:
-            print(f"历史数据请求异常: {e}")
-            break
+    except Exception as e:
+        st.error(f"请求历史数据出错: {e}")
+    finally:
+        progress_bar.empty()
+        status_text.empty()
 
     if not all_dfs:
         return None
@@ -258,14 +264,19 @@ def fetch_historical_candles(bar, start_date, end_date, f_ema, s_ema):
     df['vol_ma'] = df['v'].rolling(10).mean()
     tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-    df['net_flow'] = 0  # 历史数据无法获取净流入
+    df['net_flow'] = 0
     return df
 
-# ====================== 信号生成 ======================
+# ====================== 信号生成（权重参数化）======================
 def generate_signal(df, ls_ratio, weights=None):
+    """
+    多因子信号生成，返回 (胜率, 方向, 入场区, 止损, 止盈, 理由)
+    weights 可自定义，默认使用内部权重
+    """
     if df is None or len(df) < 30:
         return 50.0, 0, "数据不足", None, None, "数据不足"
 
+    # 默认权重（与原始逻辑一致）
     default_weights = {
         'ema_cross': (20, -18),
         'rsi_mid': 10,
@@ -289,6 +300,7 @@ def generate_signal(df, ls_ratio, weights=None):
     score = 50.0
     reasons = []
 
+    # EMA
     ema_pos, ema_neg = weights['ema_cross']
     if last['ema_f'] > last['ema_s']:
         score += ema_pos
@@ -297,6 +309,7 @@ def generate_signal(df, ls_ratio, weights=None):
         score += ema_neg
         reasons.append("EMA死叉")
 
+    # RSI
     if not pd.isna(last['rsi']):
         if 30 < last['rsi'] < 70:
             score += weights['rsi_mid']
@@ -312,6 +325,7 @@ def generate_signal(df, ls_ratio, weights=None):
     else:
         reasons.append("RSI=NA")
 
+    # MACD
     if last['macd_hist'] > 0:
         score += weights['macd_hist_pos']
         reasons.append("MACD柱为正")
@@ -319,6 +333,7 @@ def generate_signal(df, ls_ratio, weights=None):
         score += weights['macd_hist_neg']
         reasons.append("MACD柱为负")
 
+    # 布林带
     if last['c'] > last['bb_upper']:
         score += weights['bb_upper']
         reasons.append("价格突破上轨")
@@ -328,6 +343,7 @@ def generate_signal(df, ls_ratio, weights=None):
     else:
         reasons.append("价格在布林带内")
 
+    # 成交量
     if last['v'] > last['vol_ma'] * 1.3:
         score += weights['volume_surge']
         reasons.append("放量")
@@ -335,6 +351,7 @@ def generate_signal(df, ls_ratio, weights=None):
         score += weights['volume_shrink']
         reasons.append("缩量")
 
+    # 资金净流
     if last['net_flow'] > 0:
         score += weights['net_flow_pos']
         reasons.append("资金净流入")
@@ -342,6 +359,7 @@ def generate_signal(df, ls_ratio, weights=None):
         score += weights['net_flow_neg']
         reasons.append("资金净流出")
 
+    # 多空比
     if ls_ratio < 0.95:
         score += weights['ls_ratio_low']
         reasons.append("多空比<0.95(空头极端)")
@@ -351,9 +369,12 @@ def generate_signal(df, ls_ratio, weights=None):
     else:
         reasons.append(f"多空比={ls_ratio:.2f}")
 
-    prob = max(min(score, 95), 5)
+    prob = max(min(score, 95), 5)  # 限制在5~95之间
+
+    # 方向判断
     direction = 1 if prob > 55 else (-1 if prob < 45 else 0)
 
+    # 基于ATR的止损止盈
     atr = last['atr'] if not pd.isna(last['atr']) else df['atr'].mean() if not df['atr'].isna().all() else 10.0
     if direction == 1:
         entry_zone = f"{last['c']-atr*0.5:.1f} ~ {last['c']+atr*0.5:.1f}"
@@ -372,6 +393,10 @@ def generate_signal(df, ls_ratio, weights=None):
 
 # ====================== 回测核心 ======================
 def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
+    """
+    在历史数据上执行回测，返回交易记录和权益曲线
+    注意：回测中多空比固定为1.0（历史不可得）
+    """
     if df is None or len(df) < 50:
         return None, None, "数据不足"
 
@@ -388,9 +413,11 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
 
     for i in range(30, len(df)):
         row = df.iloc[i]
+        # 使用历史数据生成信号（多空比固定1.0）
         prob, sig_dir, _, _, _, _ = generate_signal(df.iloc[:i+1], 1.0, weights=weights)
 
         if not in_trade:
+            # 开仓逻辑
             if sig_dir == 1:
                 entry_price = row['c']
                 atr = row['atr'] if not pd.isna(row['atr']) else df['atr'].mean()
@@ -420,6 +447,7 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
                     in_trade = True
                     entry_index = i
         else:
+            # 持仓中检查止损止盈
             high, low = row['h'], row['l']
             exit_price = None
             exit_reason = ""
@@ -454,6 +482,7 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
                 position = 0
                 in_trade = False
 
+        # 更新权益曲线（持仓按市价）
         current_equity = balance
         if in_trade:
             if direction == 1:
@@ -462,6 +491,7 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
                 current_equity -= position * row['c']
         equity_curve.append(current_equity)
 
+    # 最后平仓
     if in_trade:
         last_row = df.iloc[-1]
         exit_price = last_row['c']
@@ -478,12 +508,13 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
             'pnl_pct': (pnl / (entry_price * position) * 100) if position != 0 else 0,
             'reason': '期末平仓'
         })
-        equity_curve[-1] = balance
+        equity_curve[-1] = balance  # 修正最后一刻的权益
 
     trades_df = pd.DataFrame(trades)
     return trades_df, equity_curve, "回测完成"
 
 def calculate_metrics(trades_df, equity_curve, initial_balance):
+    """计算回测绩效指标"""
     if trades_df is None or len(trades_df) == 0:
         return {}
     win_trades = trades_df[trades_df['pnl'] > 0]
@@ -491,6 +522,7 @@ def calculate_metrics(trades_df, equity_curve, initial_balance):
     final_balance = equity_curve[-1] if equity_curve else initial_balance
     total_return = (final_balance - initial_balance) / initial_balance * 100
 
+    # 年化收益率（基于实际交易天数）
     if len(trades_df) > 0 and 'exit_time' in trades_df.columns:
         start_date = trades_df['entry_time'].min()
         end_date = trades_df['exit_time'].max()
@@ -502,17 +534,20 @@ def calculate_metrics(trades_df, equity_curve, initial_balance):
     else:
         annual_return = 0
 
+    # 最大回撤
     equity_series = pd.Series(equity_curve)
     rolling_max = equity_series.expanding().max()
     drawdown = (equity_series - rolling_max) / rolling_max * 100
     max_drawdown = drawdown.min()
 
+    # 夏普比率（年化，无风险利率0）
     if len(equity_curve) > 1:
         returns = pd.Series(equity_curve).pct_change().dropna()
         sharpe = returns.mean() / returns.std() * np.sqrt(365) if returns.std() > 0 else 0
     else:
         sharpe = 0
 
+    # 盈利因子
     avg_win = win_trades['pnl'].mean() if len(win_trades) > 0 else 0
     avg_loss = trades_df[trades_df['pnl'] < 0]['pnl'].mean() if len(trades_df[trades_df['pnl'] < 0]) > 0 else 0
     profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else np.inf
@@ -527,8 +562,12 @@ def calculate_metrics(trades_df, equity_curve, initial_balance):
         '交易次数': len(trades_df)
     }
 
-# ====================== 增强版网格搜索（带组合数限制和稀疏更新）======================
+# ====================== 网格搜索 ======================
 def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_grid, metric='sharpe', progress_callback=None):
+    """
+    网格搜索最优权重组合
+    param_grid 需包含固定的15个键（顺序固定）
+    """
     keys = ['ema_cross_pos', 'ema_cross_neg', 'rsi_mid', 'rsi_overbought', 'rsi_oversold',
             'macd_hist_pos', 'macd_hist_neg', 'bb_upper', 'bb_lower',
             'volume_surge', 'volume_shrink', 'net_flow_pos', 'net_flow_neg',
@@ -536,25 +575,18 @@ def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_g
     values = [param_grid[k] for k in keys]
     combinations = list(product(*values))
     total = len(combinations)
-
-    # 限制组合数，超过5000则随机采样5000组
-    MAX_COMBINATIONS = 5000
-    if total > MAX_COMBINATIONS:
-        print(f"组合数 {total} 超过上限 {MAX_COMBINATIONS}，随机采样 {MAX_COMBINATIONS} 组")
-        sampled_indices = random.sample(range(total), MAX_COMBINATIONS)
-        combinations = [combinations[i] for i in sampled_indices]
-        total = MAX_COMBINATIONS
-
+    if total > 5000:
+        st.warning(f"组合数过多 ({total})，可能耗时很长。建议减少搜索范围。")
     best_score = -np.inf
     best_params = None
     best_metrics = None
     best_trades = None
     best_equity = None
-
-    # 进度更新步长（每完成1%更新一次）
-    progress_step = max(1, total // 100)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
     for idx, combo in enumerate(combinations):
+        # 构建权重字典
         weights = {
             'ema_cross': (combo[0], combo[1]),
             'rsi_mid': combo[2],
@@ -575,6 +607,7 @@ def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_g
         if trades_df is None or len(trades_df) == 0:
             continue
         metrics = calculate_metrics(trades_df, equity_curve, initial_balance)
+        # 提取目标指标
         if metric == 'sharpe':
             score = float(metrics.get('夏普比率', 0))
         elif metric == 'return':
@@ -593,10 +626,16 @@ def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_g
             best_trades = trades_df
             best_equity = equity_curve
 
-        # 每 progress_step 组或最后一组时更新进度
-        if progress_callback and (idx % progress_step == 0 or idx == total - 1):
+        if progress_callback:
             progress_callback(idx+1, total, best_score)
+        else:
+            # 每10%更新一次进度
+            if idx % max(1, total // 10) == 0 or idx == total - 1:
+                progress_bar.progress((idx + 1) / total)
+                status_text.text(f"已测试 {idx+1}/{total} 组，当前最优 {metric}={best_score:.2f}")
 
+    progress_bar.empty()
+    status_text.empty()
     return best_params, best_metrics, best_trades, best_equity
 
 # ====================== 侧边栏UI ======================
@@ -964,7 +1003,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 主图表
+    # 主图表（K线 + 指标）
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.02,
                         row_heights=[0.6, 0.2, 0.2],
                         subplot_titles=("价格 & 指标", "MACD", "资金净流"))
@@ -985,7 +1024,8 @@ def main():
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
         height=750, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10), hovermode='x unified'
     )
-    st.plotly_chart(fig, use_container_width=True)
+    # 修复：替换 use_container_width
+    st.plotly_chart(fig, width='stretch')
 
     # 多空比情绪图
     if not st.session_state.ls_history.empty:
@@ -1000,7 +1040,8 @@ def main():
             template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
             height=250, margin=dict(l=0, r=0, t=10, b=0)
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        # 修复：替换 use_container_width
+        st.plotly_chart(fig2, width='stretch')
 
     # 显示回测结果
     if st.session_state.get('backtest_metrics') and not st.session_state.get('backtest_running', False):
@@ -1018,7 +1059,8 @@ def main():
                 fig_eq = go.Figure()
                 fig_eq.add_trace(go.Scatter(y=st.session_state['backtest_equity'], mode='lines', name='权益曲线', line=dict(color='#00ff88')))
                 fig_eq.update_layout(title="账户权益曲线", height=300, template='plotly_dark' if st.session_state.theme == 'dark' else 'plotly')
-                st.plotly_chart(fig_eq, use_container_width=True)
+                # 修复：替换 use_container_width
+                st.plotly_chart(fig_eq, width='stretch')
             if st.session_state.get('backtest_trades') is not None:
                 st.subheader("交易记录")
                 display_df = st.session_state['backtest_trades'][['entry_time', 'exit_time', 'direction', 'entry_price', 'exit_price', 'pnl', 'pnl_pct', 'reason']].copy()
@@ -1026,7 +1068,8 @@ def main():
                 display_df['exit_time'] = display_df['exit_time'].dt.strftime('%m-%d %H:%M')
                 display_df['pnl'] = display_df['pnl'].round(2)
                 display_df['pnl_pct'] = display_df['pnl_pct'].round(2)
-                st.dataframe(display_df, use_container_width=True)
+                # 修复：替换 use_container_width
+                st.dataframe(display_df, width='stretch')
 
     # 显示优化结果
     if st.session_state.get('opt_metrics') and not st.session_state.get('opt_running', False):
@@ -1036,7 +1079,7 @@ def main():
                            'MACD柱正', 'MACD柱负', '突破上轨', '跌破下轨',
                            '放量', '缩量', '净流入', '净流出', '多空比低', '多空比高']
             param_df = pd.DataFrame({'因子': param_names, '权重': st.session_state['opt_params']})
-            st.dataframe(param_df, use_container_width=True)
+            st.dataframe(param_df, width='stretch')
             st.subheader("优化指标")
             metrics = st.session_state['opt_metrics']
             col1, col2, col3, col4 = st.columns(4)
@@ -1048,9 +1091,10 @@ def main():
                 fig_eq = go.Figure()
                 fig_eq.add_trace(go.Scatter(y=st.session_state['opt_equity'], mode='lines', name='最优权益', line=dict(color='#ffaa00')))
                 fig_eq.update_layout(title="最优参数权益曲线", height=300, template='plotly_dark' if st.session_state.theme == 'dark' else 'plotly')
-                st.plotly_chart(fig_eq, use_container_width=True)
+                # 修复：替换 use_container_width
+                st.plotly_chart(fig_eq, width='stretch')
 
-    # 前端自动刷新
+    # 前端自动刷新（使用 meta refresh，不阻塞）
     if not pause:
         st.markdown(f'<meta http-equiv="refresh" content="{hb}">', unsafe_allow_html=True)
 
