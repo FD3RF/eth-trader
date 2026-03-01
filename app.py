@@ -124,9 +124,9 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
         score -= 18
         reasons.append("EMA空")
 
-    # 动能因子
+    # 动能因子（边界值优化：包含30和70）
     rsi = last["rsi"]
-    if 30 < rsi < 70:
+    if 30 <= rsi <= 70:
         score += 10
         reasons.append("RSI中性")
     elif rsi > 75:
@@ -135,6 +135,7 @@ def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
     elif rsi < 25:
         score += 5
         reasons.append("RSI超卖")
+    # 对于介于 70-75 和 25-30 之间的值，保持评分不变（不加减）
 
     # MACD
     if last["macd_hist"] > 0:
@@ -259,13 +260,19 @@ def main():
     signal = generate_signal(df, ls, vol_mult, prob_thresh,
                              sl_atr, tp_atr, entry_offset)
 
-    # ---------- 使用 session_state 记录上次方向，用于平仓提示 ----------
+    # ---------- 使用 session_state 记录上次方向，用于平仓提示（包含反转和消失） ----------
     if "last_direction" not in st.session_state:
         st.session_state.last_direction = 0
     current_dir = signal["direction"]
+
+    # 信号反转提示（多→空 或 空→多）
     if current_dir != 0 and current_dir != st.session_state.last_direction:
         if st.session_state.last_direction != 0:
             st.warning(f"⚠️ 信号反转：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}，反向开仓")
+    # 信号消失提示（有持仓变为无信号）
+    if current_dir == 0 and st.session_state.last_direction != 0:
+        st.warning(f"⚠️ 信号消失：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}")
+
     st.session_state.last_direction = current_dir
 
     # ---------- 核心指标展示 ----------
@@ -282,7 +289,7 @@ def main():
 
     # 止损止盈（如有）
     if signal["sl"] and signal["tp"]:
-        col4, col5 = st.columns(2)
+        col4, col5 = st.columns([1,1])  # 显式指定等宽，避免渲染问题
         with col4:
             st.metric("止损", f"{signal['sl']:.2f}")
         with col5:
