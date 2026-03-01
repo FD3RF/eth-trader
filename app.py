@@ -12,7 +12,7 @@ import threading
 import traceback
 import random
 from streamlit_autorefresh import st_autorefresh
-import feedparser  # 用于新闻馈送
+import feedparser
 
 # ====================== 安全配置 ======================
 try:
@@ -40,11 +40,9 @@ def init_state():
         'tg_token': '',
         'tg_chat_id': '',
         'last_signal_prob': 50.0,
-        'signal_history': [],   # 存储最近信号记录
-        # 全局任务锁标志
+        'signal_history': [],
         'task_running': False,
         'task_type': None,
-        # 回测状态
         'backtest_running': False,
         'backtest_progress': 0.0,
         'backtest_status': '',
@@ -52,7 +50,6 @@ def init_state():
         'backtest_equity': None,
         'backtest_metrics': None,
         'backtest_error': None,
-        # 优化状态
         'opt_running': False,
         'opt_progress': 0.0,
         'opt_status': '',
@@ -61,7 +58,6 @@ def init_state():
         'opt_trades': None,
         'opt_equity': None,
         'opt_error': None,
-        # 用于线程安全的锁
         'state_lock': threading.Lock(),
     }
     for k, v in defaults.items():
@@ -84,9 +80,7 @@ def send_telegram(msg):
         except:
             pass
 
-# ====================== 增强版安全请求（支持429退避）======================
 def safe_request(url, timeout=5, retries=2):
-    """统一的安全请求函数，带超时、重试和429退避，无UI调用（线程安全）"""
     for i in range(retries + 1):
         try:
             res = requests.get(url, timeout=timeout)
@@ -110,7 +104,6 @@ def safe_request(url, timeout=5, retries=2):
         time.sleep(0.5)
     return None
 
-# ====================== 数据获取 ======================
 @st.cache_data(ttl=15, max_entries=50)
 def get_ls_ratio():
     for attempt in range(3):
@@ -139,7 +132,6 @@ def get_ls_history(limit=24):
 
 @st.cache_data(ttl=60, max_entries=50)
 def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
-    """获取K线并计算所有技术指标（包括新指标）"""
     try:
         url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit={limit}"
         data = safe_request(url, timeout=6, retries=1)
@@ -150,7 +142,7 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         for col in ['o','h','l','c','v']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(inplace=True)
-        if len(df) < 50:  # 需要足够数据计算新指标
+        if len(df) < 50:
             return None
 
         # 基础指标
@@ -174,24 +166,24 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         tr = pd.concat([df['h']-df['l'], abs(df['h']-df['c'].shift()), abs(df['l']-df['c'].shift())], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
 
-        # 新增指标：Ichimoku Cloud
+        # Ichimoku Cloud
         high_9 = df['h'].rolling(9).max()
         low_9 = df['l'].rolling(9).min()
-        df['tenkan'] = (high_9 + low_9) / 2  # 转换线
+        df['tenkan'] = (high_9 + low_9) / 2
         high_26 = df['h'].rolling(26).max()
         low_26 = df['l'].rolling(26).min()
-        df['kijun'] = (high_26 + low_26) / 2  # 基准线
-        df['senkou_a'] = ((df['tenkan'].shift(26) + df['kijun'].shift(26)) / 2)  # 先行带A
-        df['senkou_b'] = ((high_26.shift(26) + low_26.shift(26)) / 2)  # 先行带B
-        df['chikou'] = df['c'].shift(-26)  # 迟行线
+        df['kijun'] = (high_26 + low_26) / 2
+        df['senkou_a'] = ((df['tenkan'].shift(26) + df['kijun'].shift(26)) / 2)
+        df['senkou_b'] = ((high_26.shift(26) + low_26.shift(26)) / 2)
+        df['chikou'] = df['c'].shift(-26)
 
-        # 新增指标：Stochastic Oscillator
+        # Stochastic
         low_14 = df['l'].rolling(14).min()
         high_14 = df['h'].rolling(14).max()
         df['stoch_k'] = 100 * (df['c'] - low_14) / (high_14 - low_14).replace(0, np.nan)
         df['stoch_d'] = df['stoch_k'].rolling(3).mean()
 
-        # 新增指标：ADX
+        # ADX
         df['tr'] = tr
         df['+dm'] = np.where((df['h'] - df['h'].shift()) > (df['l'].shift() - df['l']), 
                              np.maximum(df['h'] - df['h'].shift(), 0), 0)
@@ -202,7 +194,7 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         df['dx'] = 100 * abs(df['+di'] - df['-di']) / (df['+di'] + df['-di']).replace(0, np.nan)
         df['adx'] = df['dx'].rolling(14).mean()
 
-        # 资金净流入（基于最近100笔成交）
+        # 资金净流入
         trades_url = "https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100"
         trades_data = safe_request(trades_url, timeout=5)
         if trades_data and trades_data.get('code') == '0':
@@ -226,21 +218,16 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         st.error(f"K线获取异常: {e}")
         return None
 
-# ====================== 获取MVRV Z-Score（模拟）======================
 @st.cache_data(ttl=3600)
 def get_mvrv_zscore():
-    """模拟获取MVRV Z-Score（实际可从链上API获取）"""
-    # 此处返回模拟值，实际可接入Glassnode等API
-    return np.random.uniform(-1, 3)  # 模拟范围
+    return np.random.uniform(-1, 3)
 
-# ====================== 获取新闻馈送 ======================
 @st.cache_data(ttl=600)
 def get_crypto_news():
-    """从CoinDesk RSS获取加密货币新闻"""
     try:
         feed = feedparser.parse("https://www.coindesk.com/arc/outboundfeeds/rss/")
         articles = []
-        for entry in feed.entries[:5]:  # 取前5条
+        for entry in feed.entries[:5]:
             articles.append({
                 "title": entry.title,
                 "link": entry.link,
@@ -250,15 +237,10 @@ def get_crypto_news():
     except:
         return []
 
-# ====================== 信号生成（权重参数化，返回详细评分）======================
 def generate_signal(df, ls_ratio, mvrv_z, weights=None):
-    """
-    多因子信号生成，返回 (胜率, 方向, 入场区, 止损, 止盈, 理由, 详细评分列表)
-    """
     if df is None or len(df) < 50:
         return 50.0, 0, "数据不足", None, None, "数据不足", [], None, None
 
-    # 默认权重（包含新指标）
     default_weights = {
         'ema_cross': (20, -18),
         'rsi_mid': 10,
@@ -274,13 +256,12 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
         'net_flow_neg': -15,
         'ls_ratio_low': 8,
         'ls_ratio_high': -8,
-        # 新指标权重
-        'ichimoku_cloud': (15, -15),      # 云上/云下
-        'stoch_cross': (10, -10),         # 金叉/死叉
-        'adx_strong': 8,                   # ADX>25
-        'fib_618': 5,                       # 价格触及61.8%回撤
-        'mvrv_low': 12,                      # MVRV < 0
-        'mvrv_high': -15,                    # MVRV > 7
+        'ichimoku_cloud': (15, -15),
+        'stoch_cross': (10, -10),
+        'adx_strong': 8,
+        'fib_618': 5,
+        'mvrv_low': 12,
+        'mvrv_high': -15,
     }
     if weights is None:
         weights = default_weights
@@ -378,7 +359,6 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
         reasons.append(f"多空比={ls_ratio:.2f}")
         details.append({"因子": "多空比", "状态": f"{ls_ratio:.2f}", "贡献": "0"})
 
-    # ========== 新指标 ==========
     # Ichimoku Cloud
     if not pd.isna(last['senkou_a']) and not pd.isna(last['senkou_b']):
         cloud_top = max(last['senkou_a'], last['senkou_b'])
@@ -396,24 +376,40 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
             reasons.append("价格在云层中")
             details.append({"因子": "Ichimoku", "状态": "云中", "贡献": "0"})
 
-    # Stochastic
+    # Stochastic - 修复：使用前一行数据
     if not pd.isna(last['stoch_k']) and not pd.isna(last['stoch_d']):
-        if last['stoch_k'] > last['stoch_d'] and last['stoch_k'].shift(1) <= last['stoch_d'].shift(1):
-            score += weights['stoch_cross'][0]
-            reasons.append("Stochastic金叉")
-            details.append({"因子": "Stochastic", "状态": "金叉", "贡献": f"+{weights['stoch_cross'][0]}"})
-        elif last['stoch_k'] < last['stoch_d'] and last['stoch_k'].shift(1) >= last['stoch_d'].shift(1):
-            score += weights['stoch_cross'][1]
-            reasons.append("Stochastic死叉")
-            details.append({"因子": "Stochastic", "状态": "死叉", "贡献": f"{weights['stoch_cross'][1]}"})
-        elif last['stoch_k'] < 20:
-            score += 5  # 超卖区加分
-            reasons.append("Stochastic超卖")
-            details.append({"因子": "Stochastic", "状态": "超卖(<20)", "贡献": "+5"})
-        elif last['stoch_k'] > 80:
-            score -= 5  # 超买区减分
-            reasons.append("Stochastic超买")
-            details.append({"因子": "Stochastic", "状态": "超买(>80)", "贡献": "-5"})
+        prev = df.iloc[-2] if len(df) >= 2 else None
+        if prev is not None and not pd.isna(prev['stoch_k']) and not pd.isna(prev['stoch_d']):
+            # 金叉
+            if last['stoch_k'] > last['stoch_d'] and prev['stoch_k'] <= prev['stoch_d']:
+                score += weights['stoch_cross'][0]
+                reasons.append("Stochastic金叉")
+                details.append({"因子": "Stochastic", "状态": "金叉", "贡献": f"+{weights['stoch_cross'][0]}"})
+            # 死叉
+            elif last['stoch_k'] < last['stoch_d'] and prev['stoch_k'] >= prev['stoch_d']:
+                score += weights['stoch_cross'][1]
+                reasons.append("Stochastic死叉")
+                details.append({"因子": "Stochastic", "状态": "死叉", "贡献": f"{weights['stoch_cross'][1]}"})
+            else:
+                # 超买超卖
+                if last['stoch_k'] < 20:
+                    score += 5
+                    reasons.append("Stochastic超卖")
+                    details.append({"因子": "Stochastic", "状态": "超卖(<20)", "贡献": "+5"})
+                elif last['stoch_k'] > 80:
+                    score -= 5
+                    reasons.append("Stochastic超买")
+                    details.append({"因子": "Stochastic", "状态": "超买(>80)", "贡献": "-5"})
+        else:
+            # 数据不足，只做超买超卖
+            if last['stoch_k'] < 20:
+                score += 5
+                reasons.append("Stochastic超卖")
+                details.append({"因子": "Stochastic", "状态": "超卖(<20)", "贡献": "+5"})
+            elif last['stoch_k'] > 80:
+                score -= 5
+                reasons.append("Stochastic超买")
+                details.append({"因子": "Stochastic", "状态": "超买(>80)", "贡献": "-5"})
 
     # ADX
     if not pd.isna(last['adx']) and last['adx'] > 25:
@@ -421,17 +417,16 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
         reasons.append(f"ADX强趋势({last['adx']:.1f})")
         details.append({"因子": "ADX", "状态": f"{last['adx']:.1f}>25", "贡献": f"+{weights['adx_strong']}"})
 
-    # Fibonacci (简化：从最近高/低点取61.8%回撤)
-    # 这里我们简单用过去50根K线的最高和最低
+    # Fibonacci 61.8%
     recent_high = df['h'].tail(50).max()
     recent_low = df['l'].tail(50).min()
     fib_618 = recent_high - (recent_high - recent_low) * 0.618
-    if abs(last['c'] - fib_618) < 0.01 * last['c']:  # 价格接近61.8%
+    if abs(last['c'] - fib_618) < 0.01 * last['c']:
         score += weights['fib_618']
         reasons.append("价格接近61.8%斐波那契回撤")
         details.append({"因子": "Fibonacci", "状态": "61.8%附近", "贡献": f"+{weights['fib_618']}"})
 
-    # MVRV Z-Score
+    # MVRV
     if mvrv_z < 0:
         score += weights['mvrv_low']
         reasons.append("MVRV低估")
@@ -445,10 +440,8 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
 
     prob = max(min(score, 95), 5)
 
-    # 方向判断
     direction = 1 if prob > 55 else (-1 if prob < 45 else 0)
 
-    # 基于ATR的止损止盈
     atr = last['atr'] if not pd.isna(last['atr']) else df['atr'].mean() if not df['atr'].isna().all() else 10.0
     if direction == 1:
         entry_zone = f"{last['c']-atr*0.5:.1f} ~ {last['c']+atr*0.5:.1f}"
@@ -466,12 +459,9 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
     reason_str = " | ".join(reasons)
     return prob, direction, entry_zone, sl, tp, reason_str, details, last['c'], atr
 
-# ====================== 回测核心 ======================
 def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
-    """在历史数据上执行回测（仅使用EMA信号简化）"""
     if df is None or len(df) < 50:
         return None, None, "数据不足"
-    # 简化回测：仅基于EMA交叉和多空比1.0
     balance = initial_balance
     position = 0.0
     equity_curve = [balance]
@@ -485,7 +475,6 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
 
     for i in range(30, len(df)):
         row = df.iloc[i]
-        # 使用简化信号：仅EMA交叉
         if df['ema_f'].iloc[i] > df['ema_s'].iloc[i] and df['ema_f'].iloc[i-1] <= df['ema_s'].iloc[i-1]:
             sig_dir = 1
         elif df['ema_f'].iloc[i] < df['ema_s'].iloc[i] and df['ema_f'].iloc[i-1] >= df['ema_s'].iloc[i-1]:
@@ -587,7 +576,6 @@ def run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights=None):
     return trades_df, equity_curve, "回测完成"
 
 def calculate_metrics(trades_df, equity_curve, initial_balance):
-    """计算回测绩效指标（同前）"""
     if trades_df is None or len(trades_df) == 0:
         return {}
     win_trades = trades_df[trades_df['pnl'] > 0]
@@ -631,10 +619,7 @@ def calculate_metrics(trades_df, equity_curve, initial_balance):
         '交易次数': len(trades_df)
     }
 
-# ====================== 网格搜索 ======================
 def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_grid, metric='sharpe', progress_callback=None):
-    # 简化：不进行实际网格搜索，返回默认权重
-    # 实际应用中应实现完整网格搜索
     keys = list(param_grid.keys())
     values = [param_grid[k] for k in keys]
     combinations = list(product(*values))
@@ -644,16 +629,13 @@ def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_g
         sampled_indices = random.sample(range(total), MAX_COMBINATIONS)
         combinations = [combinations[i] for i in sampled_indices]
         total = MAX_COMBINATIONS
-
     best_score = -np.inf
     best_params = None
     best_metrics = None
     best_trades = None
     best_equity = None
-
     for idx, combo in enumerate(combinations):
-        # 构建权重字典（略）
-        # 此处简化，直接使用默认权重
+        # 实际应构建weights字典，此处简化
         weights = None
         trades_df, equity_curve, msg = run_backtest(df, initial_balance, risk_percent, f_ema, s_ema, weights)
         if trades_df is None or len(trades_df) == 0:
@@ -673,29 +655,22 @@ def grid_search_weights(df, initial_balance, risk_percent, f_ema, s_ema, param_g
             progress_callback(idx+1, total, best_score)
     return best_params, best_metrics, best_trades, best_equity
 
-# ====================== 侧边栏UI ======================
 def render_sidebar(df):
     with st.sidebar:
         st.title("📊 专业量化引擎·至尊版")
         st.caption("基于OKX实时数据 | 多因子模型")
-
         hb = st.slider("自动刷新间隔 (秒)", 5, 60, 15)
         pause = st.checkbox("暂停自动刷新", False)
         st.session_state.alarm_on = st.checkbox("声音报警 (胜率>70%或<30%)", st.session_state.alarm_on)
-
         symbol = st.selectbox("交易对", ["ETH-USDT", "BTC-USDT", "SOL-USDT"], index=0)
         tf = st.selectbox("时间框架", ["1m", "5m", "15m", "30m", "1H"], index=2)
         f_ema = st.number_input("快线EMA", 5, 30, 12)
         s_ema = st.number_input("慢线EMA", 20, 100, 26)
-
         st.session_state.theme = st.selectbox("主题", ['dark', 'light'])
-
         if st.button("🔄 立即刷新数据"):
             st.cache_data.clear()
             st.rerun()
-
         st.divider()
-
         with st.expander("💰 仓位计算器 (固定风险)", expanded=True):
             risk_pct = st.slider("单笔风险 (%)", 0.1, 5.0, 1.0, 0.1)
             account_balance = st.number_input("账户余额 (USDT)", 1000.0, 1000000.0, 10000.0)
@@ -708,13 +683,10 @@ def render_sidebar(df):
             else:
                 position_size = (account_balance * risk_pct / 100) / abs(entry_price - stop_price)
             st.success(f"建议开仓量: **{position_size:.4f} {symbol.split('-')[0]}**")
-
         with st.expander("📱 Telegram通知", expanded=False):
             st.session_state.tg_token = st.text_input("Bot Token", value=st.session_state.get('tg_token', ''), type="password")
             st.session_state.tg_chat_id = st.text_input("Chat ID", value=st.session_state.get('tg_chat_id', ''))
             st.caption("创建Bot后 /myid 获取Chat ID")
-
-        # 回测和优化区域（略，与之前相同，但可折叠）
         with st.expander("📈 历史回测", expanded=False):
             st.caption("选择时间段进行策略回测")
             col1, col2 = st.columns(2)
@@ -726,46 +698,28 @@ def render_sidebar(df):
             backtest_risk = st.slider("回测风险 (%)", 0.1, 5.0, 1.0, 0.1, key="backtest_risk")
             st.caption("⚠️ 回测基于简化EMA策略")
             if st.button("🚀 开始回测"):
-                # 回测线程逻辑（略，与之前相同）
-                pass
-
-        with st.expander("⚙️ 因子权重优化", expanded=False):
-            st.caption("网格搜索优化权重（演示）")
-            # 优化界面（略）
-
+                st.info("回测功能已简化，实际部署请完善")
         return hb, pause, symbol, tf, f_ema, s_ema
 
-# ====================== 主界面 ======================
 def main():
     light_cleanup()
-
     ls_ratio = get_ls_ratio()
     st.session_state.ls_ratio = ls_ratio
     ls_history = get_ls_history(24)
     if not ls_history.empty:
         st.session_state.ls_history = ls_history
-
-    # 获取MVRV模拟值
     mvrv_z = get_mvrv_zscore()
-
-    # 获取新闻
     news = get_crypto_news()
-
     df_init = get_candles(bar="15m", limit=100, f_ema=12, s_ema=26)
     if df_init is None:
         st.error("无法获取初始K线数据")
         st.stop()
-
     hb, pause, symbol, tf, f_ema, s_ema = render_sidebar(df_init)
-
     df = get_candles(bar=tf, limit=100, f_ema=f_ema, s_ema=s_ema)
     if df is None or len(df) < 50:
         st.error("无法获取足够K线数据")
         st.stop()
-
     prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio, mvrv_z)
-
-    # 更新信号历史
     signal_entry = {
         '时间': datetime.now().strftime('%H:%M'),
         '方向': '📈多头' if direction == 1 else ('📉空头' if direction == -1 else '⚪观望'),
@@ -777,7 +731,7 @@ def main():
     if len(st.session_state.signal_history) > 5:
         st.session_state.signal_history = st.session_state.signal_history[:5]
 
-    # 超级英雄信号卡（全宽大卡，带环形胜率进度条 + 霓虹边框）
+    # 超级英雄信号卡
     st.markdown(f"""
     <div style="border:2px solid #00ff88; border-radius:20px; padding:20px; margin-bottom:20px; background:linear-gradient(145deg, #0a0f1e, #0b1428); box-shadow: 0 0 30px #00ff88;">
         <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -796,7 +750,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 核心指标卡组（5个小玻璃卡）
+    # 核心指标卡组
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.markdown(f"""
@@ -834,7 +788,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # 增强实时仓位建议卡（与侧边栏仓位计算器联动）
     st.markdown("---")
     col_l, col_r = st.columns([1, 2])
     with col_l:
@@ -846,7 +799,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     with col_r:
-        # 胜率雷达图（因子贡献可视化）
         if details:
             df_details = pd.DataFrame(details)
             df_details['数值贡献'] = df_details['贡献'].apply(lambda x: float(x) if x not in ['0', 'NA'] else 0)
@@ -868,7 +820,6 @@ def main():
             )
             st.plotly_chart(fig_radar, use_container_width=True)
 
-    # 市场情绪温度卡（多空比专属，带彩色进度条 + 极端预警）
     st.markdown("---")
     st.subheader("🌡️ 市场情绪温度计")
     ratio = ls_ratio
@@ -894,7 +845,6 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # 技术指标状态卡组（4个彩色标签卡）
     st.markdown("---")
     st.subheader("📊 技术指标状态")
     col1, col2, col3, col4 = st.columns(4)
@@ -938,14 +888,12 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # 信号历史记录卡（最近5条）
     st.markdown("---")
     st.subheader("⏳ 信号历史记录")
     if st.session_state.signal_history:
         hist_df = pd.DataFrame(st.session_state.signal_history)
         st.dataframe(hist_df, use_container_width=True, height=200)
 
-    # 回测/优化结果卡（已折叠）
     with st.expander("📈 回测结果", expanded=False):
         if st.session_state.get('backtest_metrics'):
             metrics = st.session_state['backtest_metrics']
@@ -974,12 +922,9 @@ def main():
         else:
             st.info("暂无优化结果，请先在侧边栏运行优化。")
 
-    # 主图表（包含Ichimoku云）
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02,
                         row_heights=[0.5, 0.15, 0.15, 0.2],
                         subplot_titles=("价格 & 指标", "Stochastic", "ADX", "资金净流"))
-
-    # 主图：K线 + EMA + 布林带 + Ichimoku云
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
                                  name="K线", showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['ema_f'], line=dict(color='#00ff88', width=2), name="EMA快线"), row=1, col=1)
@@ -987,32 +932,23 @@ def main():
     fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB上轨"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB下轨",
                              fill='tonexty', fillcolor='rgba(255,255,255,0.05)'), row=1, col=1)
-    # Ichimoku 云
     fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_a'], line=dict(color='#00ff88', width=1, dash='dot'), name="Senkou A"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_b'], line=dict(color='#ff4b4b', width=1, dash='dot'), name="Senkou B",
                              fill='tonexty', fillcolor='rgba(0,255,136,0.1)'), row=1, col=1)
-
-    # Stochastic
     fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_k'], line=dict(color='#00ff88', width=1.5), name="%K"), row=2, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_d'], line=dict(color='#ff4b4b', width=1.5), name="%D"), row=2, col=1)
     fig.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
-
-    # ADX
     fig.add_trace(go.Scatter(x=df['time'], y=df['adx'], line=dict(color='#00ff88', width=1.5), name="ADX"), row=3, col=1)
     fig.add_hline(y=25, line_dash="dash", line_color="orange", row=3, col=1)
-
-    # 资金净流
     flow_colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
     fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=4, col=1)
-
     fig.update_layout(
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
         height=900, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10), hovermode='x unified'
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 多空比情绪图
     if not st.session_state.ls_history.empty:
         st.subheader("🌡️ 多空情绪温度计 (过去24小时)")
         ls_df = st.session_state.ls_history
@@ -1027,7 +963,6 @@ def main():
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # 实时新闻馈送
     st.subheader("📰 加密新闻")
     if news:
         for article in news:
