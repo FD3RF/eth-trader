@@ -26,6 +26,17 @@ except Exception:
 # ====================== 页面配置 ======================
 st.set_page_config(layout="wide", page_title="专业量化决策引擎·至尊版", page_icon="📊")
 
+# 全局样式：缩小UI边距和字体
+st.markdown("""
+<style>
+    .main > div { padding: 0 1rem; }
+    .block-container { max-width: 95%; padding-top: 1rem; }
+    .stButton > button { font-size: 0.8rem; }
+    .stMetric { font-size: 0.9rem; }
+    div[data-testid="column"] { padding: 0 0.2rem; }
+</style>
+""", unsafe_allow_html=True)
+
 pio.templates['custom_dark'] = pio.templates['plotly_dark']
 pio.templates['custom_light'] = pio.templates['plotly']
 
@@ -218,6 +229,28 @@ def get_candles(bar="15m", limit=100, f_ema=12, s_ema=26):
         st.error(f"K线获取异常: {e}")
         return None
 
+# 新增：获取4H趋势数据（用于EMA50过滤）
+@st.cache_data(ttl=300, max_entries=10)
+def get_trend_candles(bar="4H", limit=200):
+    try:
+        url = f"https://www.okx.com/api/v5/market/candles?instId=ETH-USDT&bar={bar}&limit={limit}"
+        data = safe_request(url, timeout=10, retries=2)
+        if not data or data.get('code') != '0':
+            return None
+        df = pd.DataFrame(data['data'], columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])[::-1].reset_index(drop=True)
+        df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
+        for col in ['o','h','l','c','v']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(inplace=True)
+        if len(df) < 50:
+            return None
+        # 计算EMA50
+        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+        return df
+    except Exception as e:
+        st.error(f"趋势数据获取异常: {e}")
+        return None
+
 @st.cache_data(ttl=3600)
 def get_mvrv_zscore():
     return np.random.uniform(-1, 3)
@@ -237,7 +270,7 @@ def get_crypto_news():
     except:
         return []
 
-def generate_signal(df, ls_ratio, mvrv_z, weights=None):
+def generate_signal(df, ls_ratio, mvrv_z, trend_ema50, weights=None):
     if df is None or len(df) < 50:
         return 50.0, 0, "数据不足", None, None, "数据不足", [], None, None
 
@@ -262,6 +295,10 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
         'fib_618': 5,
         'mvrv_low': 12,
         'mvrv_high': -15,
+        # 新增权重
+        'trend_low': 8,        # 价格低于EMA50（低位）加分
+        'trend_high': -8,      # 价格高于EMA50（高位）减分
+        'breakout': 10,        # 极点突破加分
     }
     if weights is None:
         weights = default_weights
@@ -376,22 +413,19 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
             reasons.append("价格在云层中")
             details.append({"因子": "Ichimoku", "状态": "云中", "贡献": "0"})
 
-    # Stochastic - 修复：使用前一行数据
+    # Stochastic
     if not pd.isna(last['stoch_k']) and not pd.isna(last['stoch_d']):
         prev = df.iloc[-2] if len(df) >= 2 else None
         if prev is not None and not pd.isna(prev['stoch_k']) and not pd.isna(prev['stoch_d']):
-            # 金叉
             if last['stoch_k'] > last['stoch_d'] and prev['stoch_k'] <= prev['stoch_d']:
                 score += weights['stoch_cross'][0]
                 reasons.append("Stochastic金叉")
                 details.append({"因子": "Stochastic", "状态": "金叉", "贡献": f"+{weights['stoch_cross'][0]}"})
-            # 死叉
             elif last['stoch_k'] < last['stoch_d'] and prev['stoch_k'] >= prev['stoch_d']:
                 score += weights['stoch_cross'][1]
                 reasons.append("Stochastic死叉")
                 details.append({"因子": "Stochastic", "状态": "死叉", "贡献": f"{weights['stoch_cross'][1]}"})
             else:
-                # 超买超卖
                 if last['stoch_k'] < 20:
                     score += 5
                     reasons.append("Stochastic超卖")
@@ -401,7 +435,6 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
                     reasons.append("Stochastic超买")
                     details.append({"因子": "Stochastic", "状态": "超买(>80)", "贡献": "-5"})
         else:
-            # 数据不足，只做超买超卖
             if last['stoch_k'] < 20:
                 score += 5
                 reasons.append("Stochastic超卖")
@@ -437,6 +470,34 @@ def generate_signal(df, ls_ratio, mvrv_z, weights=None):
         details.append({"因子": "MVRV", "状态": f"{mvrv_z:.2f}>7", "贡献": f"{weights['mvrv_high']}"})
     else:
         details.append({"因子": "MVRV", "状态": f"{mvrv_z:.2f}", "贡献": "0"})
+
+    # ========== 新增因子 ==========
+    # 4H趋势过滤（EMA50）
+    if trend_ema50 is not None and not pd.isna(trend_ema50):
+        if last['c'] < trend_ema50:
+            score += weights['trend_low']
+            reasons.append("价格低于4H EMA50(低位)")
+            details.append({"因子": "趋势过滤", "状态": "低于EMA50", "贡献": f"+{weights['trend_low']}"})
+        elif last['c'] > trend_ema50:
+            score += weights['trend_high']
+            reasons.append("价格高于4H EMA50(高位)")
+            details.append({"因子": "趋势过滤", "状态": "高于EMA50", "贡献": f"{weights['trend_high']}"})
+        else:
+            details.append({"因子": "趋势过滤", "状态": "与EMA50持平", "贡献": "0"})
+
+    # 极点突破（过去20根K线最高/最低）
+    recent_high_20 = df['h'].tail(20).max()
+    recent_low_20 = df['l'].tail(20).min()
+    if last['c'] > recent_high_20:
+        score += weights['breakout']
+        reasons.append("向上突破20期高点")
+        details.append({"因子": "极点突破", "状态": "突破高点", "贡献": f"+{weights['breakout']}"})
+    elif last['c'] < recent_low_20:
+        score += weights['breakout']
+        reasons.append("向下突破20期低点")
+        details.append({"因子": "极点突破", "状态": "突破低点", "贡献": f"+{weights['breakout']}"})
+    else:
+        details.append({"因子": "极点突破", "状态": "无突破", "贡献": "0"})
 
     prob = max(min(score, 95), 5)
 
@@ -698,6 +759,7 @@ def render_sidebar(df):
             backtest_risk = st.slider("回测风险 (%)", 0.1, 5.0, 1.0, 0.1, key="backtest_risk")
             st.caption("⚠️ 回测基于简化EMA策略")
             if st.button("🚀 开始回测"):
+                # 实际应启动线程，此处简化
                 st.info("回测功能已简化，实际部署请完善")
         return hb, pause, symbol, tf, f_ema, s_ema
 
@@ -710,6 +772,15 @@ def main():
         st.session_state.ls_history = ls_history
     mvrv_z = get_mvrv_zscore()
     news = get_crypto_news()
+
+    # 获取4H趋势数据
+    trend_df = get_trend_candles(bar="4H", limit=200)
+    if trend_df is not None and len(trend_df) > 0:
+        trend_ema50 = trend_df['ema50'].iloc[-1]
+    else:
+        trend_ema50 = None
+        st.warning("无法获取4H趋势数据，趋势过滤功能已禁用")
+
     df_init = get_candles(bar="15m", limit=100, f_ema=12, s_ema=26)
     if df_init is None:
         st.error("无法获取初始K线数据")
@@ -719,7 +790,7 @@ def main():
     if df is None or len(df) < 50:
         st.error("无法获取足够K线数据")
         st.stop()
-    prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio, mvrv_z)
+    prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio, mvrv_z, trend_ema50)
     signal_entry = {
         '时间': datetime.now().strftime('%H:%M'),
         '方向': '📈多头' if direction == 1 else ('📉空头' if direction == -1 else '⚪观望'),
@@ -788,6 +859,45 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+    # 精准进场策略卡
+    st.markdown("---")
+    st.subheader("🎯 精准进场策略")
+    col_a, col_b, col_c, col_d = st.columns(4)
+    with col_a:
+        st.markdown(f"""
+        <div style="border:2px solid #00ff88; border-radius:10px; padding:10px; text-align:center; background:rgba(0,255,136,0.1);">
+            <p style="color:#aaa;">最佳入场区</p>
+            <h4 style="color:#00ff88;">{entry_zone}</h4>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_b:
+        sl_color = "#ff4b4b" if sl else "#888"
+        sl_text = f"${sl:.2f}" if sl else "无"
+        st.markdown(f"""
+        <div style="border:2px solid {sl_color}; border-radius:10px; padding:10px; text-align:center; background:rgba(255,75,75,0.1);">
+            <p style="color:#aaa;">动态止损</p>
+            <h4 style="color:{sl_color};">{sl_text}</h4>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_c:
+        tp_color = "#00ff88" if tp else "#888"
+        tp_text = f"${tp:.2f}" if tp else "无"
+        st.markdown(f"""
+        <div style="border:2px solid {tp_color}; border-radius:10px; padding:10px; text-align:center; background:rgba(0,255,136,0.1);">
+            <p style="color:#aaa;">动态止盈</p>
+            <h4 style="color:{tp_color};">{tp_text}</h4>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_d:
+        rr = abs((tp - current_price) / (current_price - sl)) if sl and tp and abs(current_price - sl) > 1e-8 else 0
+        st.markdown(f"""
+        <div style="border:2px solid #FFD700; border-radius:10px; padding:10px; text-align:center; background:rgba(255,215,0,0.1);">
+            <p style="color:#aaa;">盈亏比</p>
+            <h4 style="color:#FFD700;">{rr:.2f}</h4>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 实时仓位建议（左侧）+ 雷达图（右侧）
     st.markdown("---")
     col_l, col_r = st.columns([1, 2])
     with col_l:
@@ -820,6 +930,7 @@ def main():
             )
             st.plotly_chart(fig_radar, use_container_width=True)
 
+    # 市场情绪温度计
     st.markdown("---")
     st.subheader("🌡️ 市场情绪温度计")
     ratio = ls_ratio
@@ -845,6 +956,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
+    # 技术指标状态卡
     st.markdown("---")
     st.subheader("📊 技术指标状态")
     col1, col2, col3, col4 = st.columns(4)
@@ -888,12 +1000,14 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+    # 信号历史记录
     st.markdown("---")
     st.subheader("⏳ 信号历史记录")
     if st.session_state.signal_history:
         hist_df = pd.DataFrame(st.session_state.signal_history)
         st.dataframe(hist_df, use_container_width=True, height=200)
 
+    # 回测结果
     with st.expander("📈 回测结果", expanded=False):
         if st.session_state.get('backtest_metrics'):
             metrics = st.session_state['backtest_metrics']
@@ -910,6 +1024,7 @@ def main():
         else:
             st.info("暂无回测结果，请先在侧边栏运行回测。")
 
+    # 优化结果
     with st.expander("🏆 优化结果", expanded=False):
         if st.session_state.get('opt_metrics'):
             st.write("最优权重组合", st.session_state['opt_params'])
@@ -922,8 +1037,9 @@ def main():
         else:
             st.info("暂无优化结果，请先在侧边栏运行优化。")
 
+    # 主图表（K线 + 指标）
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02,
-                        row_heights=[0.5, 0.15, 0.15, 0.2],
+                        row_heights=[0.6, 0.15, 0.15, 0.1],  # 主图占比提高
                         subplot_titles=("价格 & 指标", "Stochastic", "ADX", "资金净流"))
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
                                  name="K线", showlegend=False), row=1, col=1)
@@ -935,20 +1051,40 @@ def main():
     fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_a'], line=dict(color='#00ff88', width=1, dash='dot'), name="Senkou A"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_b'], line=dict(color='#ff4b4b', width=1, dash='dot'), name="Senkou B",
                              fill='tonexty', fillcolor='rgba(0,255,136,0.1)'), row=1, col=1)
+
+    # 止盈止损线
+    if sl:
+        fig.add_hline(y=sl, line_dash="dash", line_color="#ff4b4b", row=1, col=1, annotation_text="止损", annotation_position="bottom right")
+    if tp:
+        fig.add_hline(y=tp, line_dash="dash", line_color="#00ff88", row=1, col=1, annotation_text="止盈", annotation_position="top right")
+
+    # 主力压力/支撑线
+    recent_high = df['h'].tail(20).max()
+    recent_low = df['l'].tail(20).min()
+    fig.add_hline(y=recent_high, line_dash="dot", line_color="orange", row=1, col=1, annotation_text="主力压力", annotation_position="top left")
+    fig.add_hline(y=recent_low, line_dash="dot", line_color="cyan", row=1, col=1, annotation_text="主力支撑", annotation_position="bottom left")
+
+    # Stochastic
     fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_k'], line=dict(color='#00ff88', width=1.5), name="%K"), row=2, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_d'], line=dict(color='#ff4b4b', width=1.5), name="%D"), row=2, col=1)
     fig.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
+
+    # ADX
     fig.add_trace(go.Scatter(x=df['time'], y=df['adx'], line=dict(color='#00ff88', width=1.5), name="ADX"), row=3, col=1)
     fig.add_hline(y=25, line_dash="dash", line_color="orange", row=3, col=1)
+
+    # 资金净流
     flow_colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
     fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=4, col=1)
+
     fig.update_layout(
         template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
         height=900, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10), hovermode='x unified'
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # 多空比情绪图
     if not st.session_state.ls_history.empty:
         st.subheader("🌡️ 多空情绪温度计 (过去24小时)")
         ls_df = st.session_state.ls_history
@@ -963,6 +1099,7 @@ def main():
         )
         st.plotly_chart(fig2, use_container_width=True)
 
+    # 实时新闻
     st.subheader("📰 加密新闻")
     if news:
         for article in news:
