@@ -1,7 +1,8 @@
+altair==4.2.2
+streamlit==1.19.0
+streamlit-autorefresh==1.0.1
 pandas
 numpy
 requests
 plotly
 vectorbt
-streamlit
-streamlit_autorefresh
