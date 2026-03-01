@@ -9,6 +9,7 @@ from datetime import datetime
 import plotly.graph_objects as go
 from collections import deque
 import websocket
+from streamlit_autorefresh import st_autorefresh
 
 # ===============================
 # 配置参数
@@ -18,6 +19,8 @@ TIMEFRAME = "5m"                # 5分钟K线
 MAX_KEEP = 300                   # 保留K线数量
 RISK_PER_TRADE = 0.01            # 单笔风险1%
 MIN_RR = 1.5                     # 最小盈亏比
+REQUEST_TIMEOUT = 10              # 网络请求超时
+WS_RETRY_INTERVAL = 5             # WebSocket重连间隔
 
 # ===============================
 # 安全配置：必须使用secrets
@@ -40,12 +43,12 @@ if "data_queue" not in st.session_state:
 if "ws_status" not in st.session_state:
     st.session_state.ws_status = "连接中..."
 if "last_signal" not in st.session_state:
-    st.session_state.last_signal = None   # 存储上一次信号，用于检查有效期
+    st.session_state.last_signal = None
 if "signal_history" not in st.session_state:
     st.session_state.signal_history = deque(maxlen=20)
 
 # ===============================
-# WebSocket 实时K线（OKX）
+# WebSocket 实时K线（OKX，带自动重连）
 # ===============================
 def on_message(ws, message):
     try:
@@ -66,9 +69,11 @@ def on_message(ws, message):
 
 def on_error(ws, error):
     st.session_state.ws_status = f"错误: {error}"
+    print(f"WebSocket错误: {error}")
 
 def on_close(ws, close_status_code, close_msg):
     st.session_state.ws_status = "断开，尝试重连..."
+    print("WebSocket关闭")
 
 def on_open(ws):
     subscribe_msg = {
@@ -91,8 +96,9 @@ def start_ws():
             ws.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
             print(f"WebSocket异常: {e}")
-        time.sleep(5)
+        time.sleep(WS_RETRY_INTERVAL)
 
+# 启动WebSocket线程（仅一次）
 if not any(thread.name == "OKX_WS" for thread in threading.enumerate()):
     thread = threading.Thread(target=start_ws, daemon=True, name="OKX_WS")
     thread.start()
@@ -100,24 +106,42 @@ if not any(thread.name == "OKX_WS" for thread in threading.enumerate()):
 # ===============================
 # 辅助函数：获取1小时趋势（用于多周期过滤）
 # ===============================
+def safe_request(url, timeout=REQUEST_TIMEOUT, retries=3):
+    for i in range(retries + 1):
+        try:
+            res = requests.get(url, timeout=timeout)
+            if res.status_code == 200:
+                return res.json()
+            elif res.status_code == 429:
+                retry_after = res.headers.get('Retry-After')
+                wait = int(retry_after) if retry_after else 2 ** i
+                time.sleep(wait)
+                continue
+        except requests.exceptions.Timeout:
+            print(f"请求超时，重试 {i+1}/{retries}")
+        except Exception as e:
+            print(f"请求异常: {e}，重试 {i+1}/{retries}")
+        time.sleep(0.5)
+    return None
+
 @st.cache_data(ttl=300)
 def get_1h_trend():
     try:
         url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar=1H&limit=100"
-        res = requests.get(url, timeout=5).json()
-        if res.get('code') != '0':
+        data = safe_request(url)
+        if not data or data.get('code') != '0':
             return 0
-        data = res['data']
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
+        items = data['data']
+        df = pd.DataFrame(items, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
         df = df[::-1].reset_index(drop=True)
         df['c'] = df['c'].astype(float)
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
         last = df.iloc[-1]
         prev = df.iloc[-2]
         if last['c'] > last['ema50'] and last['ema50'] > prev['ema50']:
-            return 1   # 多头趋势
+            return 1
         elif last['c'] < last['ema50'] and last['ema50'] < prev['ema50']:
-            return -1  # 空头趋势
+            return -1
         else:
             return 0
     except:
@@ -228,7 +252,7 @@ def generate_signal(df, trend_1h, current_index):
                 "tp": tp,
                 "time": last['time'],
                 "rr": rr,
-                "score": 70,   # 可自定义评分
+                "score": 70,
                 "reason": "EMA多头|MACD金叉|RSI中性|放量"
             }
 
@@ -246,7 +270,7 @@ def generate_signal(df, trend_1h, current_index):
                 "tp": tp,
                 "time": last['time'],
                 "rr": rr,
-                "score": 30,   # 做多胜率低，所以看空
+                "score": 30,
                 "reason": "EMA空头|MACD死叉|RSI中性|放量"
             }
 
@@ -259,7 +283,7 @@ def is_signal_valid(signal, current_price, atr):
     entry_low = signal['entry'] - atr * 0.5
     entry_high = signal['entry'] + atr * 0.5
     if current_price < entry_low - atr or current_price > entry_high + atr:
-        return None  # 价格远离，信号失效
+        return None
     return signal
 
 # ===============================
@@ -273,18 +297,25 @@ def position_size(entry, stop, balance, risk_pct):
 # ===============================
 # 主界面
 # ===============================
-st.set_page_config(layout="wide", page_title="5分钟ETH高频信号·清晰版")
-st.title("5分钟ETH高频信号系统（逻辑清晰版）")
+st.set_page_config(layout="wide", page_title="5分钟ETH高频信号·至尊版")
+st.title("📈 5分钟ETH高频信号系统（至尊版）")
 st.caption(f"WebSocket状态: {st.session_state.ws_status} | 数据实时更新")
 
 # 侧边栏参数
 with st.sidebar:
-    st.header("账户参数")
+    st.header("⚙️ 账户参数")
     balance = st.number_input("账户余额 (USDT)", value=10000, min_value=100, step=100)
     risk = st.slider("单笔风险 %", 0.1, 5.0, 1.0, 0.1)
-    st.header("策略开关")
+
+    st.header("🎛️ 策略开关")
     enable_trend_filter = st.checkbox("启用1小时趋势过滤", value=True)
     enable_volume_filter = st.checkbox("启用成交量过滤", value=True)
+
+    st.header("📜 信号历史")
+    if st.button("清空历史记录"):
+        st.session_state.signal_history.clear()
+        st.session_state.last_signal = None
+        st.rerun()
 
 # 更新数据
 if update_dataframe():
@@ -366,11 +397,15 @@ if len(df) >= 50:
     fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['ema26'].tail(100), line=dict(color='#ff6b6b'), name="EMA26"))
     fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['bb_upper'].tail(100), line=dict(color='rgba(255,255,255,0.3)', dash='dot'), name="布林上轨"))
     fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['bb_lower'].tail(100), line=dict(color='rgba(255,255,255,0.3)', dash='dot'), name="布林下轨"))
-    # 标记信号触发位
     if valid_signal:
         fig.add_hline(y=valid_signal['entry'], line_dash="dash", line_color="orange", annotation_text="触发位")
-    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, hovermode='x unified')
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        template="plotly_dark",
+        height=500,
+        xaxis_rangeslider_visible=False,
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, width='stretch')  # 替代 use_container_width=True
 
     # 信号历史
     if st.session_state.signal_history:
@@ -378,11 +413,10 @@ if len(df) >= 50:
         hist = list(st.session_state.signal_history)[-10:]
         hist_df = pd.DataFrame(hist)[['time','side','entry','stop','tp','rr']]
         hist_df['time'] = hist_df['time'].dt.strftime('%m-%d %H:%M')
-        st.dataframe(hist_df, use_container_width=True)
+        st.dataframe(hist_df, width='stretch')
 
 else:
     st.info("等待数据接入...")
 
-# 自动刷新
-time.sleep(1)
-st.rerun()
+# 自动刷新（每5秒）
+st_autorefresh(interval=5000, key="auto_refresh")
