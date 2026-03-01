@@ -1,172 +1,156 @@
+# -*- coding: utf-8 -*-
+"""
+工程级 ETH/BTC 5分钟波段看盘分析终端
+功能：
+- 实时OKX数据
+- K线图
+- FVG
+- 扫单
+- 波段方向建议
+- 支撑阻力
+"""
+
 import streamlit as st
 import pandas as pd
 import requests
-import numpy as np
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
+import numpy as np
 from datetime import datetime
 
+# ===========================
+# 配置
+# ===========================
 SYMBOL = "ETH-USDT"
+LIMIT = 200
 INTERVAL = "5m"
-LIMIT = 100
 
-def safe_request(url):
+# ===========================
+# 数据
+# ===========================
+def fetch_okx():
+    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
     try:
         r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except:
+        data = r.json()["data"]
+        df = pd.DataFrame(data, columns=[
+            "ts","o","h","l","c","vol","volCcy","volCcyQuote","confirm"
+        ])
+        df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
+        df[["o","h","l","c"]] = df[["o","h","l","c"]].astype(float)
+        df = df.sort_values("ts")
+        return df
+    except Exception as e:
+        st.error(f"数据获取失败: {e}")
         return None
-    return None
 
-def get_candles():
-    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
-    data = safe_request(url)
-    if not data or data.get("code") != "0":
-        return None
+# ===========================
+# FVG 计算
+# ===========================
+def detect_fvg(df):
+    fvg = []
+    for i in range(2, len(df)):
+        prev = df.iloc[i-2]
+        mid = df.iloc[i-1]
+        cur = df.iloc[i]
 
-    df = pd.DataFrame(data["data"], columns=[
-        "ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"
-    ])[::-1]
+        # Bull FVG
+        if prev["h"] < cur["l"]:
+            fvg.append({
+                "type":"bull",
+                "low": prev["h"],
+                "high": cur["l"],
+                "ts": cur["ts"]
+            })
+        # Bear FVG
+        if prev["l"] > cur["h"]:
+            fvg.append({
+                "type":"bear",
+                "low": cur["h"],
+                "high": prev["l"],
+                "ts": cur["ts"]
+            })
+    return fvg
 
-    df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
-    for col in ["o","h","l","c","v"]:
-        df[col] = pd.to_numeric(df[col])
+# ===========================
+# 扫单（简单极值）
+# ===========================
+def sweep_levels(df):
+    highs = df["h"].rolling(10).max()
+    lows = df["l"].rolling(10).min()
+    return highs.dropna().iloc[-1], lows.dropna().iloc[-1]
 
-    df["returns"] = df["c"].pct_change()
-
-    # 指标
-    df["ema_fast"] = df["c"].ewm(span=12).mean()
-    df["ema_slow"] = df["c"].ewm(span=26).mean()
-
-    delta = df["c"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df["rsi"] = 100 - (100 / (1 + rs))
-
-    df["macd"] = df["c"].ewm(12).mean() - df["c"].ewm(26).mean()
-    df["macd_hist"] = df["macd"] - df["macd"].ewm(9).mean()
-
-    df["bb_mid"] = df["c"].rolling(20).mean()
-    df["bb_std"] = df["c"].rolling(20).std()
-    df["bb_upper"] = df["bb_mid"] + 2*df["bb_std"]
-    df["bb_lower"] = df["bb_mid"] - 2*df["bb_std"]
-
-    df["vol_ma"] = df["v"].rolling(10).mean()
-    df["atr"] = (df["h"] - df["l"]).rolling(14).mean()
-
-    return df
-
-def get_ls_ratio():
-    url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
-    data = safe_request(url)
-    if data and data.get("code") == "0":
-        return float(data["data"][0][1])
-    return 1.0
-
-def generate_signal(df, ls_ratio):
-    if df is None or len(df) < 50:
-        return 50, 0, "数据不足", None, None
+# ===========================
+# 波段方向评分
+# ===========================
+def swing_score(df):
+    # EMA趋势
+    df["ema20"] = df["c"].ewm(span=20).mean()
+    df["ema50"] = df["c"].ewm(span=50).mean()
 
     last = df.iloc[-1]
-    score = 50
-    reasons = []
+    score = 0
 
-    # 4H趋势简化：用EMA长短判断
-    trend = 1 if last["ema_fast"] > last["ema_slow"] else -1
-
-    # EMA
-    if last["ema_fast"] > last["ema_slow"]:
-        score += 20
-        reasons.append("EMA多")
+    if last["ema20"] > last["ema50"]:
+        score += 2
     else:
-        score -= 18
-        reasons.append("EMA空")
+        score -= 2
 
-    # RSI
-    rsi = last["rsi"]
-    if 30 < rsi < 70:
-        score += 10
-    elif rsi > 75:
-        score -= 10
-    elif rsi < 25:
-        score += 5
-
-    # MACD
-    if last["macd_hist"] > 0:
-        score += 12
+    # 价格位置
+    if last["c"] > last["ema20"]:
+        score += 1
     else:
-        score -= 12
+        score -= 1
 
-    # 极点突破
-    extreme = False
-    if last["c"] > last["bb_upper"] and last["v"] > last["vol_ma"]*1.5:
-        extreme = True
-        score += 20
-        reasons.append("突破上轨放量")
-    elif last["c"] < last["bb_lower"] and last["v"] > last["vol_ma"]*1.5:
-        extreme = True
-        score += 20
-        reasons.append("跌破下轨放量")
+    return score
 
-    # 多空比
-    if ls_ratio < 0.95:
-        score += 8
-        reasons.append("多空极空")
-    elif ls_ratio > 1.05:
-        score -= 8
-        reasons.append("多空极多")
-
-    prob = max(min(score, 95), 5)
-
-    # 方向
-    direction = 1 if (trend == 1 and extreme and prob > 60) else \
-                -1 if (trend == -1 and extreme and prob < 40) else 0
-
-    atr = last["atr"]
-    if direction == 1:
-        sl = last["c"] - atr*1.5
-        tp = last["c"] + atr*2.5
-        entry = f"{last['c']-atr*0.5:.1f}~{last['c']+atr*0.5:.1f}"
-    elif direction == -1:
-        sl = last["c"] + atr*1.5
-        tp = last["c"] - atr*2.5
-        entry = f"{last['c']-atr*0.5:.1f}~{last['c']+atr*0.5:.1f}"
-    else:
-        sl = tp = None
-        entry = "观望"
-
-    reason = " | ".join(reasons) if reasons else "无明显信号"
-    return prob, direction, entry, sl, tp
-
+# ===========================
+# UI
+# ===========================
 def main():
-    st.set_page_config(layout="wide")
-    st.title("5分钟 ETH 波段信号")
+    st.title("工程级 5分钟波段看盘终端")
 
-    df = get_candles()
-    ls = get_ls_ratio()
-
-    if df is None:
-        st.error("无法获取数据")
+    df = fetch_okx()
+    if df is None or df.empty:
+        st.warning("暂无数据")
         return
-
-    prob, direction, entry, sl, tp = generate_signal(df, ls)
-
-    st.metric("胜率", f"{prob:.1f}%")
-    st.write("方向", "多" if direction==1 else "空" if direction==-1 else "观望")
-    st.write("入场区", entry)
-    st.write("止损", sl)
-    st.write("止盈", tp)
 
     # K线
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"]
+        x=df["ts"],
+        open=df["o"],
+        high=df["h"],
+        low=df["l"],
+        close=df["c"]
     ))
     st.plotly_chart(fig, use_container_width=True)
 
-    st_autorefresh(interval=15000)
+    # FVG
+    fvg = detect_fvg(df)
+    st.subheader("FVG 数量")
+    st.write(len(fvg))
+
+    # 扫单
+    high, low = sweep_levels(df)
+    st.subheader("扫单极值")
+    st.write(f"高点扫单: {high:.2f}")
+    st.write(f"低点扫单: {low:.2f}")
+
+    # 波段评分
+    score = swing_score(df)
+    st.subheader("波段方向评分")
+    st.write(score)
+
+    if score > 1:
+        st.success("方向：做多倾向（回调可多）")
+    elif score < -1:
+        st.error("方向：做空倾向（反弹可空）")
+    else:
+        st.info("方向：震荡观望")
+
+    # 最新价
+    last = df.iloc[-1]
+    st.write(f"最新价: {last['c']:.2f}")
 
 if __name__ == "__main__":
     main()
