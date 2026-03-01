@@ -4,25 +4,39 @@ import requests
 import numpy as np
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+from typing import Tuple, Optional
+import logging
 
-# ==================== 终极配置 ====================
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==================== 可调参数（支持侧边栏调整） ====================
+DEFAULT_VOL_MULTIPLIER = 1.0      # 放量倍数：1.0 表示只要有量就算
+DEFAULT_PROB_THRESHOLD = 45        # 评分阈值（多>45，空<55）
+DEFAULT_SL_ATR = 1.5               # 止损倍数
+DEFAULT_TP_ATR = 2.5               # 止盈倍数
+DEFAULT_ENTRY_ATR_OFFSET = 0.5     # 入场区间半宽（ATR倍数）
+# ==================================================================
+
+# 固定参数
 SYMBOL = "ETH-USDT"
 INTERVAL = "5m"
 LIMIT = 100
-VOL_MULTIPLIER = 1.2
-PROB_THRESHOLD = 50
-# =================================================
 
-def safe_request(url):
+def safe_request(url: str) -> Optional[dict]:
+    """安全的 API 请求，异常时返回 None"""
     try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        return None
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.warning(f"Request failed: {e}")
     return None
 
-def get_candles():
+@st.cache_data(ttl=60)  # 缓存60秒，避免重复请求
+def get_candles() -> Optional[pd.DataFrame]:
+    """获取K线数据并计算所有指标"""
     url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
     data = safe_request(url)
     if not data or data.get("code") != "0":
@@ -36,10 +50,12 @@ def get_candles():
     for col in ["o","h","l","c","v"]:
         df[col] = pd.to_numeric(df[col])
 
-    # 指标计算
+    # ---------- 指标计算 ----------
+    # EMA (趋势)
     df["ema_fast"] = df["c"].ewm(span=12, adjust=False).mean()
     df["ema_slow"] = df["c"].ewm(span=26, adjust=False).mean()
 
+    # RSI (动能)
     delta = df["c"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -47,21 +63,25 @@ def get_candles():
     avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(100)
+    df["rsi"] = df["rsi"].fillna(100)  # 若 avg_loss=0，RSI=100
 
+    # MACD (动量)
     exp12 = df["c"].ewm(span=12, adjust=False).mean()
     exp26 = df["c"].ewm(span=26, adjust=False).mean()
     df["macd"] = exp12 - exp26
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
     df["macd_hist"] = df["macd"] - df["macd_signal"]
 
+    # 布林带 (波动)
     df["bb_mid"] = df["c"].rolling(20).mean()
     df["bb_std"] = df["c"].rolling(20).std()
     df["bb_upper"] = df["bb_mid"] + 2 * df["bb_std"]
     df["bb_lower"] = df["bb_mid"] - 2 * df["bb_std"]
 
+    # 成交量均线
     df["vol_ma"] = df["v"].rolling(10).mean()
 
+    # ATR (波动率)
     high_low = df["h"] - df["l"]
     high_close = (df["h"] - df["c"].shift()).abs()
     low_close = (df["l"] - df["c"].shift()).abs()
@@ -71,29 +91,32 @@ def get_candles():
 
     return df
 
-def get_ls_ratio():
+def get_ls_ratio() -> float:
+    """获取多空比，失败返回 1.0"""
     url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
     data = safe_request(url)
     if data and data.get("code") == "0" and data["data"]:
         try:
             return float(data["data"][0][1])
-        except:
+        except (ValueError, IndexError, TypeError):
             pass
     return 1.0
 
-def generate_signal(df, ls_ratio):
-    if df is None or len(df) < 50:
-        return 50, 0, "数据不足", None, None, "数据不足"
-
-    last = df.iloc[-1]
-    required_cols = ["ema_fast", "ema_slow", "rsi", "macd_hist", "bb_upper", "bb_lower", "vol_ma", "v", "atr"]
-    if any(pd.isna(last[col]) for col in required_cols):
-        return 50, 0, "指标计算中", None, None, "指标暂未就绪"
-
+def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
+                                vol_mult: float) -> Tuple[int, list, bool]:
+    """
+    计算多因子评分和信号理由
+    因子权重说明：
+      - EMA: ±20  (趋势主导)
+      - RSI: +10/±10/±5 (中性/超买/超卖)
+      - MACD: ±12 (动能确认)
+      - 突破: +20 (极端行情加分)
+      - 多空比: ±8 (情绪逆向)
+    """
     score = 50
     reasons = []
-    trend = 1 if last["ema_fast"] > last["ema_slow"] else -1
 
+    # 趋势因子
     if last["ema_fast"] > last["ema_slow"]:
         score += 20
         reasons.append("EMA多")
@@ -101,6 +124,7 @@ def generate_signal(df, ls_ratio):
         score -= 18
         reasons.append("EMA空")
 
+    # 动能因子
     rsi = last["rsi"]
     if 30 < rsi < 70:
         score += 10
@@ -112,6 +136,7 @@ def generate_signal(df, ls_ratio):
         score += 5
         reasons.append("RSI超卖")
 
+    # MACD
     if last["macd_hist"] > 0:
         score += 12
         reasons.append("MACD多头")
@@ -119,16 +144,18 @@ def generate_signal(df, ls_ratio):
         score -= 12
         reasons.append("MACD空头")
 
+    # 突破因子（极端行情）
     extreme = False
-    if last["c"] > last["bb_upper"] and last["v"] > last["vol_ma"] * VOL_MULTIPLIER:
+    if last["c"] > last["bb_upper"] and last["v"] > last["vol_ma"] * vol_mult:
         extreme = True
         score += 20
-        reasons.append("突破上轨放量")
-    elif last["c"] < last["bb_lower"] and last["v"] > last["vol_ma"] * VOL_MULTIPLIER:
+        reasons.append("突破上轨")
+    elif last["c"] < last["bb_lower"] and last["v"] > last["vol_ma"] * vol_mult:
         extreme = True
         score += 20
-        reasons.append("跌破下轨放量")
+        reasons.append("跌破下轨")
 
+    # 情绪因子
     if ls_ratio < 0.95:
         score += 8
         reasons.append("多空极空")
@@ -136,87 +163,162 @@ def generate_signal(df, ls_ratio):
         score -= 8
         reasons.append("多空极多")
 
-    prob = max(min(score, 95), 5)
+    return max(min(score, 95), 5), reasons, extreme
 
+def generate_signal(df: pd.DataFrame, ls_ratio: float,
+                    vol_mult: float, prob_thresh: float,
+                    sl_atr: float, tp_atr: float, entry_offset: float) -> dict:
+    """
+    生成完整交易信号
+    返回字典包含：方向、触发价、止损、止盈、入场区间、评分、理由
+    """
+    if df is None or len(df) < 50:
+        return {"direction": 0, "trigger": None, "sl": None, "tp": None,
+                "entry_range": "数据不足", "prob": 50, "reason": "数据不足"}
+
+    last = df.iloc[-1]
+    required = ["ema_fast", "ema_slow", "rsi", "macd_hist", "bb_upper", "bb_lower", "vol_ma", "v", "atr"]
+    if any(pd.isna(last[col]) for col in required):
+        return {"direction": 0, "trigger": None, "sl": None, "tp": None,
+                "entry_range": "指标计算中", "prob": 50, "reason": "指标暂未就绪"}
+
+    # 计算评分
+    prob, reasons, extreme = calculate_score_and_reasons(last, ls_ratio, vol_mult)
+
+    # 趋势方向
+    trend = 1 if last["ema_fast"] > last["ema_slow"] else -1
+
+    # 最终方向：只依赖趋势+评分（阈值对称）
     direction = 0
-    if trend == 1 and extreme and prob > PROB_THRESHOLD:
+    if trend == 1 and prob > prob_thresh:
         direction = 1
-    elif trend == -1 and extreme and prob < PROB_THRESHOLD:
+    elif trend == -1 and prob < (100 - prob_thresh):
         direction = -1
 
     atr = last["atr"]
     if pd.isna(atr) or atr <= 0:
-        sl = tp = None
-        entry = "ATR无效"
-        return prob, direction, entry, sl, tp, "ATR异常"
+        return {"direction": 0, "trigger": None, "sl": None, "tp": None,
+                "entry_range": "ATR无效", "prob": prob, "reason": "ATR异常"}
 
+    # 触发价：做多以上轨为基准，做空以下轨为基准（与信号逻辑一致）
     if direction == 1:
-        sl = last["c"] - atr * 1.5
-        tp = last["c"] + atr * 2.5
-        entry = f"{last['c'] - atr * 0.5:.1f} ~ {last['c'] + atr * 0.5:.1f}"
+        trigger = last["bb_upper"]
+        sl = trigger - atr * sl_atr
+        tp = trigger + atr * tp_atr
+        entry_low = trigger - atr * entry_offset
+        entry_high = trigger + atr * entry_offset
     elif direction == -1:
-        sl = last["c"] + atr * 1.5
-        tp = last["c"] - atr * 2.5
-        entry = f"{last['c'] - atr * 0.5:.1f} ~ {last['c'] + atr * 0.5:.1f}"
+        trigger = last["bb_lower"]
+        sl = trigger + atr * sl_atr
+        tp = trigger - atr * tp_atr
+        entry_low = trigger - atr * entry_offset
+        entry_high = trigger + atr * entry_offset
     else:
+        trigger = None
         sl = tp = None
-        entry = "观望"
+        entry_low = entry_high = None
 
-    reason = " | ".join(reasons) if reasons else "无明显信号"
-    return prob, direction, entry, sl, tp, reason
+    entry_range = f"{entry_low:.1f} ~ {entry_high:.1f}" if entry_low else "观望"
+    reason_str = " | ".join(reasons) if reasons else "无明显信号"
+
+    return {
+        "direction": direction,
+        "trigger": trigger,
+        "sl": sl,
+        "tp": tp,
+        "entry_range": entry_range,
+        "prob": prob,
+        "reason": reason_str
+    }
 
 def main():
-    st.set_page_config(
-        layout="wide",
-        page_title="ETH 5分钟波段信号"
-    )
-    st.title("📈 5分钟 ETH 波段信号（终极版）")
+    st.set_page_config(layout="wide", page_title="ETH 高频信号·清晰版")
+    st.title("📈 5分钟 ETH 高频信号系统（逻辑清晰版）")
 
-    with st.spinner("正在获取市场数据..."):
+    # ---------- 侧边栏参数调节 ----------
+    with st.sidebar:
+        st.header("⚙️ 参数调节")
+        vol_mult = st.slider("放量倍数", 0.8, 2.0, 1.0, 0.1,
+                             help="1.0 表示只要有量就算")
+        prob_thresh = st.slider("评分阈值", 30, 60, 45, 1,
+                                help="多>阈值，空<100-阈值")
+        sl_atr = st.slider("止损 (ATR倍数)", 1.0, 3.0, 1.5, 0.1)
+        tp_atr = st.slider("止盈 (ATR倍数)", 1.5, 4.0, 2.5, 0.1)
+        entry_offset = st.slider("入场区间半宽 (ATR倍数)", 0.2, 1.0, 0.5, 0.1)
+
+    # ---------- 获取数据 ----------
+    with st.spinner("获取市场数据..."):
         df = get_candles()
         ls = get_ls_ratio()
 
     if df is None or len(df) < 50:
-        st.error("❌ 无法获取足够K线数据，请检查网络或稍后重试")
+        st.error("❌ 无法获取足够K线数据，请检查网络")
         return
 
-    prob, direction, entry, sl, tp, reason = generate_signal(df, ls)
+    # ---------- 生成信号 ----------
+    signal = generate_signal(df, ls, vol_mult, prob_thresh,
+                             sl_atr, tp_atr, entry_offset)
 
+    # ---------- 使用 session_state 记录上次方向，用于平仓提示 ----------
+    if "last_direction" not in st.session_state:
+        st.session_state.last_direction = 0
+    current_dir = signal["direction"]
+    if current_dir != 0 and current_dir != st.session_state.last_direction:
+        if st.session_state.last_direction != 0:
+            st.warning(f"⚠️ 信号反转：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}，反向开仓")
+    st.session_state.last_direction = current_dir
+
+    # ---------- 核心指标展示 ----------
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("胜率评分", f"{prob:.1f}%")
+        st.metric("胜率评分", f"{signal['prob']}%")
     with col2:
-        dir_text = "📈 多" if direction == 1 else "📉 空" if direction == -1 else "⚖️ 观望"
+        dir_text = "📈 多" if current_dir == 1 else "📉 空" if current_dir == -1 else "⚖️ 观望"
         st.metric("方向", dir_text)
     with col3:
-        st.metric("入场区间", entry)
+        st.metric("入场区间", signal["entry_range"])
 
-    st.caption(f"**信号理由**: {reason}")
+    st.caption(f"**信号理由**: {signal['reason']}")
 
-    if sl is not None and tp is not None:
+    # 止损止盈（如有）
+    if signal["sl"] and signal["tp"]:
         col4, col5 = st.columns(2)
         with col4:
-            st.metric("止损", f"{sl:.2f}")
+            st.metric("止损", f"{signal['sl']:.2f}")
         with col5:
-            st.metric("止盈", f"{tp:.2f}")
+            st.metric("止盈", f"{signal['tp']:.2f}")
     else:
         st.info("当前无明确交易信号，建议观望")
 
-    current_price = df.iloc[-1]["c"]
-    st.metric("当前价格", f"{current_price:.2f}")
+    # 当前价格和触发价
+    last_price = df.iloc[-1]["c"]
+    col6, col7 = st.columns(2)
+    with col6:
+        st.metric("当前价格", f"{last_price:.2f}")
+    with col7:
+        trigger_disp = f"{signal['trigger']:.2f}" if signal["trigger"] else "--"
+        st.metric("触发价", trigger_disp)
 
+    # ---------- K线图 ----------
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="K线"
     ))
+    # 布林带
     fig.add_trace(go.Scatter(x=df["time"], y=df["bb_upper"], line=dict(color='gray', width=1), name="布林上轨"))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["bb_lower"], line=dict(color='gray', width=1), name="布林下轨", fill='tonexty', fillcolor='rgba(128,128,128,0.2)'))
+    fig.add_trace(go.Scatter(x=df["time"], y=df["bb_lower"], line=dict(color='gray', width=1), name="布林下轨",
+                             fill='tonexty', fillcolor='rgba(128,128,128,0.2)'))
+    # EMA
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_fast"], line=dict(color='orange', width=1), name="EMA12"))
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_slow"], line=dict(color='blue', width=1), name="EMA26"))
-
+    # 如果当前有触发价，用水平线标记
+    if signal["trigger"]:
+        fig.add_hline(y=signal["trigger"], line_dash="dash", line_color="red",
+                      annotation_text="触发位", annotation_position="bottom right")
     fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, width='stretch')  # 已修改
+    st.plotly_chart(fig, use_container_width=True)
 
+    # 自动刷新
     st_autorefresh(interval=60000, key="auto_refresh")
 
 if __name__ == "__main__":
