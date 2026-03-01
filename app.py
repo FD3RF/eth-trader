@@ -18,6 +18,69 @@ except Exception:
 # ====================== 页面配置 ======================
 st.set_page_config(layout="wide", page_title="交易级分析终端", page_icon="📊")
 
+# ====================== 全局样式（紧凑）======================
+st.markdown("""
+<style>
+    /* 压缩整体间距 */
+    .main > div { padding: 0; }
+    .block-container { max-width: 100%; padding: 0 0.25rem; }
+    /* 指标卡片 */
+    .metric-card {
+        background: rgba(255,255,255,0.05);
+        border-radius: 6px;
+        padding: 0.3rem 0.2rem;
+        text-align: center;
+        height: 65px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .metric-card p { color: #aaa; font-size: 0.7rem; margin: 0; }
+    .metric-card h3 { font-size: 1.6rem; margin: -2px 0 0 0; line-height: 1.2; font-weight: 500; }
+    /* 方向标签 */
+    .dir-badge {
+        display: inline-block;
+        padding: 0.2rem 0.6rem;
+        border-radius: 20px;
+        font-size: 0.9rem;
+        font-weight: bold;
+        text-align: center;
+    }
+    /* 进场策略卡片 */
+    .strategy-card {
+        background: rgba(0,0,0,0.2);
+        border-left: 4px solid;
+        border-radius: 6px;
+        padding: 0.5rem 0.8rem;
+        margin: 0.2rem 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    /* 因子贡献条 */
+    .factor-bar {
+        display: flex;
+        align-items: center;
+        margin: 2px 0;
+        font-size: 0.75rem;
+    }
+    .factor-name { width: 70px; color: #aaa; }
+    .factor-bar-bg {
+        flex: 1;
+        height: 14px;
+        background: #222;
+        border-radius: 7px;
+        margin: 0 8px;
+    }
+    .factor-bar-fill {
+        height: 100%;
+        border-radius: 7px;
+    }
+    .factor-value { width: 40px; text-align: right; font-weight: bold; }
+    hr { margin: 0.3rem 0; border: 0; border-top: 0.5px solid #333; }
+</style>
+""", unsafe_allow_html=True)
+
 # ====================== 工具函数 ======================
 def safe_request(url, timeout=5, retries=2):
     for i in range(retries + 1):
@@ -70,8 +133,8 @@ def get_candles(bar="5m", limit=500):
             return None
 
         # 计算基础指标
-        df['ema_f'] = df['c'].ewm(span=12, adjust=False).mean()   # 快线EMA
-        df['ema_s'] = df['c'].ewm(span=26, adjust=False).mean()   # 慢线EMA
+        df['ema_f'] = df['c'].ewm(span=12, adjust=False).mean()
+        df['ema_s'] = df['c'].ewm(span=26, adjust=False).mean()
         delta = df['c'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
@@ -88,7 +151,7 @@ def get_candles(bar="5m", limit=500):
         df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
         df['vol_ma'] = df['v'].rolling(10).mean()
 
-        # 资金净流入（基于最近100笔成交）
+        # 资金净流入
         trades_url = "https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100"
         trades_data = safe_request(trades_url, timeout=5)
         if trades_data and trades_data.get('code') == '0':
@@ -173,13 +236,9 @@ def get_trend_4h():
         return 0
 
 def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
-    """
-    工程级信号生成（修复版）
-    返回：
-    (胜率, 方向, 入场区, 止损, 止盈, 理由, 详细因子, 当前价, ATR)
-    """
+    """生成信号（精简版，返回必要数据）"""
     if df is None or len(df) < 50:
-        return 50.0, 0, "数据不足", None, None, "数据不足", [], None, None
+        return 50.0, 0, None, None, None, "", [], None, None
 
     default_weights = {
         'ema_cross': (20, -18),
@@ -216,51 +275,51 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
     if trend4h == 1:
         score += weights['trend4h']
         reasons.append("4H趋势多头")
-        details.append({"因子": "4H趋势", "状态": "多头", "贡献": f"+{weights['trend4h']}"})
+        details.append({"因子": "4H趋势", "状态": "多头", "贡献": weights['trend4h']})
     elif trend4h == -1:
         score -= weights['trend4h']
         reasons.append("4H趋势空头")
-        details.append({"因子": "4H趋势", "状态": "空头", "贡献": f"-{weights['trend4h']}"})
+        details.append({"因子": "4H趋势", "状态": "空头", "贡献": -weights['trend4h']})
     else:
-        details.append({"因子": "4H趋势", "状态": "不明", "贡献": "0"})
+        details.append({"因子": "4H趋势", "状态": "不明", "贡献": 0})
 
     # EMA
     ema_pos, ema_neg = weights['ema_cross']
     if last['ema_f'] > last['ema_s']:
         score += ema_pos
         reasons.append("EMA金叉")
-        details.append({"因子": "EMA", "状态": "金叉", "贡献": f"+{ema_pos}"})
+        details.append({"因子": "EMA", "状态": "金叉", "贡献": ema_pos})
     else:
         score += ema_neg
         reasons.append("EMA死叉")
-        details.append({"因子": "EMA", "状态": "死叉", "贡献": f"{ema_neg}"})
+        details.append({"因子": "EMA", "状态": "死叉", "贡献": ema_neg})
 
     # RSI
     if not pd.isna(last['rsi']):
         if 30 < last['rsi'] < 70:
             score += weights['rsi_mid']
             reasons.append(f"RSI中性({last['rsi']:.1f})")
-            details.append({"因子": "RSI", "状态": "中性", "贡献": f"+{weights['rsi_mid']}"})
+            details.append({"因子": "RSI", "状态": "中性", "贡献": weights['rsi_mid']})
         elif last['rsi'] > 75:
             score += weights['rsi_overbought']
             reasons.append(f"RSI超买({last['rsi']:.1f})")
-            details.append({"因子": "RSI", "状态": "超买", "贡献": f"{weights['rsi_overbought']}"})
+            details.append({"因子": "RSI", "状态": "超买", "贡献": weights['rsi_overbought']})
         elif last['rsi'] < 25:
             score += weights['rsi_oversold']
             reasons.append(f"RSI超卖({last['rsi']:.1f})")
-            details.append({"因子": "RSI", "状态": "超卖", "贡献": f"+{weights['rsi_oversold']}"})
+            details.append({"因子": "RSI", "状态": "超卖", "贡献": weights['rsi_oversold']})
     else:
-        details.append({"因子": "RSI", "状态": "NA", "贡献": "0"})
+        details.append({"因子": "RSI", "状态": "NA", "贡献": 0})
 
     # MACD
     if last['macd_hist'] > 0:
         score += weights['macd_hist_pos']
         reasons.append("MACD柱为正")
-        details.append({"因子": "MACD", "状态": "柱正", "贡献": f"+{weights['macd_hist_pos']}"})
+        details.append({"因子": "MACD", "状态": "柱正", "贡献": weights['macd_hist_pos']})
     else:
         score += weights['macd_hist_neg']
         reasons.append("MACD柱为负")
-        details.append({"因子": "MACD", "状态": "柱负", "贡献": f"{weights['macd_hist_neg']}"})
+        details.append({"因子": "MACD", "状态": "柱负", "贡献": weights['macd_hist_neg']})
 
     # 极点突破
     extreme_break = False
@@ -268,66 +327,66 @@ def generate_signal(df, ls_ratio, mvrv_z=0, weights=None):
         extreme_break = True
         score += weights['extreme_break']
         reasons.append("突破上轨放量")
-        details.append({"因子": "突破", "状态": "上轨放量", "贡献": f"+{weights['extreme_break']}"})
+        details.append({"因子": "突破", "状态": "上轨放量", "贡献": weights['extreme_break']})
     elif last['c'] < last['bb_lower'] and last['v'] > last['vol_ma'] * 1.5:
         extreme_break = True
         score += weights['extreme_break']
         reasons.append("跌破下轨放量")
-        details.append({"因子": "突破", "状态": "下轨放量", "贡献": f"+{weights['extreme_break']}"})
+        details.append({"因子": "突破", "状态": "下轨放量", "贡献": weights['extreme_break']})
     else:
-        details.append({"因子": "突破", "状态": "非极点", "贡献": "0"})
+        details.append({"因子": "突破", "状态": "非极点", "贡献": 0})
 
     # 成交量
     if last['v'] > last['vol_ma'] * 1.3:
         score += weights['volume_surge']
-        details.append({"因子": "成交量", "状态": "放量", "贡献": f"+{weights['volume_surge']}"})
+        details.append({"因子": "成交量", "状态": "放量", "贡献": weights['volume_surge']})
     else:
         score += weights['volume_shrink']
-        details.append({"因子": "成交量", "状态": "缩量", "贡献": f"{weights['volume_shrink']}"})
+        details.append({"因子": "成交量", "状态": "缩量", "贡献": weights['volume_shrink']})
 
     # 资金净流
     if last['net_flow'] > 0:
         score += weights['net_flow_pos']
-        details.append({"因子": "资金净流", "状态": "净流入", "贡献": f"+{weights['net_flow_pos']}"})
+        details.append({"因子": "资金净流", "状态": "净流入", "贡献": weights['net_flow_pos']})
     else:
         score += weights['net_flow_neg']
-        details.append({"因子": "资金净流", "状态": "净流出", "贡献": f"{weights['net_flow_neg']}"})
+        details.append({"因子": "资金净流", "状态": "净流出", "贡献": weights['net_flow_neg']})
 
     # 多空比
     if ls_ratio < 0.95:
         score += weights['ls_ratio_low']
         reasons.append("多空比极端空")
-        details.append({"因子": "多空比", "状态": "极空", "贡献": f"+{weights['ls_ratio_low']}"})
+        details.append({"因子": "多空比", "状态": "极空", "贡献": weights['ls_ratio_low']})
     elif ls_ratio > 1.05:
         score += weights['ls_ratio_high']
         reasons.append("多空比极端多")
-        details.append({"因子": "多空比", "状态": "极多", "贡献": f"{weights['ls_ratio_high']}"})
+        details.append({"因子": "多空比", "状态": "极多", "贡献": weights['ls_ratio_high']})
     else:
-        details.append({"因子": "多空比", "状态": "中性", "贡献": "0"})
+        details.append({"因子": "多空比", "状态": "中性", "贡献": 0})
 
     # Stochastic
     if not pd.isna(last['stoch_k']) and not pd.isna(last['stoch_d']):
         if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 20:
             score += weights['stoch_cross']
             reasons.append("Stoch超卖金叉")
-            details.append({"因子": "Stoch", "状态": "超卖金叉", "贡献": f"+{weights['stoch_cross']}"})
+            details.append({"因子": "Stoch", "状态": "超卖金叉", "贡献": weights['stoch_cross']})
         elif last['stoch_k'] < last['stoch_d'] and last['stoch_k'] > 80:
             score -= weights['stoch_cross']
             reasons.append("Stoch超买死叉")
-            details.append({"因子": "Stoch", "状态": "超买死叉", "贡献": f"-{weights['stoch_cross']}"})
+            details.append({"因子": "Stoch", "状态": "超买死叉", "贡献": -weights['stoch_cross']})
 
     # ADX
     if not pd.isna(last['adx']) and last['adx'] > 25:
         score += weights['adx_strong']
-        details.append({"因子": "ADX", "状态": "强趋势", "贡献": f"+{weights['adx_strong']}"})
+        details.append({"因子": "ADX", "状态": "强趋势", "贡献": weights['adx_strong']})
 
-    # MVRV (模拟)
+    # MVRV
     if mvrv_z < 0:
         score += weights['mvrv_low']
-        details.append({"因子": "MVRV", "状态": "低估", "贡献": f"+{weights['mvrv_low']}"})
+        details.append({"因子": "MVRV", "状态": "低估", "贡献": weights['mvrv_low']})
     elif mvrv_z > 7:
         score += weights['mvrv_high']
-        details.append({"因子": "MVRV", "状态": "泡沫", "贡献": f"{weights['mvrv_high']}"})
+        details.append({"因子": "MVRV", "状态": "泡沫", "贡献": weights['mvrv_high']})
 
     prob = max(min(score, 95), 5)
 
@@ -371,45 +430,106 @@ def main():
     ls_ratio = get_ls_ratio()
     mvrv_z = np.random.uniform(-1, 3)  # 模拟MVRV
 
-    # 生成信号
     prob, direction, entry_zone, sl, tp, reason, details, current_price, atr = generate_signal(df, ls_ratio, mvrv_z)
 
-    # 显示核心指标
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("实时价格", f"${current_price:.2f}")
-    col2.metric("AI胜率", f"{prob:.1f}%")
-    col3.metric("多空比", f"{ls_ratio:.2f}")
-    col4.metric("ATR波幅", f"{atr:.2f}")
-    col5.metric("信号方向", "📈多头" if direction==1 else "📉空头" if direction==-1 else "⚪观望")
+    # ====================== 顶部指标卡片（5个） ======================
+    cols = st.columns(5, gap="small")
+    with cols[0]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <p>实时价格</p>
+            <h3 style="color:#00cc77;">${current_price:.2f}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <p>AI胜率</p>
+            <h3 style="color:#00cc77;">{prob:.1f}%</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    with cols[2]:
+        ratio_color = "#00cc77" if ls_ratio > 1.02 else ("#ff6b6b" if ls_ratio < 0.98 else "#aaa")
+        st.markdown(f"""
+        <div class="metric-card">
+            <p>多空比</p>
+            <h3 style="color:{ratio_color};">{ls_ratio:.2f}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    with cols[3]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <p>ATR波幅</p>
+            <h3 style="color:#aaa;">{atr:.2f}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    with cols[4]:
+        dir_color = "#00cc77" if direction==1 else ("#ff6b6b" if direction==-1 else "#888")
+        dir_text = "📈多头" if direction==1 else ("📉空头" if direction==-1 else "⚪观望")
+        st.markdown(f"""
+        <div class="metric-card">
+            <p>信号方向</p>
+            <h3 style="color:{dir_color};">{dir_text}</h3>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # 进场策略
-    st.markdown("---")
-    st.subheader("🎯 精准进场策略")
+    # ====================== 进场策略卡片（简洁） ======================
     if direction != 0:
-        col_a, col_b, col_c = st.columns(3)
-        col_a.info(f"最佳入场区: {entry_zone}")
-        col_b.error(f"动态止损: ${sl:.2f}")
-        col_c.success(f"动态止盈: ${tp:.2f}")
+        strategy_color = "#00cc77" if direction==1 else "#ff6b6b"
+        st.markdown(f"""
+        <div class="strategy-card" style="border-left-color:{strategy_color};">
+            <span style="font-size:0.9rem; color:#ccc;">入场区 <b style="color:{strategy_color};">{entry_zone}</b></span>
+            <span style="font-size:0.9rem; color:#ccc;">止损 <b style="color:#ff6b6b;">${sl:.2f}</b></span>
+            <span style="font-size:0.9rem; color:#ccc;">止盈 <b style="color:#00cc77;">${tp:.2f}</b></span>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.info("当前无明确信号，建议观望")
+        st.markdown("""
+        <div class="strategy-card" style="border-left-color:#888;">
+            <span style="color:#aaa;">当前无明确信号，建议观望</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # 详细因子
+    # ====================== 多因子贡献（进度条形式） ======================
     if details:
         st.markdown("---")
-        st.subheader("📊 多因子贡献")
+        st.subheader("📊 因子贡献")
+        # 只显示贡献绝对值较大的前8个因子，避免杂乱
         df_details = pd.DataFrame(details)
-        st.dataframe(df_details, use_container_width=True)
+        df_details['abs'] = df_details['贡献'].abs()
+        df_details = df_details.sort_values('abs', ascending=False).head(8)
 
-    # K线图
+        for _, row in df_details.iterrows():
+            val = row['贡献']
+            color = "#00cc77" if val > 0 else "#ff6b6b"
+            width = min(abs(val)/2, 100)  # 缩放显示
+            st.markdown(f"""
+            <div class="factor-bar">
+                <span class="factor-name">{row['因子']}</span>
+                <div class="factor-bar-bg">
+                    <div class="factor-bar-fill" style="width:{width}%; background:{color};"></div>
+                </div>
+                <span class="factor-value" style="color:{color};">{val:+.1f}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ====================== K线图（紧凑） ======================
     st.markdown("---")
     st.subheader("📈 K线图")
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"],
-        increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
+        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        line=dict(width=0.8)
     ))
-    fig.update_layout(xaxis_rangeslider_visible=False, height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        xaxis_rangeslider_visible=False,
+        height=450,  # 适当降低高度
+        margin=dict(l=10, r=10, t=10, b=10),
+        hovermode='x unified',
+        template="plotly_dark"
+    )
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 if __name__ == "__main__":
     main()
