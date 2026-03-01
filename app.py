@@ -168,15 +168,7 @@ def generate_signal(df, ls_ratio):
 def main():
     st.set_page_config(
         layout="wide",
-        page_title="ETH 5分钟波段信号",
-        theme={
-            "base": "dark",
-            "primaryColor": "#c98bdb",
-            "backgroundColor": "#0e1117",
-            "secondaryBackgroundColor": "#262730",
-            "textColor": "#fafafa",
-            "font": "sans serif"
-        }
+        page_title="ETH 5分钟波段信号"
     )
     st.title("📈 5分钟 ETH 波段信号（终极版）")
 
@@ -223,7 +215,7 @@ def main():
     fig.add_trace(go.Scatter(x=df["time"], y=df["ema_slow"], line=dict(color='blue', width=1), name="EMA26"))
 
     fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')  # 已修改
 
     st_autorefresh(interval=60000, key="auto_refresh")
 
