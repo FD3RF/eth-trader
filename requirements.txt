@@ -1,8 +1,8 @@
-altair==4.2.2
-streamlit==1.19.0
+streamlit>=1.43.0
 streamlit-autorefresh==1.0.1
 pandas
 numpy
 requests
 plotly
 vectorbt
+altair  # 版本由 streamlit 自动管理
