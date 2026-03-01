@@ -1,300 +1,388 @@
 import streamlit as st
 import pandas as pd
-import requests
 import numpy as np
+import requests
+import json
+import threading
+import time
+from datetime import datetime
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-from typing import Tuple, Optional
-import logging
+from collections import deque
+import websocket
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ==================== 可调参数（支持侧边栏调整） ====================
-DEFAULT_VOL_MULTIPLIER = 1.0      # 放量倍数：1.0 表示只要有量就算
-DEFAULT_PROB_THRESHOLD = 45        # 评分阈值（多>45，空<55）
-DEFAULT_SL_ATR = 1.5               # 止损倍数
-DEFAULT_TP_ATR = 2.5               # 止盈倍数
-DEFAULT_ENTRY_ATR_OFFSET = 0.5     # 入场区间半宽（ATR倍数）
-# ==================================================================
-
-# 固定参数
+# ===============================
+# 配置参数
+# ===============================
 SYMBOL = "ETH-USDT"
-INTERVAL = "5m"
-LIMIT = 100
+TIMEFRAME = "5m"                # 5分钟K线
+MAX_KEEP = 300                   # 保留K线数量
+RISK_PER_TRADE = 0.01            # 单笔风险1%
+MIN_RR = 1.5                     # 最小盈亏比
 
-def safe_request(url: str) -> Optional[dict]:
-    """安全的 API 请求，异常时返回 None"""
+# ===============================
+# 安全配置：必须使用secrets
+# ===============================
+try:
+    API_KEY = st.secrets["API_KEY"]
+    API_SECRET = st.secrets["API_SECRET"]
+    PASSPHRASE = st.secrets["PASSPHRASE"]
+except Exception:
+    st.error("❌ 请在 .streamlit/secrets.toml 中配置您的OKX API密钥")
+    st.stop()
+
+# ===============================
+# 全局状态（线程安全）
+# ===============================
+if "df" not in st.session_state:
+    st.session_state.df = pd.DataFrame()
+if "data_queue" not in st.session_state:
+    st.session_state.data_queue = deque(maxlen=20)
+if "ws_status" not in st.session_state:
+    st.session_state.ws_status = "连接中..."
+if "last_signal" not in st.session_state:
+    st.session_state.last_signal = None   # 存储上一次信号，用于检查有效期
+if "signal_history" not in st.session_state:
+    st.session_state.signal_history = deque(maxlen=20)
+
+# ===============================
+# WebSocket 实时K线（OKX）
+# ===============================
+def on_message(ws, message):
     try:
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            return resp.json()
+        data = json.loads(message)
+        if data.get("arg", {}).get("channel") == f"candle{TIMEFRAME}":
+            for item in data.get("data", []):
+                candle = {
+                    "time": pd.to_datetime(int(item[0]), unit='ms'),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5])
+                }
+                st.session_state.data_queue.append(candle)
     except Exception as e:
-        logger.warning(f"Request failed: {e}")
-    return None
+        print(f"消息解析错误: {e}")
 
-@st.cache_data(ttl=60)
-def get_candles() -> Optional[pd.DataFrame]:
-    """获取K线数据并计算所有指标"""
-    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={INTERVAL}&limit={LIMIT}"
-    data = safe_request(url)
-    if not data or data.get("code") != "0":
-        return None
+def on_error(ws, error):
+    st.session_state.ws_status = f"错误: {error}"
 
-    df = pd.DataFrame(data["data"], columns=[
-        "ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"
-    ])[::-1].reset_index(drop=True)
+def on_close(ws, close_status_code, close_msg):
+    st.session_state.ws_status = "断开，尝试重连..."
 
-    df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
-    for col in ["o","h","l","c","v"]:
-        df[col] = pd.to_numeric(df[col])
+def on_open(ws):
+    subscribe_msg = {
+        "op": "subscribe",
+        "args": [{"channel": f"candle{TIMEFRAME}", "instId": SYMBOL}]
+    }
+    ws.send(json.dumps(subscribe_msg))
+    st.session_state.ws_status = "已连接"
 
-    # 指标计算
-    df["ema_fast"] = df["c"].ewm(span=12, adjust=False).mean()
-    df["ema_slow"] = df["c"].ewm(span=26, adjust=False).mean()
+def start_ws():
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                "wss://ws.okx.com:8443/ws/v5/public",
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            ws.run_forever(ping_interval=30, ping_timeout=10)
+        except Exception as e:
+            print(f"WebSocket异常: {e}")
+        time.sleep(5)
 
-    delta = df["c"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(100)
+if not any(thread.name == "OKX_WS" for thread in threading.enumerate()):
+    thread = threading.Thread(target=start_ws, daemon=True, name="OKX_WS")
+    thread.start()
 
-    exp12 = df["c"].ewm(span=12, adjust=False).mean()
-    exp26 = df["c"].ewm(span=26, adjust=False).mean()
-    df["macd"] = exp12 - exp26
-    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_signal"]
+# ===============================
+# 辅助函数：获取1小时趋势（用于多周期过滤）
+# ===============================
+@st.cache_data(ttl=300)
+def get_1h_trend():
+    try:
+        url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar=1H&limit=100"
+        res = requests.get(url, timeout=5).json()
+        if res.get('code') != '0':
+            return 0
+        data = res['data']
+        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
+        df = df[::-1].reset_index(drop=True)
+        df['c'] = df['c'].astype(float)
+        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        if last['c'] > last['ema50'] and last['ema50'] > prev['ema50']:
+            return 1   # 多头趋势
+        elif last['c'] < last['ema50'] and last['ema50'] < prev['ema50']:
+            return -1  # 空头趋势
+        else:
+            return 0
+    except:
+        return 0
 
-    df["bb_mid"] = df["c"].rolling(20).mean()
-    df["bb_std"] = df["c"].rolling(20).std()
-    df["bb_upper"] = df["bb_mid"] + 2 * df["bb_std"]
-    df["bb_lower"] = df["bb_mid"] - 2 * df["bb_std"]
+# ===============================
+# 数据处理
+# ===============================
+def update_dataframe():
+    if not st.session_state.data_queue:
+        return False
+    new_rows = []
+    while st.session_state.data_queue:
+        new_rows.append(st.session_state.data_queue.popleft())
+    if not new_rows:
+        return False
+    new_df = pd.DataFrame(new_rows).drop_duplicates(subset=["time"]).sort_values("time")
+    if st.session_state.df.empty:
+        st.session_state.df = new_df.tail(MAX_KEEP)
+    else:
+        combined = pd.concat([st.session_state.df, new_df]).drop_duplicates(subset=["time"]).sort_values("time")
+        st.session_state.df = combined.tail(MAX_KEEP)
+    return True
 
-    df["vol_ma"] = df["v"].rolling(10).mean()
+def compute_indicators(df):
+    if len(df) < 50:
+        return df
+    df = df.copy()
+    close = df['close']
+    high = df['high']
+    low = df['low']
 
-    high_low = df["h"] - df["l"]
-    high_close = (df["h"] - df["c"].shift()).abs()
-    low_close = (df["l"] - df["c"].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=True)
-    df["atr"] = tr.rolling(14).mean()
-    df["atr"] = df["atr"].replace(0, np.nan)
+    # EMA
+    df['ema12'] = close.ewm(span=12, adjust=False).mean()
+    df['ema26'] = close.ewm(span=26, adjust=False).mean()
+    df['ema50'] = close.ewm(span=50, adjust=False).mean()
+
+    # MACD
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+
+    # RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['rsi'] = 100 - (100 / (1 + rs))
+
+    # ATR
+    tr = np.maximum(
+        high - low,
+        np.maximum(abs(high - close.shift()), abs(low - close.shift()))
+    )
+    df['atr'] = tr.rolling(14).mean()
+
+    # 布林带
+    df['bb_mid'] = close.rolling(20).mean()
+    df['bb_std'] = close.rolling(20).std()
+    df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
+    df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
+
+    # 成交量MA
+    df['vol_ma'] = df['volume'].rolling(10).mean()
 
     return df
 
-def get_ls_ratio() -> float:
-    """获取多空比，失败返回 1.0"""
-    url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId=ETH-USDT&period=5m"
-    data = safe_request(url)
-    if data and data.get("code") == "0" and data["data"]:
-        try:
-            return float(data["data"][0][1])
-        except (ValueError, IndexError, TypeError):
-            pass
-    return 1.0
+# ===============================
+# 信号生成（多因子 + 趋势过滤 + 盈亏比检查）
+# ===============================
+def generate_signal(df, trend_1h, current_index):
+    if len(df) < 50 or current_index < 50:
+        return None
 
-def calculate_score_and_reasons(last: pd.Series, ls_ratio: float,
-                                vol_mult: float) -> Tuple[int, list, bool]:
-    """
-    计算多因子评分和信号理由
-    因子权重说明：
-      - EMA: ±20  (趋势主导)
-      - RSI: +10/±10/±5 (中性/超买/超卖)
-      - MACD: ±12 (动能确认)
-      - 突破: +20 (极端行情加分)
-      - 多空比: ±8 (情绪逆向)
-    """
-    score = 50
-    reasons = []
+    last = df.iloc[current_index]
+    prev = df.iloc[current_index-1]
+    atr = last['atr'] if not np.isnan(last['atr']) else last['close'] * 0.01
 
-    if last["ema_fast"] > last["ema_slow"]:
-        score += 20
-        reasons.append("EMA多")
+    # 基础条件
+    ema_bull = last['close'] > last['ema12']
+    ema_bear = last['close'] < last['ema12']
+    macd_bull = last['macd_hist'] > 0 and last['macd_hist'] > prev['macd_hist']
+    macd_bear = last['macd_hist'] < 0 and last['macd_hist'] < prev['macd_hist']
+    rsi_neutral = 30 < last['rsi'] < 70 if not np.isnan(last['rsi']) else False
+    volume_confirm = last['volume'] > last['vol_ma'] * 1.2
+
+    # 趋势过滤：只顺着大方向
+    if trend_1h == 1 and last['close'] < last['ema50']:
+        trend_ok = False
+    elif trend_1h == -1 and last['close'] > last['ema50']:
+        trend_ok = False
     else:
-        score -= 18
-        reasons.append("EMA空")
+        trend_ok = True
 
-    rsi = last["rsi"]
-    if 30 <= rsi <= 70:
-        score += 10
-        reasons.append("RSI中性")
-    elif rsi > 75:
-        score -= 10
-        reasons.append("RSI超买")
-    elif rsi < 25:
-        score += 5
-        reasons.append("RSI超卖")
+    # 多头信号
+    if ema_bull and macd_bull and rsi_neutral and volume_confirm and trend_ok:
+        entry = last['close']
+        stop = entry - atr * 1.5
+        tp = entry + atr * 3.0
+        rr = abs(tp - entry) / abs(entry - stop)
+        if rr >= MIN_RR:
+            return {
+                "side": "LONG",
+                "entry": entry,
+                "stop": stop,
+                "tp": tp,
+                "time": last['time'],
+                "rr": rr,
+                "score": 70,   # 可自定义评分
+                "reason": "EMA多头|MACD金叉|RSI中性|放量"
+            }
 
-    if last["macd_hist"] > 0:
-        score += 12
-        reasons.append("MACD多头")
-    else:
-        score -= 12
-        reasons.append("MACD空头")
+    # 空头信号
+    if ema_bear and macd_bear and rsi_neutral and volume_confirm and trend_ok:
+        entry = last['close']
+        stop = entry + atr * 1.5
+        tp = entry - atr * 3.0
+        rr = abs(entry - tp) / abs(stop - entry)
+        if rr >= MIN_RR:
+            return {
+                "side": "SHORT",
+                "entry": entry,
+                "stop": stop,
+                "tp": tp,
+                "time": last['time'],
+                "rr": rr,
+                "score": 30,   # 做多胜率低，所以看空
+                "reason": "EMA空头|MACD死叉|RSI中性|放量"
+            }
 
-    extreme = False
-    if last["c"] > last["bb_upper"] and last["v"] > last["vol_ma"] * vol_mult:
-        extreme = True
-        score += 20
-        reasons.append("突破上轨")
-    elif last["c"] < last["bb_lower"] and last["v"] > last["vol_ma"] * vol_mult:
-        extreme = True
-        score += 20
-        reasons.append("跌破下轨")
+    return None
 
-    if ls_ratio < 0.95:
-        score += 8
-        reasons.append("多空极空")
-    elif ls_ratio > 1.05:
-        score -= 8
-        reasons.append("多空极多")
+def is_signal_valid(signal, current_price, atr):
+    """检查信号是否仍有效（价格未远离入场区）"""
+    if signal is None:
+        return None
+    entry_low = signal['entry'] - atr * 0.5
+    entry_high = signal['entry'] + atr * 0.5
+    if current_price < entry_low - atr or current_price > entry_high + atr:
+        return None  # 价格远离，信号失效
+    return signal
 
-    return max(min(score, 95), 5), reasons, extreme
+# ===============================
+# 仓位计算
+# ===============================
+def position_size(entry, stop, balance, risk_pct):
+    risk_amount = balance * risk_pct / 100
+    distance = abs(entry - stop)
+    return risk_amount / distance if distance > 0 else 0
 
-def generate_signal(df: pd.DataFrame, ls_ratio: float,
-                    vol_mult: float, prob_thresh: float,
-                    sl_atr: float, tp_atr: float, entry_offset: float) -> dict:
-    if df is None or len(df) < 50:
-        return {"direction": 0, "trigger": None, "sl": None, "tp": None,
-                "entry_range": "数据不足", "prob": 50, "reason": "数据不足"}
+# ===============================
+# 主界面
+# ===============================
+st.set_page_config(layout="wide", page_title="5分钟ETH高频信号·清晰版")
+st.title("5分钟ETH高频信号系统（逻辑清晰版）")
+st.caption(f"WebSocket状态: {st.session_state.ws_status} | 数据实时更新")
 
+# 侧边栏参数
+with st.sidebar:
+    st.header("账户参数")
+    balance = st.number_input("账户余额 (USDT)", value=10000, min_value=100, step=100)
+    risk = st.slider("单笔风险 %", 0.1, 5.0, 1.0, 0.1)
+    st.header("策略开关")
+    enable_trend_filter = st.checkbox("启用1小时趋势过滤", value=True)
+    enable_volume_filter = st.checkbox("启用成交量过滤", value=True)
+
+# 更新数据
+if update_dataframe():
+    st.rerun()
+
+df = st.session_state.df.copy()
+if len(df) >= 50:
+    df = compute_indicators(df)
+    trend_1h = get_1h_trend() if enable_trend_filter else 0
+    last_idx = len(df) - 1
+    current_price = df['close'].iloc[-1]
+    atr = df['atr'].iloc[-1] if not np.isnan(df['atr'].iloc[-1]) else current_price * 0.01
+
+    # 生成新信号
+    new_signal = generate_signal(df, trend_1h, last_idx)
+    if new_signal:
+        st.session_state.last_signal = new_signal
+        st.session_state.signal_history.append(new_signal)
+
+    # 检查已有信号是否有效
+    valid_signal = is_signal_valid(st.session_state.last_signal, current_price, atr)
+
+    # 显示最新行情
     last = df.iloc[-1]
-    required = ["ema_fast", "ema_slow", "rsi", "macd_hist", "bb_upper", "bb_lower", "vol_ma", "v", "atr"]
-    if any(pd.isna(last[col]) for col in required):
-        return {"direction": 0, "trigger": None, "sl": None, "tp": None,
-                "entry_range": "指标计算中", "prob": 50, "reason": "指标暂未就绪"}
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("最新价格", f"${last['close']:.2f}")
+    col2.metric("EMA12/26", f"{last['ema12']:.2f}/{last['ema26']:.2f}")
+    col3.metric("RSI", f"{last['rsi']:.1f}" if not np.isnan(last['rsi']) else "N/A")
+    col4.metric("ATR", f"{atr:.2f}")
 
-    prob, reasons, extreme = calculate_score_and_reasons(last, ls_ratio, vol_mult)
-    trend = 1 if last["ema_fast"] > last["ema_slow"] else -1
+    # 显示1小时趋势
+    if enable_trend_filter:
+        trend_text = {1: "多头", -1: "空头", 0: "震荡"}[trend_1h]
+        st.info(f"1小时趋势: {trend_text}")
 
-    direction = 0
-    if trend == 1 and prob > prob_thresh:
-        direction = 1
-    elif trend == -1 and prob < (100 - prob_thresh):
-        direction = -1
+    # 信号展示
+    if valid_signal:
+        sig = valid_signal
+        size = position_size(sig['entry'], sig['stop'], balance, risk)
+        entry_zone = f"{sig['entry']-atr*0.5:.1f}~{sig['entry']+atr*0.5:.1f}"
+        st.markdown(f"""
+        <div style="background: linear-gradient(90deg, #1e2a3a, #0b1428); border-radius: 10px; padding: 20px; border: 2px solid {'#00cc77' if sig['side']=='LONG' else '#ff6b6b'};">
+            <h2 style="color: {'#00cc77' if sig['side']=='LONG' else '#ff6b6b'}; margin:0;">{'🔥 多头' if sig['side']=='LONG' else '❄️ 空头'}</h2>
+            <p style="color:#ccc;">胜率评分: {sig['score']}% | 信号理由: {sig['reason']}</p>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:10px;">
+                <div><span style="color:#aaa;">入场区间</span><br><b style="color:#00cc77;">{entry_zone}</b></div>
+                <div><span style="color:#aaa;">止损</span><br><b style="color:#ff6b6b;">${sig['stop']:.2f}</b></div>
+                <div><span style="color:#aaa;">止盈</span><br><b style="color:#00cc77;">${sig['tp']:.2f}</b></div>
+            </div>
+            <div style="margin-top:10px;">
+                <span style="color:#aaa;">当前价格: ${current_price:.2f} | 触发价: ${sig['entry']:.2f} | 盈亏比: {sig['rr']:.2f}</span>
+            </div>
+            <div style="margin-top:10px; background:#333; height:4px; border-radius:2px;">
+                <div style="width:{min(100, max(0, (current_price - (sig['entry']-atr))/(2*atr)*100))}%; height:100%; background:{'#00cc77' if sig['side']=='LONG' else '#ff6b6b'}; border-radius:2px;"></div>
+            </div>
+            <p style="color:#aaa; font-size:0.8rem;">信号有效范围: {sig['entry']-atr*0.5:.1f} ~ {sig['entry']+atr*0.5:.1f}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    atr = last["atr"]
-    if pd.isna(atr) or atr <= 0:
-        return {"direction": 0, "trigger": None, "sl": None, "tp": None,
-                "entry_range": "ATR无效", "prob": prob, "reason": "ATR异常"}
-
-    if direction == 1:
-        trigger = last["bb_upper"]
-        sl = trigger - atr * sl_atr
-        tp = trigger + atr * tp_atr
-        entry_low = trigger - atr * entry_offset
-        entry_high = trigger + atr * entry_offset
-    elif direction == -1:
-        trigger = last["bb_lower"]
-        sl = trigger + atr * sl_atr
-        tp = trigger - atr * tp_atr
-        entry_low = trigger - atr * entry_offset
-        entry_high = trigger + atr * entry_offset
+        # 建议仓位
+        st.info(f"💰 建议仓位: **{size:.4f} ETH** (账户余额 {balance} USDT, 风险 {risk}%)")
     else:
-        trigger = None
-        sl = tp = None
-        entry_low = entry_high = None
+        if st.session_state.last_signal:
+            st.warning("⚠️ 当前无有效信号（价格已远离入场区或信号过期）")
+        else:
+            st.info("⏳ 等待信号...")
 
-    entry_range = f"{entry_low:.1f} ~ {entry_high:.1f}" if entry_low else "观望"
-    reason_str = " | ".join(reasons) if reasons else "无明显信号"
-
-    return {
-        "direction": direction,
-        "trigger": trigger,
-        "sl": sl,
-        "tp": tp,
-        "entry_range": entry_range,
-        "prob": prob,
-        "reason": reason_str
-    }
-
-def main():
-    st.set_page_config(layout="wide", page_title="ETH 高频信号·清晰版")
-    st.title("📈 5分钟 ETH 高频信号系统（逻辑清晰版）")
-
-    with st.sidebar:
-        st.header("⚙️ 参数调节")
-        vol_mult = st.slider("放量倍数", 0.8, 2.0, 1.0, 0.1,
-                             help="1.0 表示只要有量就算")
-        prob_thresh = st.slider("评分阈值", 30, 60, 45, 1,
-                                help="多>阈值，空<100-阈值")
-        sl_atr = st.slider("止损 (ATR倍数)", 1.0, 3.0, 1.5, 0.1)
-        tp_atr = st.slider("止盈 (ATR倍数)", 1.5, 4.0, 2.5, 0.1)
-        entry_offset = st.slider("入场区间半宽 (ATR倍数)", 0.2, 1.0, 0.5, 0.1)
-
-    with st.spinner("获取市场数据..."):
-        df = get_candles()
-        ls = get_ls_ratio()
-
-    if df is None or len(df) < 50:
-        st.error("❌ 无法获取足够K线数据，请检查网络")
-        return
-
-    signal = generate_signal(df, ls, vol_mult, prob_thresh,
-                             sl_atr, tp_atr, entry_offset)
-
-    if "last_direction" not in st.session_state:
-        st.session_state.last_direction = 0
-    current_dir = signal["direction"]
-
-    if current_dir != 0 and current_dir != st.session_state.last_direction:
-        if st.session_state.last_direction != 0:
-            st.warning(f"⚠️ 信号反转：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}，反向开仓")
-    if current_dir == 0 and st.session_state.last_direction != 0:
-        st.warning(f"⚠️ 信号消失：建议平仓当前{'多头' if st.session_state.last_direction==1 else '空头'}")
-    st.session_state.last_direction = current_dir
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("胜率评分", f"{signal['prob']}%")
-    with col2:
-        dir_text = "📈 多" if current_dir == 1 else "📉 空" if current_dir == -1 else "⚖️ 观望"
-        st.metric("方向", dir_text)
-    with col3:
-        st.metric("入场区间", signal["entry_range"])
-
-    st.caption(f"**信号理由**: {signal['reason']}")
-
-    if signal["sl"] and signal["tp"]:
-        col4, col5 = st.columns([1,1])
-        with col4:
-            st.metric("止损", f"{signal['sl']:.2f}")
-        with col5:
-            st.metric("止盈", f"{signal['tp']:.2f}")
-    else:
-        st.info("当前无明确交易信号，建议观望")
-
-    last_price = df.iloc[-1]["c"]
-    col6, col7 = st.columns(2)
-    with col6:
-        st.metric("当前价格", f"{last_price:.2f}")
-    with col7:
-        trigger_disp = f"{signal['trigger']:.2f}" if signal["trigger"] else "--"
-        st.metric("触发价", trigger_disp)
-
+    # K线图
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=df["time"], open=df["o"], high=df["h"], low=df["l"], close=df["c"], name="K线"
+        x=df['time'].tail(100),
+        open=df['open'].tail(100),
+        high=df['high'].tail(100),
+        low=df['low'].tail(100),
+        close=df['close'].tail(100),
+        name="K线"
     ))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["bb_upper"], line=dict(color='gray', width=1), name="布林上轨"))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["bb_lower"], line=dict(color='gray', width=1), name="布林下轨",
-                             fill='tonexty', fillcolor='rgba(128,128,128,0.2)'))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["ema_fast"], line=dict(color='orange', width=1), name="EMA12"))
-    fig.add_trace(go.Scatter(x=df["time"], y=df["ema_slow"], line=dict(color='blue', width=1), name="EMA26"))
-    if signal["trigger"]:
-        fig.add_hline(y=signal["trigger"], line_dash="dash", line_color="red",
-                      annotation_text="触发位", annotation_position="bottom right")
-    fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+    fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['ema12'].tail(100), line=dict(color='#00cc77'), name="EMA12"))
+    fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['ema26'].tail(100), line=dict(color='#ff6b6b'), name="EMA26"))
+    fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['bb_upper'].tail(100), line=dict(color='rgba(255,255,255,0.3)', dash='dot'), name="布林上轨"))
+    fig.add_trace(go.Scatter(x=df['time'].tail(100), y=df['bb_lower'].tail(100), line=dict(color='rgba(255,255,255,0.3)', dash='dot'), name="布林下轨"))
+    # 标记信号触发位
+    if valid_signal:
+        fig.add_hline(y=valid_signal['entry'], line_dash="dash", line_color="orange", annotation_text="触发位")
+    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, hovermode='x unified')
+    st.plotly_chart(fig, use_container_width=True)
 
-    # 使用 width='stretch' 替代 use_container_width，消除警告
-    st.plotly_chart(fig, use_container_width=True)  # 当前版本仍支持
-    # 若要彻底消除警告，可替换为下一行：
-    # st.plotly_chart(fig, width='stretch')
+    # 信号历史
+    if st.session_state.signal_history:
+        st.subheader("最近信号记录")
+        hist = list(st.session_state.signal_history)[-10:]
+        hist_df = pd.DataFrame(hist)[['time','side','entry','stop','tp','rr']]
+        hist_df['time'] = hist_df['time'].dt.strftime('%m-%d %H:%M')
+        st.dataframe(hist_df, use_container_width=True)
 
-    st_autorefresh(interval=60000, key="auto_refresh")
+else:
+    st.info("等待数据接入...")
 
-if __name__ == "__main__":
-    main()
+# 自动刷新
+time.sleep(1)
+st.rerun()
