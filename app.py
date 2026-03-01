@@ -26,14 +26,115 @@ except Exception:
 # ====================== 页面配置 ======================
 st.set_page_config(layout="wide", page_title="专业量化决策引擎·至尊版", page_icon="📊")
 
-# 全局样式：缩小UI边距和字体
+# ====================== 全局样式（紧凑布局）======================
 st.markdown("""
 <style>
-    .main > div { padding: 0 1rem; }
-    .block-container { max-width: 95%; padding-top: 1rem; }
-    .stButton > button { font-size: 0.8rem; }
-    .stMetric { font-size: 0.9rem; }
-    div[data-testid="column"] { padding: 0 0.2rem; }
+    /* 整体容器压缩 */
+    .main > div { padding: 0 0.5rem; }
+    .block-container { max-width: 100%; padding-top: 0; padding-bottom: 0; }
+    
+    /* 通用卡片类 */
+    .compact-card {
+        background: rgba(255,255,255,0.05);
+        border-radius: 10px;
+        padding: 0.5rem 0.3rem;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        transition: all 0.2s;
+        height: 70px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .compact-card:hover {
+        background: rgba(255,255,255,0.1);
+        box-shadow: 0 4px 8px rgba(0,255,136,0.2);
+    }
+    .compact-card p {
+        color: #aaa;
+        font-size: 0.7rem;
+        margin: 0;
+        line-height: 1.2;
+    }
+    .compact-card h3 {
+        color: #00ff88;
+        font-size: 1.5rem;
+        margin: 0;
+        line-height: 1.2;
+        font-weight: 600;
+    }
+    
+    /* 情绪温度计卡片 */
+    .sentiment-card {
+        background: linear-gradient(145deg, #0a0f1e, #0b1428);
+        border-radius: 12px;
+        padding: 0.8rem 1rem;
+        border-left: 4px solid;
+        margin: 0.3rem 0;
+    }
+    
+    /* 信号历史表格 */
+    .signal-table {
+        font-size: 0.8rem;
+        background: rgba(0,0,0,0.2);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .signal-table th {
+        background: rgba(0,255,136,0.2);
+        color: #ccc;
+        font-weight: normal;
+    }
+    .signal-table td {
+        padding: 0.3rem 0.5rem;
+        border-bottom: 1px solid #333;
+    }
+    .signal-table tr:last-child td {
+        border-bottom: none;
+    }
+    .signal-table .latest {
+        background: rgba(0,255,136,0.1);
+    }
+    
+    /* K线图容器 */
+    .chart-container {
+        margin-top: 0.5rem;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #0a0f1e;
+    }
+    
+    /* 标题区 */
+    .title-area {
+        background: linear-gradient(90deg, #0a0f1e, #0b1a2a);
+        text-align: center;
+        padding: 0.5rem 0 0.2rem 0;
+        margin-bottom: 0.5rem;
+        border-bottom: 1px solid #00ff8844;
+    }
+    .title-area h1 {
+        color: #00ff88;
+        font-size: 2.2rem;
+        font-weight: 700;
+        margin: 0;
+        text-shadow: 0 0 10px #00ff88;
+    }
+    .title-area h4 {
+        color: #aaa;
+        font-size: 0.9rem;
+        margin: 0;
+        font-weight: 400;
+    }
+    
+    /* 卡片网格间距 */
+    .row-gap {
+        margin-bottom: 0.5rem;
+    }
+    
+    /* 数字颜色 */
+    .positive { color: #00ff88; }
+    .negative { color: #ff4b4b; }
+    .neutral { color: #FFD700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -768,7 +869,6 @@ def main():
     mvrv_z = get_mvrv_zscore()
     news = get_crypto_news()
 
-    # 获取4H趋势数据
     trend_df = get_trend_candles(bar="4H", limit=200)
     if trend_df is not None and len(trend_df) > 0:
         trend_ema50 = trend_df['ema50'].iloc[-1]
@@ -797,66 +897,82 @@ def main():
     if len(st.session_state.signal_history) > 5:
         st.session_state.signal_history = st.session_state.signal_history[:5]
 
-    # 超级英雄信号卡
+    # ====================== 顶部标题区 ======================
     st.markdown(f"""
-    <div style="border:2px solid #00ff88; border-radius:20px; padding:20px; margin-bottom:20px; background:linear-gradient(145deg, #0a0f1e, #0b1428); box-shadow: 0 0 30px #00ff88;">
-        <div style="display:flex; align-items:center; justify-content:space-between;">
-            <div style="flex:1;">
-                <h2 style="color:#00ff88; margin:0;">{'🔥 多头进攻' if direction==1 else '❄️ 空头猎杀' if direction==-1 else '⚖️ 均衡观望'}</h2>
-                <p style="color:#ccc; font-size:1.2rem;">{reason}</p>
-            </div>
-            <div style="width:120px; height:120px; position:relative;">
-                <svg viewBox="0 0 36 36" style="width:100%; height:100%;">
-                    <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#333" stroke-width="2" stroke-dasharray="100, 100"/>
-                    <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#00ff88" stroke-width="2" stroke-dasharray="{prob}, 100" stroke-dashoffset="25"/>
-                    <text x="18" y="20.5" text-anchor="middle" fill="#00ff88" font-size="6" dy=".3em">{prob:.0f}%</text>
-                </svg>
-            </div>
-        </div>
+    <div class="title-area">
+        <h1>专业量化决策引擎·至尊版</h1>
+        <h4>{symbol} | {tf} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</h4>
     </div>
     """, unsafe_allow_html=True)
 
-    # 核心指标卡组
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # ====================== 核心指标卡组 ======================
+    col1, col2, col3, col4, col5 = st.columns(5, gap="small")
     with col1:
         st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.1); border-radius:10px; padding:10px; text-align:center; backdrop-filter:blur(5px);">
-            <p style="color:#aaa;">实时价格</p>
-            <h3 style="color:#00ff88;">${current_price:.2f}</h3>
+        <div class="compact-card">
+            <p>💰 实时价格</p>
+            <h3>${current_price:.2f}</h3>
         </div>
         """, unsafe_allow_html=True)
     with col2:
         st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.1); border-radius:10px; padding:10px; text-align:center;">
-            <p style="color:#aaa;">AI胜率</p>
-            <h3 style="color:#00ff88;">{prob:.1f}%</h3>
+        <div class="compact-card">
+            <p>🎯 AI胜率</p>
+            <h3>{prob:.1f}%</h3>
         </div>
         """, unsafe_allow_html=True)
     with col3:
         st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.1); border-radius:10px; padding:10px; text-align:center;">
-            <p style="color:#aaa;">多空比</p>
-            <h3 style="color:#00ff88;">{ls_ratio:.2f}</h3>
+        <div class="compact-card">
+            <p>⚖️ 多空比</p>
+            <h3>{ls_ratio:.2f}</h3>
         </div>
         """, unsafe_allow_html=True)
     with col4:
+        net_color = "positive" if df['net_flow'].iloc[-1] > 0 else "negative"
         st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.1); border-radius:10px; padding:10px; text-align:center;">
-            <p style="color:#aaa;">资金净流</p>
-            <h3 style="color:#00ff88;">{df['net_flow'].iloc[-1]:.0f} ETH</h3>
+        <div class="compact-card">
+            <p>💧 资金净流</p>
+            <h3 class="{net_color}">{df['net_flow'].iloc[-1]:.0f} ETH</h3>
         </div>
         """, unsafe_allow_html=True)
     with col5:
         st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.1); border-radius:10px; padding:10px; text-align:center;">
-            <p style="color:#aaa;">ATR波幅</p>
-            <h3 style="color:#00ff88;">{atr:.2f}</h3>
+        <div class="compact-card">
+            <p>📊 ATR波幅</p>
+            <h3>{atr:.2f}</h3>
         </div>
         """, unsafe_allow_html=True)
 
-    # 精准进场策略卡（带方向标识，紧凑）
+    # ====================== 超级英雄信号卡 ======================
+    if direction == 1:
+        signal_title = "🔥 多头进攻"
+        signal_color = "#00ff88"
+    elif direction == -1:
+        signal_title = "❄️ 空头猎杀"
+        signal_color = "#ff4b4b"
+    else:
+        signal_title = "⚖️ 均衡观望"
+        signal_color = "#FFD700"
+
+    st.markdown(f"""
+    <div style="border:2px solid {signal_color}; border-radius:20px; padding:1rem; margin:0.5rem 0; background:linear-gradient(145deg, #0a0f1e, #0b1428); box-shadow: 0 0 20px {signal_color}88; display:flex; align-items:center; justify-content:space-between; height:120px;">
+        <div style="flex:1;">
+            <h2 style="color:{signal_color}; margin:0;">{signal_title}</h2>
+            <p style="color:#ccc; font-size:1rem; margin:0.3rem 0 0 0;">{reason}</p>
+        </div>
+        <div style="width:100px; height:100px; position:relative;">
+            <svg viewBox="0 0 36 36" style="width:100%; height:100%;">
+                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#333" stroke-width="2" stroke-dasharray="100, 100"/>
+                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="{signal_color}" stroke-width="2" stroke-dasharray="{prob}, 100" stroke-dashoffset="25"/>
+                <text x="18" y="20.5" text-anchor="middle" fill="{signal_color}" font-size="6" dy=".3em">{prob:.0f}%</text>
+            </svg>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ====================== 精准进场策略卡 ======================
     st.markdown("---")
-    st.subheader("🎯 精准进场策略")
     if direction == 1:
         dir_label = "🔥 做多"
         dir_color = "#00ff88"
@@ -868,55 +984,54 @@ def main():
         dir_color = "#888888"
 
     st.markdown(f"""
-    <div style="text-align:center; margin-bottom:10px;">
-        <span style="color:{dir_color}; font-size:1.5rem; font-weight:bold; border-bottom:2px solid {dir_color}; padding-bottom:5px;">{dir_label}</span>
+    <div style="text-align:center; margin:0.2rem 0;">
+        <span style="color:{dir_color}; font-size:1.3rem; font-weight:bold; border-bottom:2px solid {dir_color}; padding-bottom:2px;">{dir_label}</span>
     </div>
     """, unsafe_allow_html=True)
 
-    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a, col_b, col_c, col_d = st.columns(4, gap="small")
     with col_a:
         st.markdown(f"""
-        <div style="border:1px solid #00ff88; border-radius:8px; padding:8px; text-align:center; background:rgba(0,255,136,0.1);">
-            <p style="color:#aaa; font-size:0.8rem;">入场区</p>
-            <h5 style="color:#00ff88; margin:0;">{entry_zone}</h5>
+        <div style="border:1px solid #00ff88; border-radius:8px; padding:0.5rem; text-align:center; background:rgba(0,255,136,0.1); height:60px; display:flex; flex-direction:column; justify-content:center;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">入场区</p>
+            <h5 style="color:#00ff88; margin:0; font-size:1.2rem;">{entry_zone}</h5>
         </div>
         """, unsafe_allow_html=True)
     with col_b:
         sl_color = "#ff4b4b" if sl else "#888"
         sl_text = f"${sl:.2f}" if sl else "无"
         st.markdown(f"""
-        <div style="border:1px solid {sl_color}; border-radius:8px; padding:8px; text-align:center; background:rgba(255,75,75,0.1);">
-            <p style="color:#aaa; font-size:0.8rem;">止损</p>
-            <h5 style="color:{sl_color}; margin:0;">{sl_text}</h5>
+        <div style="border:1px solid {sl_color}; border-radius:8px; padding:0.5rem; text-align:center; background:rgba(255,75,75,0.1); height:60px; display:flex; flex-direction:column; justify-content:center;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">止损</p>
+            <h5 style="color:{sl_color}; margin:0; font-size:1.2rem;">{sl_text}</h5>
         </div>
         """, unsafe_allow_html=True)
     with col_c:
         tp_color = "#00ff88" if tp else "#888"
         tp_text = f"${tp:.2f}" if tp else "无"
         st.markdown(f"""
-        <div style="border:1px solid {tp_color}; border-radius:8px; padding:8px; text-align:center; background:rgba(0,255,136,0.1);">
-            <p style="color:#aaa; font-size:0.8rem;">止盈</p>
-            <h5 style="color:{tp_color}; margin:0;">{tp_text}</h5>
+        <div style="border:1px solid {tp_color}; border-radius:8px; padding:0.5rem; text-align:center; background:rgba(0,255,136,0.1); height:60px; display:flex; flex-direction:column; justify-content:center;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">止盈</p>
+            <h5 style="color:{tp_color}; margin:0; font-size:1.2rem;">{tp_text}</h5>
         </div>
         """, unsafe_allow_html=True)
     with col_d:
         rr = abs((tp - current_price) / (current_price - sl)) if sl and tp and abs(current_price - sl) > 1e-8 else 0
         st.markdown(f"""
-        <div style="border:1px solid #FFD700; border-radius:8px; padding:8px; text-align:center; background:rgba(255,215,0,0.1);">
-            <p style="color:#aaa; font-size:0.8rem;">盈亏比</p>
-            <h5 style="color:#FFD700; margin:0;">{rr:.2f}</h5>
+        <div style="border:1px solid #FFD700; border-radius:8px; padding:0.5rem; text-align:center; background:rgba(255,215,0,0.1); height:60px; display:flex; flex-direction:column; justify-content:center;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">盈亏比</p>
+            <h5 style="color:#FFD700; margin:0; font-size:1.2rem;">{rr:.2f}</h5>
         </div>
         """, unsafe_allow_html=True)
 
-    # 实时仓位建议 + 雷达图
-    st.markdown("---")
-    col_l, col_r = st.columns([1, 2])
+    # ====================== 实时仓位建议 + 雷达图 ======================
+    col_l, col_r = st.columns([1, 2], gap="small")
     with col_l:
         st.markdown(f"""
-        <div style="border:2px solid #00ff88; border-radius:15px; padding:20px; background:linear-gradient(145deg, #0a0f1e, #0b1428);">
-            <h3 style="color:#00ff88; margin:0;">💰 实时仓位建议</h3>
-            <p style="color:#ccc;">基于1%风险，账户余额 {st.session_state.get('backtest_balance', 10000):.0f} USDT</p>
-            <h1 style="color:#00ff88; font-size:3rem;">{(st.session_state.get('backtest_balance', 10000) * 0.01 / atr if atr>0 else 0):.2f} ETH</h1>
+        <div style="border:2px solid #00ff88; border-radius:15px; padding:1rem; background:linear-gradient(145deg, #0a0f1e, #0b1428); height:150px; display:flex; flex-direction:column; justify-content:center;">
+            <h3 style="color:#00ff88; margin:0;">💰 实时仓位</h3>
+            <p style="color:#ccc; font-size:0.8rem; margin:0.2rem 0;">1%风险 | 余额 {st.session_state.get('backtest_balance', 10000):.0f} USDT</p>
+            <h1 style="color:#00ff88; font-size:2.5rem; margin:0;">{(st.session_state.get('backtest_balance', 10000) * 0.01 / atr if atr>0 else 0):.2f} ETH</h1>
         </div>
         """, unsafe_allow_html=True)
     with col_r:
@@ -934,16 +1049,14 @@ def main():
             fig_radar.update_layout(
                 polar=dict(radialaxis=dict(visible=True, range=[0, df_details['数值贡献'].abs().max()])),
                 showlegend=False,
-                height=200,
+                height=150,
                 margin=dict(l=10, r=10, t=10, b=10),
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)'
             )
-            st.plotly_chart(fig_radar, use_container_width=True)
+            st.plotly_chart(fig_radar, use_container_width=True, config={'displayModeBar': False})
 
-    # 市场情绪温度计
-    st.markdown("---")
-    st.subheader("🌡️ 市场情绪温度计")
+    # ====================== 市场情绪温度计 ======================
     ratio = ls_ratio
     if ratio < 0.95:
         status = "❄️ 空头极端"
@@ -954,71 +1067,152 @@ def main():
     else:
         status = "⚖️ 中性"
         color = "#888888"
+
     st.markdown(f"""
-    <div style="border:2px solid {color}; border-radius:15px; padding:20px; background:linear-gradient(145deg, #0a0f1e, #0b1428);">
+    <div class="sentiment-card" style="border-left-color:{color};">
         <div style="display:flex; align-items:center; justify-content:space-between;">
-            <span style="color:{color}; font-size:1.5rem;">{status}</span>
+            <span style="color:{color}; font-size:1.2rem;">{status}</span>
             <span style="color:#aaa;">多空比 {ratio:.2f}</span>
         </div>
-        <div style="height:10px; background:#333; border-radius:5px; margin-top:10px;">
-            <div style="height:100%; width:{ratio*50}%; background:{color}; border-radius:5px;"></div>
+        <div style="height:8px; background:#333; border-radius:4px; margin-top:8px;">
+            <div style="height:100%; width:{ratio*50}%; background:{color}; border-radius:4px;"></div>
         </div>
-        <p style="color:#aaa; margin-top:5px;">多空比 < 0.95 或 > 1.05 为极端区域</p>
+        <p style="color:#aaa; font-size:0.7rem; margin-top:4px;">多空比 < 0.95 或 > 1.05 为极端区域</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # 技术指标状态卡
+    # ====================== 技术指标状态卡 ======================
     st.markdown("---")
-    st.subheader("📊 技术指标状态")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns(4, gap="small")
     with col1:
         rsi_val = df['rsi'].iloc[-1] if not pd.isna(df['rsi'].iloc[-1]) else 50
         rsi_color = "#00ff88" if 30 < rsi_val < 70 else "#ff8800"
+        rsi_emoji = "⚪" if 30 < rsi_val < 70 else ("🔴" if rsi_val > 70 else "🟢")
         st.markdown(f"""
-        <div style="border:2px solid {rsi_color}; border-radius:10px; padding:10px; text-align:center;">
-            <p>RSI</p>
-            <h3 style="color:{rsi_color};">{rsi_val:.1f}</h3>
-            <p style="color:#aaa;">{'中性' if 30<rsi_val<70 else '超买' if rsi_val>70 else '超卖'}</p>
+        <div style="border:1px solid {rsi_color}; border-radius:8px; padding:0.4rem; text-align:center; height:60px;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">RSI {rsi_emoji}</p>
+            <h4 style="color:{rsi_color}; margin:0; font-size:1.2rem;">{rsi_val:.1f}</h4>
         </div>
         """, unsafe_allow_html=True)
     with col2:
         macd_val = df['macd_hist'].iloc[-1]
         macd_color = "#00ff88" if macd_val > 0 else "#ff4b4b"
+        macd_emoji = "📈" if macd_val > 0 else "📉"
         st.markdown(f"""
-        <div style="border:2px solid {macd_color}; border-radius:10px; padding:10px; text-align:center;">
-            <p>MACD柱</p>
-            <h3 style="color:{macd_color};">{macd_val:.2f}</h3>
-            <p style="color:#aaa;">{'为正' if macd_val>0 else '为负'}</p>
+        <div style="border:1px solid {macd_color}; border-radius:8px; padding:0.4rem; text-align:center; height:60px;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">MACD {macd_emoji}</p>
+            <h4 style="color:{macd_color}; margin:0; font-size:1.2rem;">{macd_val:.2f}</h4>
         </div>
         """, unsafe_allow_html=True)
     with col3:
         bb_pos = "上轨" if current_price > df['bb_upper'].iloc[-1] else ("下轨" if current_price < df['bb_lower'].iloc[-1] else "中轨")
         bb_color = "#ff8800" if bb_pos != "中轨" else "#00ff88"
+        bb_emoji = "⬆️" if bb_pos == "上轨" else ("⬇️" if bb_pos == "下轨" else "⚪")
         st.markdown(f"""
-        <div style="border:2px solid {bb_color}; border-radius:10px; padding:10px; text-align:center;">
-            <p>布林带</p>
-            <h3 style="color:{bb_color};">{bb_pos}</h3>
+        <div style="border:1px solid {bb_color}; border-radius:8px; padding:0.4rem; text-align:center; height:60px;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">布林带 {bb_emoji}</p>
+            <h4 style="color:{bb_color}; margin:0; font-size:1.2rem;">{bb_pos}</h4>
         </div>
         """, unsafe_allow_html=True)
     with col4:
         vol_ratio = df['v'].iloc[-1] / df['vol_ma'].iloc[-1] if df['vol_ma'].iloc[-1] > 0 else 1
         vol_color = "#00ff88" if vol_ratio > 1.3 else "#888888"
+        vol_emoji = "🔥" if vol_ratio > 1.3 else "💧"
         st.markdown(f"""
-        <div style="border:2px solid {vol_color}; border-radius:10px; padding:10px; text-align:center;">
-            <p>成交量</p>
-            <h3 style="color:{vol_color};">{'放量' if vol_ratio>1.3 else '缩量'}</h3>
-            <p style="color:#aaa;">x{vol_ratio:.2f}</p>
+        <div style="border:1px solid {vol_color}; border-radius:8px; padding:0.4rem; text-align:center; height:60px;">
+            <p style="color:#aaa; font-size:0.7rem; margin:0;">成交量 {vol_emoji}</p>
+            <h4 style="color:{vol_color}; margin:0; font-size:1.2rem;">{'放量' if vol_ratio>1.3 else '缩量'}</h4>
         </div>
         """, unsafe_allow_html=True)
 
-    # 信号历史记录
+    # ====================== 信号历史记录 ======================
     st.markdown("---")
-    st.subheader("⏳ 信号历史记录")
     if st.session_state.signal_history:
         hist_df = pd.DataFrame(st.session_state.signal_history)
-        st.dataframe(hist_df, use_container_width=True, height=200)
+        # 用HTML模拟表格（紧凑）
+        html = '<div class="signal-table"><table style="width:100%; border-collapse:collapse;">'
+        html += '<tr><th>时间</th><th>方向</th><th>胜率</th><th>价格</th><th>理由</th></tr>'
+        for i, row in hist_df.iterrows():
+            cls = 'latest' if i == 0 else ''
+            html += f'<tr class="{cls}"><td>{row["时间"]}</td><td>{row["方向"]}</td><td>{row["胜率"]}</td><td>{row["价格"]}</td><td>{row["理由"]}</td></tr>'
+        html += '</table></div>'
+        st.markdown(html, unsafe_allow_html=True)
+    else:
+        st.info("暂无信号记录")
 
-    # 回测结果
+    # ====================== K线图 ======================
+    st.markdown("---")
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.01,
+                        row_heights=[0.7, 0.1, 0.1, 0.1],
+                        subplot_titles=("价格 & 指标", "Stochastic", "ADX", "资金净流"))
+    fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
+                                 name="K线", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['ema_f'], line=dict(color='#00ff88', width=1.5), name="EMA快线"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['ema_s'], line=dict(color='#ff4b4b', width=1.5), name="EMA慢线"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'], line=dict(color='rgba(255,255,255,0.2)', width=0.8), name="BB上轨"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], line=dict(color='rgba(255,255,255,0.2)', width=0.8), name="BB下轨",
+                             fill='tonexty', fillcolor='rgba(255,255,255,0.05)'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_a'], line=dict(color='#00ff88', width=0.8, dash='dot'), name="Senkou A"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_b'], line=dict(color='#ff4b4b', width=0.8, dash='dot'), name="Senkou B",
+                             fill='tonexty', fillcolor='rgba(0,255,136,0.1)'), row=1, col=1)
+
+    if sl:
+        fig.add_hline(y=sl, line_dash="dash", line_color="#ff4b4b", row=1, col=1, annotation_text="止损", annotation_position="bottom right")
+    if tp:
+        fig.add_hline(y=tp, line_dash="dash", line_color="#00ff88", row=1, col=1, annotation_text="止盈", annotation_position="top right")
+
+    recent_high = df['h'].tail(20).max()
+    recent_low = df['l'].tail(20).min()
+    fig.add_hline(y=recent_high, line_dash="dot", line_color="orange", row=1, col=1, annotation_text="压力", annotation_position="top left")
+    fig.add_hline(y=recent_low, line_dash="dot", line_color="cyan", row=1, col=1, annotation_text="支撑", annotation_position="bottom left")
+
+    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_k'], line=dict(color='#00ff88', width=1), name="%K"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_d'], line=dict(color='#ff4b4b', width=1), name="%D"), row=2, col=1)
+    fig.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
+
+    fig.add_trace(go.Scatter(x=df['time'], y=df['adx'], line=dict(color='#00ff88', width=1), name="ADX"), row=3, col=1)
+    fig.add_hline(y=25, line_dash="dash", line_color="orange", row=3, col=1)
+
+    flow_colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
+    fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=4, col=1)
+
+    fig.update_layout(
+        template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
+        height=600, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10), hovermode='x unified'
+    )
+    fig.update_xaxes(title_text="", row=4, col=1)
+    fig.update_yaxes(title_text="", row=2, col=1)
+    fig.update_yaxes(title_text="", row=3, col=1)
+    fig.update_yaxes(title_text="", row=4, col=1)
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    # ====================== 多空比情绪图 ======================
+    if not st.session_state.ls_history.empty:
+        st.markdown("---")
+        st.subheader("🌡️ 多空情绪温度计 (过去24小时)")
+        ls_df = st.session_state.ls_history
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=ls_df['ts'], y=ls_df['ratio'], mode='lines+markers',
+                                  line=dict(color='cyan', width=2), fill='tozeroy',
+                                  fillcolor='rgba(0,255,255,0.1)', name='多空比'))
+        fig2.add_hline(y=1.0, line_dash="dash", line_color="gray", annotation_text="多空平衡")
+        fig2.update_layout(
+            template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
+            height=200, margin=dict(l=10, r=10, t=20, b=10)
+        )
+        st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
+
+    # ====================== 底部新闻 ======================
+    st.markdown("---")
+    st.subheader("📰 加密新闻")
+    if news:
+        for article in news:
+            st.markdown(f"- [{article['title']}]({article['link']})  ({article['published']})")
+    else:
+        st.info("无法获取新闻，请稍后再试。")
+
+    # 回测/优化结果折叠
     with st.expander("📈 回测结果", expanded=False):
         if st.session_state.get('backtest_metrics'):
             metrics = st.session_state['backtest_metrics']
@@ -1035,7 +1229,6 @@ def main():
         else:
             st.info("暂无回测结果，请先在侧边栏运行回测。")
 
-    # 优化结果
     with st.expander("🏆 优化结果", expanded=False):
         if st.session_state.get('opt_metrics'):
             st.write("最优权重组合", st.session_state['opt_params'])
@@ -1047,76 +1240,6 @@ def main():
             col4.metric("夏普比率", metrics['夏普比率'])
         else:
             st.info("暂无优化结果，请先在侧边栏运行优化。")
-
-    # 主图表（K线 + 指标）
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02,
-                        row_heights=[0.6, 0.15, 0.15, 0.1],
-                        subplot_titles=("价格 & 指标", "Stochastic", "ADX", "资金净流"))
-    fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
-                                 name="K线", showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['ema_f'], line=dict(color='#00ff88', width=2), name="EMA快线"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['ema_s'], line=dict(color='#ff4b4b', width=2), name="EMA慢线"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB上轨"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], line=dict(color='rgba(255,255,255,0.2)', width=1), name="BB下轨",
-                             fill='tonexty', fillcolor='rgba(255,255,255,0.05)'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_a'], line=dict(color='#00ff88', width=1, dash='dot'), name="Senkou A"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['senkou_b'], line=dict(color='#ff4b4b', width=1, dash='dot'), name="Senkou B",
-                             fill='tonexty', fillcolor='rgba(0,255,136,0.1)'), row=1, col=1)
-
-    # 止盈止损线
-    if sl:
-        fig.add_hline(y=sl, line_dash="dash", line_color="#ff4b4b", row=1, col=1, annotation_text="止损", annotation_position="bottom right")
-    if tp:
-        fig.add_hline(y=tp, line_dash="dash", line_color="#00ff88", row=1, col=1, annotation_text="止盈", annotation_position="top right")
-
-    # 主力压力/支撑线
-    recent_high = df['h'].tail(20).max()
-    recent_low = df['l'].tail(20).min()
-    fig.add_hline(y=recent_high, line_dash="dot", line_color="orange", row=1, col=1, annotation_text="主力压力", annotation_position="top left")
-    fig.add_hline(y=recent_low, line_dash="dot", line_color="cyan", row=1, col=1, annotation_text="主力支撑", annotation_position="bottom left")
-
-    # Stochastic
-    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_k'], line=dict(color='#00ff88', width=1.5), name="%K"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df['time'], y=df['stoch_d'], line=dict(color='#ff4b4b', width=1.5), name="%D"), row=2, col=1)
-    fig.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
-    fig.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
-
-    # ADX
-    fig.add_trace(go.Scatter(x=df['time'], y=df['adx'], line=dict(color='#00ff88', width=1.5), name="ADX"), row=3, col=1)
-    fig.add_hline(y=25, line_dash="dash", line_color="orange", row=3, col=1)
-
-    # 资金净流
-    flow_colors = ['#00ff88' if x > 0 else '#ff4b4b' for x in df['net_flow']]
-    fig.add_trace(go.Bar(x=df['time'], y=df['net_flow'], marker_color=flow_colors, name="资金净流"), row=4, col=1)
-
-    fig.update_layout(
-        template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
-        height=900, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10), hovermode='x unified'
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 多空比情绪图
-    if not st.session_state.ls_history.empty:
-        st.subheader("🌡️ 多空情绪温度计 (过去24小时)")
-        ls_df = st.session_state.ls_history
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=ls_df['ts'], y=ls_df['ratio'], mode='lines+markers',
-                                  line=dict(color='cyan', width=2), fill='tozeroy',
-                                  fillcolor='rgba(0,255,255,0.1)', name='多空比'))
-        fig2.add_hline(y=1.0, line_dash="dash", line_color="gray", annotation_text="多空平衡")
-        fig2.update_layout(
-            template=pio.templates['custom_dark'] if st.session_state.theme == 'dark' else pio.templates['custom_light'],
-            height=250, margin=dict(l=0, r=0, t=10, b=0)
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # 实时新闻
-    st.subheader("📰 加密新闻")
-    if news:
-        for article in news:
-            st.markdown(f"- [{article['title']}]({article['link']})  ({article['published']})")
-    else:
-        st.info("无法获取新闻，请稍后再试。")
 
     if not pause:
         st_autorefresh(interval=hb * 1000, key="auto_refresh")
