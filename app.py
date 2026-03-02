@@ -3,19 +3,20 @@ import pandas as pd
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
-import os
 import requests
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 import numpy as np
+import io
+import pickle  # 用于内存保存模型
 
 st.set_page_config(layout="wide", page_title="ETH高频AI监控")
 st.title("🚀 ETH-USDT-SWAP 5分钟高频AI监控（**云端终极完美版 + AI预测**）")
 
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "signals_history.csv"
-MODEL_FILE = "lstm_model.h5"
+MODEL_KEY = "lstm_model"  # session_state key
 
 st_autorefresh(interval=1000, key="ai_refresh")
 
@@ -104,7 +105,7 @@ df = add_indicators(df)
 latest = df.iloc[-1]
 price = latest["close"]
 
-# AI训练
+# AI训练（内存保存）
 def train_lstm_model(df):
     data = df['close'].values.reshape(-1, 1)
     scaler = MinMaxScaler()
@@ -112,21 +113,28 @@ def train_lstm_model(df):
     X, y = [], []
     for i in range(60, len(data_scaled)):
         X.append(data_scaled[i-60:i, 0])
-        y.append(data_scaled[i, 0])
+        y.append(data_scaled[i, 0)
     X, y = np.array(X), np.array(y)
     X = np.reshape(X, (X.shape[0], X.shape[1], 1))
     model = Sequential()
     model.add(LSTM(units=50, return_sequences=True, input_shape=(X.shape[1], 1)))
     model.add(LSTM(units=50))
     model.add(Dense(1))
-    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
     model.fit(X, y, epochs=10, batch_size=32, verbose=0)
-    model.save(MODEL_FILE)
+    # 内存保存
+    buffer = io.BytesIO()
+    with pd.HDFStore(buffer, 'w') as store:
+        model.save(store['model'])
+    st.session_state[MODEL_KEY] = buffer.getvalue()
     return model, scaler
 
-if os.path.exists(MODEL_FILE):
-    from tensorflow.keras.models import load_model
-    model = load_model(MODEL_FILE)
+# 加载/训练
+if MODEL_KEY in st.session_state:
+    buffer = io.BytesIO(st.session_state[MODEL_KEY])
+    with pd.HDFStore(buffer, 'r') as store:
+        from tensorflow.keras.models import load_model
+        model = load_model(store['model'])
     scaler = MinMaxScaler()
     scaler.fit(df['close'].values.reshape(-1, 1))
 else:
