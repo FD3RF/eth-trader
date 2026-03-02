@@ -1,6 +1,6 @@
 """
-5分钟趋势合约系统（实战版）- 含支撑阻力线
-策略：EMA20/60趋势 + ADX强度 + 回调确认 + 支撑阻力可视化
+5分钟趋势合约系统（专业版）- 完整风控 + 信号持久化 + 胜率统计
+策略：EMA趋势 + ADX强度 + ATR自适应回调 + K线确认 + 结构支撑阻力
 """
 
 import streamlit as st
@@ -10,11 +10,17 @@ import plotly.graph_objects as go
 from datetime import datetime
 import requests
 import time
+import os
+import json
+import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 5分钟趋势合约系统（含支撑阻力）")
+st.title("📈 5分钟趋势合约系统（专业版）")
 
 SYMBOL = "ETH-USDT-SWAP"
+CACHE_FILE = "market_data_cache.csv"
+SIGNAL_HISTORY_FILE = "signal_history.json"
+ACCOUNT_FILE = "account.json"
 
 # ==========================
 # 侧边栏参数
@@ -25,40 +31,57 @@ ema_period_fast = st.sidebar.slider("快线EMA周期", 10, 30, 20)
 ema_period_slow = st.sidebar.slider("慢线EMA周期", 30, 100, 60)
 atr_period = st.sidebar.slider("ATR周期", 7, 30, 14)
 lookback_sr = st.sidebar.slider("支撑/阻力周期（根K线）", 10, 50, 20, help="计算前高前低所用的K线数量")
+callback_atr_mult = st.sidebar.slider("回调距离（ATR倍数）", 0.3, 1.0, 0.5, step=0.1, help="价格距离EMA20的最大ATR倍数")
 risk_reward = st.sidebar.slider("盈亏比", 1.0, 3.0, 2.0, step=0.1)
 risk_percent = st.sidebar.slider("单笔风险 (%)", 1.0, 5.0, 2.0, step=0.5)
+initial_balance = st.sidebar.number_input("初始资金 (USDT)", value=100.0, step=10.0)
+
+# 趋势持续确认周期
+trend_confirm_bars = 3
 
 # ==========================
-# 数据获取
+# 带指数退避的数据获取
 # ==========================
 @st.cache_data(ttl=5)
-def get_data():
+def fetch_okx_candles(limit=300):
     url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": "5m", "limit": 300}
-    retries = 3
-    for attempt in range(retries):
+    params = {"instId": SYMBOL, "bar": "5m", "limit": limit}
+    max_retries = 5
+    for attempt in range(max_retries):
         try:
             r = requests.get(url, timeout=5, params=params)
-            j = r.json()
-            if "data" in j:
-                break
-        except Exception as e:
-            if attempt == retries - 1:
-                st.error(f"数据获取失败: {e}")
-                return pd.DataFrame()
-            time.sleep(1)
-    else:
-        return pd.DataFrame()
+            if r.status_code == 200:
+                j = r.json()
+                if "data" in j:
+                    return j["data"]
+            wait = 2 ** attempt
+            time.sleep(wait)
+        except:
+            wait = 2 ** attempt
+            time.sleep(wait)
+    return None
 
-    df = pd.DataFrame(j["data"], columns=[
-        "ts", "open", "high", "low", "close", "volume",
-        "volCcy", "volCcyQuote", "confirm"
-    ])
-    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
-    df = df.sort_values("ts").reset_index(drop=True)
-    return df
+def get_data():
+    data = fetch_okx_candles()
+    if data is not None:
+        df = pd.DataFrame(data, columns=[
+            "ts", "open", "high", "low", "close", "volume",
+            "volCcy", "volCcyQuote", "confirm"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        df = df.sort_values("ts").reset_index(drop=True)
+        df.to_csv(CACHE_FILE, index=False)
+        return df
+    else:
+        if os.path.exists(CACHE_FILE):
+            st.warning("使用本地缓存数据")
+            df = pd.read_csv(CACHE_FILE, parse_dates=["ts"])
+            return df
+        else:
+            st.error("无法获取数据且无缓存")
+            return pd.DataFrame()
 
 df = get_data()
 if df.empty:
@@ -72,9 +95,39 @@ df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_period_slow)
 df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
 df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=atr_period)
 
-# 支撑阻力（最近N根K线的最高/最低）
-df["resistance"] = df["high"].rolling(window=lookback_sr).max()
-df["support"] = df["low"].rolling(window=lookback_sr).min()
+# 支撑阻力（滚动最高最低）
+df["resistance_roll"] = df["high"].rolling(window=lookback_sr).max()
+df["support_roll"] = df["low"].rolling(window=lookback_sr).min()
+
+# 趋势持续确认条件
+df["EMA_fast_up"] = df["EMA_fast"] > df["EMA_fast"].shift(1)
+df["EMA_fast_down"] = df["EMA_fast"] < df["EMA_fast"].shift(1)
+df["trend_up_confirm"] = (df["EMA_fast"] > df["EMA_slow"]) & df["EMA_fast_up"]
+df["trend_down_confirm"] = (df["EMA_fast"] < df["EMA_slow"]) & df["EMA_fast_down"]
+df["trend_up_streak"] = df["trend_up_confirm"].rolling(trend_confirm_bars).sum() == trend_confirm_bars
+df["trend_down_streak"] = df["trend_down_confirm"].rolling(trend_confirm_bars).sum() == trend_confirm_bars
+
+# 寻找结构高点/低点（真正的前高前低）
+def find_swing_highs(df, window=5):
+    highs = []
+    for i in range(window, len(df)-window):
+        left = df['high'].iloc[i-window:i].max()
+        right = df['high'].iloc[i+1:i+window+1].max()
+        if df['high'].iloc[i] > left and df['high'].iloc[i] > right:
+            highs.append((df['ts'].iloc[i], df['high'].iloc[i]))
+    return highs
+
+def find_swing_lows(df, window=5):
+    lows = []
+    for i in range(window, len(df)-window):
+        left = df['low'].iloc[i-window:i].min()
+        right = df['low'].iloc[i+1:i+window+1].min()
+        if df['low'].iloc[i] < left and df['low'].iloc[i] < right:
+            lows.append((df['ts'].iloc[i], df['low'].iloc[i]))
+    return lows
+
+swing_highs = find_swing_highs(df, window=3)
+swing_lows = find_swing_lows(df, window=3)
 
 df = df.dropna().reset_index(drop=True)
 
@@ -82,69 +135,307 @@ latest = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else latest
 
 # ==========================
-# 趋势判断
+# 趋势判断（加入持续确认）
 # ==========================
 trend = None
-if latest["EMA_fast"] > latest["EMA_slow"] and latest["ADX"] > adx_threshold:
+if latest["trend_up_streak"] and latest["ADX"] > adx_threshold:
     trend = "多"
-elif latest["EMA_fast"] < latest["EMA_slow"] and latest["ADX"] > adx_threshold:
+elif latest["trend_down_streak"] and latest["ADX"] > adx_threshold:
     trend = "空"
 
 # ==========================
-# 回调入场信号（基于EMA20回调）
+# 回调入场信号（基于ATR + 方向约束）
 # ==========================
 signal = None
 if trend == "多":
-    # 价格回踩EMA_fast附近（±0.2%）且前一根K线收盘在EMA_fast下方
-    if abs(latest["close"] - latest["EMA_fast"]) / latest["EMA_fast"] < 0.002 and prev["close"] < prev["EMA_fast"]:
-        # K线确认：下影线较长或阳线
+    # 方向约束：价格在慢线之上
+    if latest["close"] > latest["EMA_slow"] and \
+       abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * callback_atr_mult and \
+       prev["close"] < prev["EMA_fast"]:
         body = abs(latest["close"] - latest["open"])
         lower_shadow = min(latest["close"], latest["open"]) - latest["low"]
         if lower_shadow > body * 1.5 or latest["close"] > latest["open"]:
             signal = "多"
 elif trend == "空":
-    if abs(latest["close"] - latest["EMA_fast"]) / latest["EMA_fast"] < 0.002 and prev["close"] > prev["EMA_fast"]:
+    if latest["close"] < latest["EMA_slow"] and \
+       abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * callback_atr_mult and \
+       prev["close"] > prev["EMA_fast"]:
         body = abs(latest["close"] - latest["open"])
         upper_shadow = latest["high"] - max(latest["close"], latest["open"])
         if upper_shadow > body * 1.5 or latest["close"] < latest["open"]:
             signal = "空"
 
 # ==========================
-# 绘图（K线 + 均线 + 支撑阻力）
+# 信号持久化
+# ==========================
+def load_signal_history():
+    if os.path.exists(SIGNAL_HISTORY_FILE):
+        with open(SIGNAL_HISTORY_FILE, 'r') as f:
+            data = json.load(f)
+            # 将时间字符串转回datetime
+            for item in data:
+                item['time'] = datetime.fromisoformat(item['time'])
+            return data
+    return []
+
+def save_signal_history(history):
+    # 将datetime转为iso字符串
+    serializable = []
+    for item in history:
+        copy = item.copy()
+        copy['time'] = item['time'].isoformat()
+        serializable.append(copy)
+    with open(SIGNAL_HISTORY_FILE, 'w') as f:
+        json.dump(serializable, f, indent=2)
+
+if "signal_history" not in st.session_state:
+    st.session_state.signal_history = load_signal_history()
+
+if signal:
+    last_signal_time = st.session_state.signal_history[-1]["time"] if st.session_state.signal_history else None
+    if last_signal_time != latest["ts"]:
+        st.session_state.signal_history.append({
+            "time": latest["ts"],
+            "direction": signal,
+            "price": latest["close"],
+            "ema_fast": latest["EMA_fast"],
+            "atr": latest["ATR"]
+        })
+        if len(st.session_state.signal_history) > 50:
+            st.session_state.signal_history = st.session_state.signal_history[-50:]
+        save_signal_history(st.session_state.signal_history)
+
+# ==========================
+# 模拟账户（带止损止盈和仓位计算）
+# ==========================
+class TradingAccount:
+    def __init__(self, initial_balance):
+        self.initial = initial_balance
+        self.key = "trading_account"
+        if self.key not in st.session_state:
+            self.reset()
+
+    def _get(self):
+        return st.session_state[self.key]
+
+    def _set(self, data):
+        st.session_state[self.key] = data
+
+    def reset(self):
+        self._set({
+            'balance': self.initial,
+            'position': None,
+            'trades': []
+        })
+
+    @property
+    def balance(self):
+        return self._get()['balance']
+
+    @balance.setter
+    def balance(self, value):
+        d = self._get()
+        d['balance'] = value
+        self._set(d)
+
+    @property
+    def position(self):
+        return self._get()['position']
+
+    @position.setter
+    def position(self, value):
+        d = self._get()
+        d['position'] = value
+        self._set(d)
+
+    @property
+    def trades(self):
+        return self._get()['trades']
+
+    @trades.setter
+    def trades(self, value):
+        d = self._get()
+        d['trades'] = value
+        self._set(d)
+
+    def can_open(self):
+        return self.position is None
+
+    def open_position(self, direction, price, atr):
+        # 计算止损价和止盈价
+        if direction == "多":
+            stop_loss = price - atr * 1.5  # 固定1.5倍ATR止损
+            take_profit = price + (price - stop_loss) * risk_reward
+        else:
+            stop_loss = price + atr * 1.5
+            take_profit = price - (stop_loss - price) * risk_reward
+
+        # 计算风险金额
+        risk_amount = self.balance * (risk_percent / 100)
+        stop_distance = abs(price - stop_loss)
+        if stop_distance == 0:
+            return False, "止损距离为零"
+
+        # 计算开仓数量（最小0.01）
+        raw_qty = risk_amount / stop_distance
+        qty = round(raw_qty / 0.01) * 0.01
+        if qty < 0.01:
+            qty = 0.01
+
+        # 手续费
+        fee = price * qty * 0.0005
+        if self.balance < fee:
+            return False, "余额不足"
+
+        self.balance -= fee
+        self.position = {
+            'direction': direction,
+            'entry': price,
+            'qty': qty,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'open_time': datetime.now().isoformat()
+        }
+        return True, "开仓成功"
+
+    def check_stop_take(self, current_price):
+        if not self.position:
+            return None
+
+        pos = self.position
+        direction = pos['direction']
+        entry = pos['entry']
+        stop = pos['stop_loss']
+        tp = pos['take_profit']
+        qty = pos['qty']
+
+        if direction == "多":
+            if current_price <= stop:
+                reason = "止损"
+                close_price = stop
+            elif current_price >= tp:
+                reason = "止盈"
+                close_price = tp
+            else:
+                return None
+        else:
+            if current_price >= stop:
+                reason = "止损"
+                close_price = stop
+            elif current_price <= tp:
+                reason = "止盈"
+                close_price = tp
+            else:
+                return None
+
+        pnl = (close_price - entry) * qty if direction == "多" else (entry - close_price) * qty
+        fee = close_price * qty * 0.0005
+        net_pnl = pnl - fee
+
+        self.balance += net_pnl
+        self.trades.append({
+            **pos,
+            'close_price': close_price,
+            'close_time': datetime.now().isoformat(),
+            'reason': reason,
+            'pnl': pnl,
+            'fee': fee,
+            'net_pnl': net_pnl
+        })
+        self.position = None
+        return reason, net_pnl
+
+    def get_equity(self, current_price):
+        if not self.position:
+            return self.balance
+        pos = self.position
+        if pos['direction'] == "多":
+            floating = (current_price - pos['entry']) * pos['qty']
+        else:
+            floating = (pos['entry'] - current_price) * pos['qty']
+        return self.balance + floating
+
+account = TradingAccount(initial_balance)
+
+# 开仓逻辑
+if signal and account.can_open():
+    success, msg = account.open_position(signal, latest["close"], latest["ATR"])
+    if success:
+        st.sidebar.success(f"✅ 开仓 {signal}")
+    else:
+        st.sidebar.warning(f"开仓失败: {msg}")
+
+# 检查止损止盈
+if account.position:
+    result = account.check_stop_take(latest["close"])
+    if result:
+        reason, net = result
+        st.sidebar.info(f"📌 平仓: {reason}, 盈亏: {net:+.2f} USDT")
+
+# ==========================
+# 胜率统计
+# ==========================
+def calculate_performance(trades):
+    if not trades:
+        return {}
+    df_t = pd.DataFrame(trades)
+    wins = df_t[df_t['net_pnl'] > 0]
+    losses = df_t[df_t['net_pnl'] < 0]
+    total = len(df_t)
+    win_rate = len(wins) / total * 100 if total > 0 else 0
+    avg_win = wins['net_pnl'].mean() if len(wins) > 0 else 0
+    avg_loss = abs(losses['net_pnl'].mean()) if len(losses) > 0 else 0
+    profit_factor = (wins['net_pnl'].sum() / abs(losses['net_pnl'].sum())) if len(losses) > 0 and losses['net_pnl'].sum() != 0 else float('inf')
+    return {
+        'total_trades': total,
+        'wins': len(wins),
+        'losses': len(losses),
+        'win_rate': win_rate,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'profit_factor': profit_factor,
+        'net_pnl_total': df_t['net_pnl'].sum()
+    }
+
+# ==========================
+# 绘图
 # ==========================
 fig = go.Figure()
-
-# K线
 fig.add_trace(go.Candlestick(
     x=df["ts"], open=df["open"], high=df["high"],
     low=df["low"], close=df["close"], name="K线"
 ))
-
-# EMA均线
 fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_fast"], line=dict(color="blue", width=1), name=f"EMA{ema_period_fast}"))
 fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_slow"], line=dict(color="orange", width=1), name=f"EMA{ema_period_slow}"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["support_roll"], line=dict(color="green", width=1, dash="dash"), name="支撑(滚动)"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["resistance_roll"], line=dict(color="red", width=1, dash="dash"), name="阻力(滚动)"))
 
-# 支撑阻力线（虚线）
-fig.add_trace(go.Scatter(x=df["ts"], y=df["support"], line=dict(color="green", width=1, dash="dash"), name="支撑"))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["resistance"], line=dict(color="red", width=1, dash="dash"), name="阻力"))
+# 结构高低点
+if swing_highs:
+    sh_x, sh_y = zip(*swing_highs)
+    fig.add_trace(go.Scatter(x=sh_x, y=sh_y, mode='markers', marker=dict(symbol='triangle-down', size=8, color='red'), name='结构高点'))
+if swing_lows:
+    sl_x, sl_y = zip(*swing_lows)
+    fig.add_trace(go.Scatter(x=sl_x, y=sl_y, mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name='结构低点'))
 
-# 标记信号点
+# 信号点
 if signal:
     fig.add_trace(go.Scatter(
         x=[latest["ts"]],
         y=[latest["close"]],
-        mode="markers",
-        marker=dict(symbol="star", size=15, color="yellow"),
-        name="信号点"
+        mode="markers+text",
+        marker=dict(symbol="arrow-up" if signal=="多" else "arrow-down", size=15, color="yellow"),
+        text=signal,
+        textposition="top center",
+        name="新信号"
     ))
 
 fig.update_layout(
-    title=f"{SYMBOL} 5分钟图 (支撑阻力周期={lookback_sr})",
+    title=f"{SYMBOL} 5分钟图 (专业版)",
     template="plotly_dark",
     height=700,
     xaxis_rangeslider_visible=False
 )
-
 st.plotly_chart(fig, use_container_width=True)
 
 # ==========================
@@ -161,13 +452,60 @@ with col3:
 with col4:
     st.metric("ATR", f"{latest['ATR']:.4f}")
 
-st.write(f"**支撑** (最近{lookback_sr}根): {latest['support']:.2f}")
-st.write(f"**阻力** (最近{lookback_sr}根): {latest['resistance']:.2f}")
-
+st.write(f"**滚动支撑** (最近{lookback_sr}根): {latest['support_roll']:.2f}")
+st.write(f"**滚动阻力** (最近{lookback_sr}根): {latest['resistance_roll']:.2f}")
 if signal:
-    st.success(f"📈 当前信号: {signal} (回调确认)")
+    st.success(f"📈 当前信号: {signal}")
 else:
-    st.info("⏳ 无信号，等待趋势机会")
+    st.info("⏳ 无信号")
 
-# 可选的简单模拟账户提示
-st.caption("注意：本系统仅展示信号，未包含自动交易模块。如需模拟交易，可参考之前的账户代码。")
+# ==========================
+# 账户面板
+# ==========================
+st.subheader("💰 模拟账户")
+col_acc1, col_acc2, col_acc3 = st.columns(3)
+with col_acc1:
+    st.metric("余额 (USDT)", f"{account.balance:.2f}")
+with col_acc2:
+    equity = account.get_equity(latest["close"])
+    st.metric("权益 (USDT)", f"{equity:.2f}")
+with col_acc3:
+    if account.position:
+        st.metric("持仓", f"{account.position['direction']} {account.position['qty']:.2f}张")
+    else:
+        st.metric("持仓", "无")
+
+if account.position:
+    pos = account.position
+    st.write(f"开仓价: {pos['entry']:.2f} | 止损: {pos['stop_loss']:.2f} | 止盈: {pos['take_profit']:.2f}")
+
+if st.button("重置账户"):
+    account.reset()
+    st.rerun()
+
+# ==========================
+# 信号历史与绩效
+# ==========================
+st.subheader("📜 信号历史")
+if st.session_state.signal_history:
+    hist_df = pd.DataFrame(st.session_state.signal_history)
+    hist_df['time'] = hist_df['time'].dt.strftime('%Y-%m-%d %H:%M')
+    st.dataframe(hist_df[['time', 'direction', 'price', 'ema_fast', 'atr']], use_container_width=True)
+
+st.subheader("📈 交易绩效统计")
+if account.trades:
+    perf = calculate_performance(account.trades)
+    col_perf1, col_perf2, col_perf3, col_perf4 = st.columns(4)
+    with col_perf1:
+        st.metric("总交易", perf['total_trades'])
+    with col_perf2:
+        st.metric("胜率", f"{perf['win_rate']:.1f}%")
+    with col_perf3:
+        st.metric("总盈亏", f"{perf['net_pnl_total']:+.2f}")
+    with col_perf4:
+        pf = perf['profit_factor']
+        pf_str = f"{pf:.2f}" if pf != float('inf') else "∞"
+        st.metric("盈亏比", pf_str)
+    st.dataframe(pd.DataFrame(account.trades).tail(10)[['open_time', 'direction', 'entry', 'close_price', 'reason', 'net_pnl']])
+else:
+    st.info("暂无交易记录")
