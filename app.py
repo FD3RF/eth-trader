@@ -1,5 +1,5 @@
 """
-5分钟趋势合约系统（专业版）- 整合实时价格 + 自动刷新
+5分钟趋势合约系统（实时版）- 修复变量未定义错误
 策略：EMA趋势 + ADX强度 + ATR自适应回调 + K线确认 + 结构支撑阻力
 """
 
@@ -13,6 +13,7 @@ import time
 import os
 import json
 import numpy as np
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(layout="wide")
 st.title("📈 5分钟趋势合约系统（实时版）")
@@ -24,7 +25,6 @@ SIGNAL_HISTORY_FILE = "signal_history.json"
 ACCOUNT_FILE = "account.json"
 
 # 自动刷新（每5秒）
-from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=5000, key="refresh")
 
 # ==========================
@@ -44,6 +44,9 @@ initial_balance = st.sidebar.number_input("初始资金 (USDT)", value=100.0, st
 # 多时间框架验证开关
 use_tf_filter = st.sidebar.checkbox("启用15分钟EMA验证", value=True, help="要求15分钟EMA方向与主趋势一致")
 
+# 趋势持续确认周期（修复：定义变量）
+trend_confirm_bars = 3
+
 # 手动刷新按钮
 if st.sidebar.button("🔄 强制刷新数据"):
     st.cache_data.clear()
@@ -52,7 +55,7 @@ if st.sidebar.button("🔄 强制刷新数据"):
 # ==========================
 # 数据获取（5分钟 + 15分钟 + 实时ticker）
 # ==========================
-@st.cache_data(ttl=3)  # 缩短缓存时间至3秒，使K线更新更及时
+@st.cache_data(ttl=3)
 def fetch_okx_candles(bar="5m", limit=300):
     url = "https://www.okx.com/api/v5/market/candles"
     params = {"instId": SYMBOL, "bar": bar, "limit": limit}
@@ -150,7 +153,7 @@ df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"],
 df["resistance_roll"] = df["high"].rolling(window=lookback_sr).max()
 df["support_roll"] = df["low"].rolling(window=lookback_sr).min()
 
-# 趋势持续确认条件
+# 趋势持续确认条件（修复：正确使用shift）
 df["EMA_fast_up"] = df["EMA_fast"] > df["EMA_fast"].shift(1)
 df["EMA_fast_down"] = df["EMA_fast"] < df["EMA_fast"].shift(1)
 df["trend_up_confirm"] = (df["EMA_fast"] > df["EMA_slow"]) & df["EMA_fast_up"]
@@ -510,7 +513,6 @@ if signal:
 else:
     st.info("⏳ 无信号")
 
-# 显示数据更新时间
 st.caption(f"数据更新于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # ==========================
