@@ -5,3 +5,4 @@ streamlit-autorefresh
 scikit-learn
 tensorflow
 websocket-client
+ta
