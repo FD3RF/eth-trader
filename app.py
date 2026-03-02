@@ -11,7 +11,7 @@ from datetime import datetime
 # 页面
 # ==========================
 st.set_page_config(layout="wide")
-st.title("ETH 高频盯盘 + 胜率统计（工业级）")
+st.title("ETH 高频盯盘 + 回测 + 胜率（终极完美版）")
 
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "signals_history.csv"
@@ -21,11 +21,11 @@ st_autorefresh(interval=10000, key="refresh")
 
 
 # ==========================
-# 安全数据获取
+# 数据获取（安全）
 # ==========================
-def get_data():
+def get_data(interval="5m"):
     url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": "5m", "limit": 300}
+    params = {"instId": SYMBOL, "bar": interval, "limit": 300}
 
     try:
         resp = requests.get(url, params=params, timeout=5)
@@ -40,6 +40,7 @@ def get_data():
         ])
 
         df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -49,19 +50,28 @@ def get_data():
         return pd.DataFrame()
 
 
-df = get_data()
+df = get_data("5m")
+df_15m = get_data("15m")
+
 if df.empty:
     st.error("数据获取失败")
     st.stop()
 
 
 # ==========================
-# 指标
+# 指标计算
 # ==========================
-df["EMA20"] = ta.trend.ema_indicator(df["close"], 20)
-df["EMA60"] = ta.trend.ema_indicator(df["close"], 60)
-df["RSI"] = ta.momentum.rsi(df["close"], 14)
-df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], 14)
+def add_indicators(df):
+    df = df.copy()
+    df["EMA20"] = ta.trend.ema_indicator(df["close"], 20)
+    df["EMA60"] = ta.trend.ema_indicator(df["close"], 60)
+    df["RSI"] = ta.momentum.rsi(df["close"], 14)
+    df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], 14)
+    return df
+
+
+df = add_indicators(df)
+df_15m = add_indicators(df_15m)
 
 df_valid = df.dropna()
 if df_valid.empty:
@@ -69,6 +79,20 @@ if df_valid.empty:
     st.stop()
 
 latest = df_valid.iloc[-1]
+
+
+# ==========================
+# 多周期趋势（更稳）
+# ==========================
+def trend(df):
+    if df.empty or df["EMA60"].isna().all():
+        return 0
+    return 1 if df["close"].iloc[-1] > df["EMA60"].iloc[-1] else -1
+
+
+trend_5m = trend(df)
+trend_15m = trend(df_15m)
+trend_multi = trend_5m + trend_15m  # >0 多，<0 空
 
 
 # ==========================
@@ -80,9 +104,6 @@ mean = df["close"].rolling(20).mean().iloc[-1]
 std = df["close"].rolling(20).std().iloc[-1]
 z = (price - mean) / std if std > 0 else 0
 
-trend_up = price > df["close"].rolling(10).mean().iloc[-1]
-trend_down = price < df["close"].rolling(10).mean().iloc[-1]
-
 is_oversold = z < -1.2
 is_overbought = z > 1.2
 
@@ -91,7 +112,7 @@ vol_ok = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-1] * 0.7
 atr = latest["ATR"] if not pd.isna(latest["ATR"]) else 0.01
 stop_distance = max(atr * 1.2, price * 0.005)
 
-if trend_up:
+if trend_multi > 0:
     stop = price - stop_distance
     tp = price + stop_distance * 1.6
 else:
@@ -102,7 +123,7 @@ risk = abs(price - stop)
 rr = round(abs((tp - price) / risk), 2) if risk > 0 else 0
 
 score = 0
-if trend_up or trend_down:
+if trend_multi > 0:
     score += 2
 if abs(z) > 1.2:
     score += 1
@@ -111,24 +132,39 @@ if vol_ok:
 if rr >= 1.3:
     score += 2
 
-quality = "高" if score >= 6 and rr >= 1.6 else "中" if score >= 4 else "低"
+quality = "高" if score >= 7 and rr >= 1.6 else "中" if score >= 5 else "低"
 
 signal = None
-if trend_up and is_oversold and vol_ok and rr >= 1.3:
+if trend_multi > 0 and is_oversold and vol_ok and rr >= 1.3:
     signal = "多单"
-elif trend_down and is_overbought and vol_ok and rr >= 1.3:
+elif trend_multi < 0 and is_overbought and vol_ok and rr >= 1.3:
     signal = "空单"
 
 
 # ==========================
-# 胜率历史
+# 交易成本模型（净期望）
+# ==========================
+FEE = 0.0004
+SLIPPAGE = 0.0003
+
+def net_profit(entry, exit):
+    if entry <= 0:
+        return 0
+    gross = (exit - entry) / entry
+    return gross - (FEE + SLIPPAGE)
+
+
+# ==========================
+# 回测与历史
 # ==========================
 def load_history():
     if os.path.exists(HISTORY_FILE):
         return pd.read_csv(HISTORY_FILE)
     return pd.DataFrame(columns=[
         "time", "direction", "entry", "stop", "tp",
-        "result", "tp_hit", "sl_hit", "score", "rr", "quality"
+        "result", "tp_hit", "sl_hit",
+        "score", "rr", "quality",
+        "net", "high", "low"
     ])
 
 
@@ -144,19 +180,17 @@ def update_results():
     if dfh.empty:
         return dfh
 
-    price = df["close"].iloc[-1]
-
     for idx, row in dfh.iterrows():
         if row["result"] in [None, ""]:
             if row["direction"] == "多单":
-                if price >= row["tp"]:
+                if row["high"] >= row["tp"]:
                     dfh.at[idx, "tp_hit"] = True
-                if price <= row["stop"]:
+                if row["low"] <= row["stop"]:
                     dfh.at[idx, "sl_hit"] = True
             else:
-                if price <= row["tp"]:
+                if row["low"] <= row["tp"]:
                     dfh.at[idx, "tp_hit"] = True
-                if price >= row["stop"]:
+                if row["high"] >= row["stop"]:
                     dfh.at[idx, "sl_hit"] = True
 
             if row.get("tp_hit"):
@@ -168,17 +202,26 @@ def update_results():
     return dfh
 
 
-def calc_winrate():
-    dfh = load_history()
+def calc_metrics(dfh):
     if dfh.empty or "result" not in dfh:
-        return 0, 0
+        return 0, 0, 0
 
-    total = dfh["result"].notna().sum()
-    wins = (dfh["result"] == "win").sum()
-    return (wins / total * 100) if total > 0 else 0, total
+    completed = dfh[dfh["result"].notna()]
+    total = len(completed)
+    wins = (completed["result"] == "win").sum()
+
+    win_rate = (wins / total * 100) if total > 0 else 0
+
+    net = dfh["net"].dropna().sum() if "net" in dfh else 0
+
+    cum = dfh["net"].cumsum() if "net" in dfh else pd.Series([])
+    dd = (cum - cum.cummax()).min() if not cum.empty else 0
+
+    return win_rate, net, dd
 
 
 history = update_results()
+winrate, net, dd = calc_metrics(history)
 
 
 # ==========================
@@ -200,6 +243,9 @@ def mark_record(signal, price):
         f.write(f"{signal},{price}")
 
 
+# ==========================
+# 记录信号
+# ==========================
 if signal and not already_recorded(signal, price):
     row = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -212,7 +258,10 @@ if signal and not already_recorded(signal, price):
         "sl_hit": False,
         "score": score,
         "rr": rr,
-        "quality": quality
+        "quality": quality,
+        "net": net_profit(price, tp),
+        "high": df["high"].iloc[-1],
+        "low": df["low"].iloc[-1]
     }
     save_history(row)
     mark_record(signal, price)
@@ -235,21 +284,17 @@ st.plotly_chart(fig, use_container_width=True)
 # ==========================
 # 面板
 # ==========================
-winrate, total = calc_winrate()
-
 st.subheader("状态")
-st.write("趋势:", "多头" if trend_up else "空头" if trend_down else "无趋势")
+st.write("多周期趋势:", "多头" if trend_multi > 0 else "空头" if trend_multi < 0 else "中性")
 st.write("Z-score:", round(z, 2))
 st.write("RSI:", round(latest["RSI"], 2))
 st.write("RR:", round(rr, 2))
-st.write("建议止损:", round(stop, 4))
-st.write("建议止盈:", round(tp, 4))
 st.write("信号质量:", quality)
 
 st.subheader("交易提示")
 if signal == "多单":
     st.success(f"""
-📈 多单信号
+📈 多单
 入场: {round(price,4)}
 止损: {round(stop,4)}
 止盈: {round(tp,4)}
@@ -257,7 +302,7 @@ RR: {round(rr,2)}
 """)
 elif signal == "空单":
     st.error(f"""
-📉 空单信号
+📉 空单
 入场: {round(price,4)}
 止损: {round(stop,4)}
 止盈: {round(tp,4)}
@@ -266,39 +311,41 @@ RR: {round(rr,2)}
 else:
     st.warning("暂无高质量信号")
 
+
 # ==========================
-# 胜率与日志
+# 回测统计
 # ==========================
-st.subheader("胜率统计")
-st.write("已统计信号:", total)
+st.subheader("回测统计")
 st.write("胜率:", f"{round(winrate,2)}%")
+st.write("净收益:", round(net, 4))
+st.write("最大回撤:", round(dd, 4))
 
 st.subheader("信号历史")
 st.dataframe(history.tail(20))
 
-# ==========================
-# 日志可视化
-# ==========================
-st.subheader("日志可视化")
 
+# ==========================
+# 可视化
+# ==========================
+st.subheader("胜率曲线")
 if not history.empty:
-    history["time"] = pd.to_datetime(history["time"])
-
-    history["cum_win"] = (history["result"] == "win").cumsum()
-    history["cum_total"] = range(1, len(history) + 1)
-    history["win_rate_curve"] = history["cum_win"] / history["cum_total"] * 100
+    h = history.copy()
+    h["time"] = pd.to_datetime(h["time"])
+    h["cum_win"] = (h["result"] == "win").cumsum()
+    h["cum_total"] = range(1, len(h) + 1)
+    h["win_rate_curve"] = h["cum_win"] / h["cum_total"] * 100
 
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(
-        x=history["time"],
-        y=history["win_rate_curve"],
+        x=h["time"],
+        y=h["win_rate_curve"],
         mode="lines",
         name="胜率曲线"
     ))
     st.plotly_chart(fig2, use_container_width=True)
 
     st.subheader("分级统计")
-    grade = history.groupby("quality").agg({
+    grade = h.groupby("quality").agg({
         "result": lambda x: (x == "win").sum(),
         "direction": "count"
     }).rename(columns={"direction": "total"})
@@ -306,12 +353,12 @@ if not history.empty:
     grade["win_rate"] = (grade["result"] / grade["total"]) * 100
     st.dataframe(grade)
 
-    st.subheader("每日统计（10–20单目标）")
-    history["day"] = history["time"].str[:10]
-    stats = history.groupby("day").agg({
+    st.subheader("每日统计")
+    h["day"] = h["time"].str[:10]
+    stats = h.groupby("day").agg({
         "direction": "count",
         "result": lambda x: (x == "win").sum()
-    }).rename(columns={"direction": "signals", "result": "wins"})
+    })
 
-    stats["win_rate"] = stats["wins"] / stats["signals"] * 100
+    stats["win_rate"] = stats["result"] / stats["direction"] * 100
     st.dataframe(stats.tail(10))
