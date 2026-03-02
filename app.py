@@ -3,15 +3,10 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
-from datetime import datetime
-import ta
 
 st.set_page_config(layout="wide")
-st.title("🔥 ETH 5分钟 AI 高频统计交易系统（工业级）")
+st.title("🔥 ETH 5分钟 AI 高频统计交易系统（工业稳定版）")
 
-# =========================
-# 参数
-# =========================
 SYMBOL = "ETH-USDT-SWAP"
 BAR = "5m"
 LIMIT = 500
@@ -19,10 +14,11 @@ LIMIT = 500
 INITIAL_CAPITAL = 100
 RISK_PER_TRADE = 0.02
 RR = 1.4
-FEE_RATE = 0.0005  # 单边手续费0.05%
+FEE_RATE = 0.0005
+
 
 # =========================
-# 获取真实K线
+# 获取K线
 # =========================
 @st.cache_data(ttl=60)
 def get_data():
@@ -45,15 +41,31 @@ def get_data():
 
     return df
 
+
 df = get_data()
 
 # =========================
-# 指标计算
+# 手写 EMA
 # =========================
-df["ema9"] = ta.trend.ema_indicator(df["close"], 9)
-df["ema21"] = ta.trend.ema_indicator(df["close"], 21)
-df["rsi"] = ta.momentum.rsi(df["close"], 14)
+df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
+df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
 
+# =========================
+# 手写 RSI
+# =========================
+delta = df["close"].diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+
+avg_gain = gain.rolling(14).mean()
+avg_loss = loss.rolling(14).mean()
+
+rs = avg_gain / avg_loss
+df["rsi"] = 100 - (100 / (1 + rs))
+
+# =========================
+# Z-score
+# =========================
 rolling_mean = df["close"].rolling(20).mean()
 rolling_std = df["close"].rolling(20).std()
 df["z"] = (df["close"] - rolling_mean) / rolling_std
@@ -62,7 +74,7 @@ vol_ma = df["vol"].rolling(20).mean()
 df["vol_ratio"] = df["vol"] / vol_ma
 
 # =========================
-# 高频AI评分模型
+# 评分
 # =========================
 def score_row(row):
     score = 0
@@ -133,8 +145,6 @@ for i in range(30, len(df)-2):
         equity_curve.append(capital)
         continue
 
-    position_size = risk_amount / risk
-
     result = None
 
     for j in range(i+1, len(df)):
@@ -183,55 +193,10 @@ for i in range(30, len(df)-2):
 total_trades = wins + losses
 winrate = wins / total_trades if total_trades > 0 else 0
 
-if total_trades > 0:
-    avg_win = np.mean([t["pnl"] for t in trade_log if t["pnl"] > 0])
-    avg_loss = abs(np.mean([t["pnl"] for t in trade_log if t["pnl"] < 0]))
-    expectancy = winrate * avg_win - (1-winrate) * avg_loss
-else:
-    expectancy = 0
+st.metric("交易次数", total_trades)
+st.metric("胜率", f"{winrate*100:.2f}%")
 
-max_drawdown = 0
-peak = INITIAL_CAPITAL
-for eq in equity_curve:
-    peak = max(peak, eq)
-    dd = (peak - eq)
-    max_drawdown = max(max_drawdown, dd)
-
-# =========================
-# 显示
-# =========================
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("交易次数", total_trades)
-col2.metric("胜率", f"{winrate*100:.2f}%")
-col3.metric("真实期望值", round(expectancy,2))
-col4.metric("最大回撤", round(max_drawdown,2))
-
-# K线图
-fig = go.Figure(data=[
-    go.Candlestick(
-        x=df["ts"],
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"]
-    )
-])
-
-st.plotly_chart(fig, use_container_width=True)
-
-# 资金曲线
-st.subheader("资金曲线")
 st.line_chart(equity_curve)
 
-# 胜率曲线
-if total_trades > 0:
-    win_curve = np.cumsum([1 if t["pnl"]>0 else 0 for t in trade_log])
-    trade_count_curve = np.arange(1, len(win_curve)+1)
-    rolling_winrate = win_curve / trade_count_curve
-    st.subheader("胜率曲线")
-    st.line_chart(rolling_winrate)
-
-# 日志
 if trade_log:
-    st.subheader("交易日志")
     st.dataframe(pd.DataFrame(trade_log))
