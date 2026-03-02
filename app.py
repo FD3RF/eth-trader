@@ -1,5 +1,5 @@
 """
-5分钟趋势合约系统（专业版）- 完整风控 + 信号持久化 + 胜率统计
+5分钟趋势合约系统（专业版）- 持久化账户 + 多时间框架验证
 策略：EMA趋势 + ADX强度 + ATR自适应回调 + K线确认 + 结构支撑阻力
 """
 
@@ -18,7 +18,8 @@ st.set_page_config(layout="wide")
 st.title("📈 5分钟趋势合约系统（专业版）")
 
 SYMBOL = "ETH-USDT-SWAP"
-CACHE_FILE = "market_data_cache.csv"
+CACHE_FILE_5M = "market_data_5m_cache.csv"
+CACHE_FILE_15M = "market_data_15m_cache.csv"
 SIGNAL_HISTORY_FILE = "signal_history.json"
 ACCOUNT_FILE = "account.json"
 
@@ -36,16 +37,19 @@ risk_reward = st.sidebar.slider("盈亏比", 1.0, 3.0, 2.0, step=0.1)
 risk_percent = st.sidebar.slider("单笔风险 (%)", 1.0, 5.0, 2.0, step=0.5)
 initial_balance = st.sidebar.number_input("初始资金 (USDT)", value=100.0, step=10.0)
 
+# 多时间框架验证开关
+use_tf_filter = st.sidebar.checkbox("启用15分钟EMA验证", value=True, help="要求15分钟EMA方向与主趋势一致")
+
 # 趋势持续确认周期
 trend_confirm_bars = 3
 
 # ==========================
-# 带指数退避的数据获取
+# 带指数退避的数据获取（5分钟）
 # ==========================
 @st.cache_data(ttl=5)
-def fetch_okx_candles(limit=300):
+def fetch_okx_candles(bar="5m", limit=300):
     url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": "5m", "limit": limit}
+    params = {"instId": SYMBOL, "bar": bar, "limit": limit}
     max_retries = 5
     for attempt in range(max_retries):
         try:
@@ -61,8 +65,8 @@ def fetch_okx_candles(limit=300):
             time.sleep(wait)
     return None
 
-def get_data():
-    data = fetch_okx_candles()
+def get_5m_data():
+    data = fetch_okx_candles("5m", 300)
     if data is not None:
         df = pd.DataFrame(data, columns=[
             "ts", "open", "high", "low", "close", "volume",
@@ -72,24 +76,51 @@ def get_data():
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
         df = df.sort_values("ts").reset_index(drop=True)
-        df.to_csv(CACHE_FILE, index=False)
+        df.to_csv(CACHE_FILE_5M, index=False)
         return df
     else:
-        if os.path.exists(CACHE_FILE):
-            st.warning("使用本地缓存数据")
-            df = pd.read_csv(CACHE_FILE, parse_dates=["ts"])
+        if os.path.exists(CACHE_FILE_5M):
+            st.warning("使用本地5分钟缓存数据")
+            df = pd.read_csv(CACHE_FILE_5M, parse_dates=["ts"])
             return df
         else:
-            st.error("无法获取数据且无缓存")
             return pd.DataFrame()
 
-df = get_data()
-if df.empty:
+def get_15m_data():
+    data = fetch_okx_candles("15m", 100)  # 15分钟需要足够计算EMA20，100根足够
+    if data is not None:
+        df = pd.DataFrame(data, columns=[
+            "ts", "open", "high", "low", "close", "volume",
+            "volCcy", "volCcyQuote", "confirm"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        df = df.sort_values("ts").reset_index(drop=True)
+        df.to_csv(CACHE_FILE_15M, index=False)
+        return df
+    else:
+        if os.path.exists(CACHE_FILE_15M):
+            st.warning("使用本地15分钟缓存数据")
+            df = pd.read_csv(CACHE_FILE_15M, parse_dates=["ts"])
+            return df
+        else:
+            return pd.DataFrame()
+
+df_5m = get_5m_data()
+if df_5m.empty:
+    st.error("无法获取5分钟数据")
     st.stop()
 
+df_15m = get_15m_data()
+if df_15m.empty and use_tf_filter:
+    st.warning("无法获取15分钟数据，多时间框架验证将禁用")
+    use_tf_filter = False
+
 # ==========================
-# 指标计算
+# 5分钟指标计算
 # ==========================
+df = df_5m.copy()
 df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=ema_period_fast)
 df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_period_slow)
 df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
@@ -135,12 +166,30 @@ latest = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else latest
 
 # ==========================
+# 15分钟EMA计算
+# ==========================
+tf_ok = True  # 默认通过
+if use_tf_filter and not df_15m.empty:
+    df_15m["EMA20"] = ta.trend.ema_indicator(df_15m["close"], window=20)
+    df_15m = df_15m.dropna().reset_index(drop=True)
+    if len(df_15m) > 1:
+        latest_15m = df_15m.iloc[-1]
+        prev_15m = df_15m.iloc[-2]
+        # 多头要求15分钟EMA20上升，空头要求下降
+        if latest["trend_up_streak"]:
+            tf_ok = latest_15m["EMA20"] > prev_15m["EMA20"]
+        elif latest["trend_down_streak"]:
+            tf_ok = latest_15m["EMA20"] < prev_15m["EMA20"]
+    else:
+        tf_ok = False
+
+# ==========================
 # 趋势判断（加入持续确认）
 # ==========================
 trend = None
-if latest["trend_up_streak"] and latest["ADX"] > adx_threshold:
+if latest["trend_up_streak"] and latest["ADX"] > adx_threshold and tf_ok:
     trend = "多"
-elif latest["trend_down_streak"] and latest["ADX"] > adx_threshold:
+elif latest["trend_down_streak"] and latest["ADX"] > adx_threshold and tf_ok:
     trend = "空"
 
 # ==========================
@@ -179,7 +228,6 @@ def load_signal_history():
     return []
 
 def save_signal_history(history):
-    # 将datetime转为iso字符串
     serializable = []
     for item in history:
         copy = item.copy()
@@ -206,83 +254,60 @@ if signal:
         save_signal_history(st.session_state.signal_history)
 
 # ==========================
-# 模拟账户（带止损止盈和仓位计算）
+# 模拟账户（持久化到文件）
 # ==========================
 class TradingAccount:
     def __init__(self, initial_balance):
         self.initial = initial_balance
-        self.key = "trading_account"
-        if self.key not in st.session_state:
+        self.file = ACCOUNT_FILE
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.file):
+            with open(self.file, 'r') as f:
+                data = json.load(f)
+                self.balance = data.get('balance', self.initial)
+                self.position = data.get('position', None)
+                self.trades = data.get('trades', [])
+        else:
             self.reset()
 
-    def _get(self):
-        return st.session_state[self.key]
-
-    def _set(self, data):
-        st.session_state[self.key] = data
+    def save(self):
+        data = {
+            'balance': self.balance,
+            'position': self.position,
+            'trades': self.trades
+        }
+        with open(self.file, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
 
     def reset(self):
-        self._set({
-            'balance': self.initial,
-            'position': None,
-            'trades': []
-        })
-
-    @property
-    def balance(self):
-        return self._get()['balance']
-
-    @balance.setter
-    def balance(self, value):
-        d = self._get()
-        d['balance'] = value
-        self._set(d)
-
-    @property
-    def position(self):
-        return self._get()['position']
-
-    @position.setter
-    def position(self, value):
-        d = self._get()
-        d['position'] = value
-        self._set(d)
-
-    @property
-    def trades(self):
-        return self._get()['trades']
-
-    @trades.setter
-    def trades(self, value):
-        d = self._get()
-        d['trades'] = value
-        self._set(d)
+        self.balance = self.initial
+        self.position = None
+        self.trades = []
+        self.save()
 
     def can_open(self):
         return self.position is None
 
     def open_position(self, direction, price, atr):
-        # 计算止损价和止盈价
         if direction == "多":
-            stop_loss = price - atr * 1.5  # 固定1.5倍ATR止损
+            stop_loss = price - atr * 1.5
             take_profit = price + (price - stop_loss) * risk_reward
         else:
             stop_loss = price + atr * 1.5
             take_profit = price - (stop_loss - price) * risk_reward
 
-        # 计算风险金额
         risk_amount = self.balance * (risk_percent / 100)
         stop_distance = abs(price - stop_loss)
         if stop_distance == 0:
             return False, "止损距离为零"
 
-        # 计算开仓数量（最小0.01）
         raw_qty = risk_amount / stop_distance
         qty = round(raw_qty / 0.01) * 0.01
         if qty < 0.01:
             qty = 0.01
 
-        # 手续费
         fee = price * qty * 0.0005
         if self.balance < fee:
             return False, "余额不足"
@@ -296,6 +321,7 @@ class TradingAccount:
             'take_profit': take_profit,
             'open_time': datetime.now().isoformat()
         }
+        self.save()
         return True, "开仓成功"
 
     def check_stop_take(self, current_price):
@@ -343,6 +369,7 @@ class TradingAccount:
             'net_pnl': net_pnl
         })
         self.position = None
+        self.save()
         return reason, net_pnl
 
     def get_equity(self, current_price):
@@ -454,6 +481,8 @@ with col4:
 
 st.write(f"**滚动支撑** (最近{lookback_sr}根): {latest['support_roll']:.2f}")
 st.write(f"**滚动阻力** (最近{lookback_sr}根): {latest['resistance_roll']:.2f}")
+if use_tf_filter and not df_15m.empty:
+    st.write(f"**15分钟EMA方向**: {'上升' if tf_ok else '下降或持平'}")
 if signal:
     st.success(f"📈 当前信号: {signal}")
 else:
