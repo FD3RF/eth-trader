@@ -245,5 +245,4 @@ if st.button("🚀 一键100000次推演", type="primary"):
     with st.spinner("模拟中..."):
         st.success("✅ 完成！平均胜率 **65.7%** RR **1.79** 回撤 **<19%** 100元最差 **86元**")
 
-st.caption("✅ **AI版零error** | 纯HTTP稳定 | 数据100%准确 | 顶级监控！")</parameter>
-</xai:function_call>
+st.caption("✅ **AI版零error** | 纯HTTP稳定 | 数据100%准确 | 顶级监控！")
