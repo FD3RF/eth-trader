@@ -1,153 +1,237 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
-import requests
 import numpy as np
-import os
+import requests
+import plotly.graph_objects as go
+from datetime import datetime
+import ta
 
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Input
+st.set_page_config(layout="wide")
+st.title("🔥 ETH 5分钟 AI 高频统计交易系统（工业级）")
 
-st.set_page_config(layout="wide", page_title="ETH高频AI监控")
-st.title("🚀 ETH-USDT-SWAP 5分钟高频AI监控（工业稳定版）")
-
+# =========================
+# 参数
+# =========================
 SYMBOL = "ETH-USDT-SWAP"
-HISTORY_FILE = "signals_history.csv"
+BAR = "5m"
+LIMIT = 500
 
-st_autorefresh(interval=3000, key="refresh")
+INITIAL_CAPITAL = 100
+RISK_PER_TRADE = 0.02
+RR = 1.4
+FEE_RATE = 0.0005  # 单边手续费0.05%
 
-# =====================
-# 资金设置
-# =====================
-st.sidebar.header("💰 100元本金模拟")
-capital = st.sidebar.number_input("初始资金 (RMB)", value=100.0, min_value=50.0)
-leverage = st.sidebar.slider("杠杆倍数", 5, 50, 20)
-risk_percent = st.sidebar.slider("单笔风险%", 0.5, 5.0, 2.0) / 100
-long_only = st.sidebar.checkbox("只做多单", value=True)
-
-# =====================
-# 数据获取
-# =====================
+# =========================
+# 获取真实K线
+# =========================
+@st.cache_data(ttl=60)
 def get_data():
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": "5m", "limit": 300}
-    r = requests.get(url, params=params, timeout=5)
-    j = r.json()
-    if j.get("code") != "0":
-        return pd.DataFrame()
-    df = pd.DataFrame(j["data"], columns=["ts","open","high","low","close","vol","a","b","c"])
-    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-    for col in ["open","high","low","close","vol"]:
-        df[col] = pd.to_numeric(df[col])
-    return df.sort_values("ts")
+    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={BAR}&limit={LIMIT}"
+    r = requests.get(url).json()
+    data = r["data"]
+
+    df = pd.DataFrame(data, columns=[
+        "ts","open","high","low","close","vol",
+        "volCcy","volCcyQuote","confirm"
+    ])
+
+    df = df.astype({
+        "open":float,"high":float,"low":float,
+        "close":float,"vol":float
+    })
+
+    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    return df
 
 df = get_data()
-if df.empty:
-    st.error("数据获取失败")
-    st.stop()
 
-# =====================
-# 指标
-# =====================
-df["EMA60"] = df["close"].ewm(span=60).mean()
-df["RSI"] = df["close"].diff().clip(lower=0).rolling(14).mean() / (
-    df["close"].diff().abs().rolling(14).mean()
-) * 100
-df.dropna(inplace=True)
+# =========================
+# 指标计算
+# =========================
+df["ema9"] = ta.trend.ema_indicator(df["close"], 9)
+df["ema21"] = ta.trend.ema_indicator(df["close"], 21)
+df["rsi"] = ta.momentum.rsi(df["close"], 14)
 
-price = df["close"].iloc[-1]
+rolling_mean = df["close"].rolling(20).mean()
+rolling_std = df["close"].rolling(20).std()
+df["z"] = (df["close"] - rolling_mean) / rolling_std
 
-# =====================
-# AI模型缓存
-# =====================
-@st.cache_resource
-def load_model(data):
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(data.reshape(-1,1))
+vol_ma = df["vol"].rolling(20).mean()
+df["vol_ratio"] = df["vol"] / vol_ma
 
-    X, y = [], []
-    for i in range(60, len(scaled)):
-        X.append(scaled[i-60:i])
-        y.append(scaled[i])
-    X, y = np.array(X), np.array(y)
+# =========================
+# 高频AI评分模型
+# =========================
+def score_row(row):
+    score = 0
 
-    model = Sequential([
-        Input(shape=(60,1)),
-        LSTM(32, return_sequences=True),
-        LSTM(32),
-        Dense(1)
-    ])
-    model.compile(optimizer="adam", loss="mse")
-    model.fit(X, y, epochs=5, batch_size=32, verbose=0)
+    if abs(row["z"]) > 1.2:
+        score += 2
+    elif abs(row["z"]) > 1:
+        score += 1
 
-    return model, scaler
+    if row["rsi"] < 35 or row["rsi"] > 65:
+        score += 2
+    elif row["rsi"] < 45 or row["rsi"] > 55:
+        score += 1
 
-model, scaler = load_model(df["close"].values)
+    if row["ema9"] > row["ema21"] or row["ema9"] < row["ema21"]:
+        score += 1
 
-def ai_predict():
-    last60 = df["close"].values[-60:]
-    scaled = scaler.transform(last60.reshape(-1,1))
-    X = scaled.reshape(1,60,1)
-    pred = model.predict(X, verbose=0)
-    real = scaler.inverse_transform(pred)[0][0]
-    return "多头" if real > price else "空头"
+    if row["vol_ratio"] > 1.2:
+        score += 1
 
-ai_trend = ai_predict()
+    return score
 
-# =====================
-# 信号逻辑
-# =====================
-trend = 1 if price > df["EMA60"].iloc[-1] else -1
+df["score"] = df.apply(score_row, axis=1)
 
-signal = None
-stop = tp = rr = 0
+# =========================
+# 回测
+# =========================
+capital = INITIAL_CAPITAL
+equity_curve = []
+wins = 0
+losses = 0
+trade_log = []
 
-if trend > 0 and ai_trend=="多头":
-    stop = price * 0.992
-    tp = price * 1.015
-    rr = round((tp-price)/(price-stop),2)
-    signal="多单"
-elif not long_only and trend<0 and ai_trend=="空头":
-    stop = price * 1.008
-    tp = price * 0.985
-    rr = round((price-tp)/(stop-price),2)
-    signal="空单"
+for i in range(30, len(df)-2):
 
-# =====================
-# 仓位计算
-# =====================
-risk_amount = capital * risk_percent
-stop_distance = abs(price-stop) if signal else 0
-contracts = int((risk_amount/stop_distance)*leverage*0.01) if stop_distance>0 else 0
+    row = df.iloc[i]
+    next_open = df.iloc[i+1]["open"]
 
-# =====================
-# 图表
-# =====================
-fig = go.Figure()
-fig.add_trace(go.Candlestick(
-    x=df["ts"],
-    open=df["open"],
-    high=df["high"],
-    low=df["low"],
-    close=df["close"]
-))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA60"], name="EMA60"))
+    if row["score"] < 4:
+        equity_curve.append(capital)
+        continue
+
+    direction = None
+
+    if row["z"] < -1.2 and row["rsi"] < 40:
+        direction = "long"
+    elif row["z"] > 1.2 and row["rsi"] > 60:
+        direction = "short"
+
+    if direction is None:
+        equity_curve.append(capital)
+        continue
+
+    risk_amount = capital * RISK_PER_TRADE
+
+    if direction == "long":
+        sl = df.iloc[i-5:i]["low"].min()
+        entry = next_open
+        risk = entry - sl
+        tp = entry + risk * RR
+    else:
+        sl = df.iloc[i-5:i]["high"].max()
+        entry = next_open
+        risk = sl - entry
+        tp = entry - risk * RR
+
+    if risk <= 0:
+        equity_curve.append(capital)
+        continue
+
+    position_size = risk_amount / risk
+
+    result = None
+
+    for j in range(i+1, len(df)):
+        high = df.iloc[j]["high"]
+        low = df.iloc[j]["low"]
+
+        if direction == "long":
+            if low <= sl:
+                result = -risk_amount
+                losses += 1
+                break
+            if high >= tp:
+                result = risk_amount * RR
+                wins += 1
+                break
+        else:
+            if high >= sl:
+                result = -risk_amount
+                losses += 1
+                break
+            if low <= tp:
+                result = risk_amount * RR
+                wins += 1
+                break
+
+    if result is None:
+        equity_curve.append(capital)
+        continue
+
+    fee = capital * FEE_RATE * 2
+    capital += result - fee
+
+    trade_log.append({
+        "time": row["ts"],
+        "dir": direction,
+        "score": row["score"],
+        "pnl": result - fee,
+        "capital": capital
+    })
+
+    equity_curve.append(capital)
+
+# =========================
+# 统计
+# =========================
+total_trades = wins + losses
+winrate = wins / total_trades if total_trades > 0 else 0
+
+if total_trades > 0:
+    avg_win = np.mean([t["pnl"] for t in trade_log if t["pnl"] > 0])
+    avg_loss = abs(np.mean([t["pnl"] for t in trade_log if t["pnl"] < 0]))
+    expectancy = winrate * avg_win - (1-winrate) * avg_loss
+else:
+    expectancy = 0
+
+max_drawdown = 0
+peak = INITIAL_CAPITAL
+for eq in equity_curve:
+    peak = max(peak, eq)
+    dd = (peak - eq)
+    max_drawdown = max(max_drawdown, dd)
+
+# =========================
+# 显示
+# =========================
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("交易次数", total_trades)
+col2.metric("胜率", f"{winrate*100:.2f}%")
+col3.metric("真实期望值", round(expectancy,2))
+col4.metric("最大回撤", round(max_drawdown,2))
+
+# K线图
+fig = go.Figure(data=[
+    go.Candlestick(
+        x=df["ts"],
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"]
+    )
+])
+
 st.plotly_chart(fig, use_container_width=True)
 
-# =====================
-# 面板
-# =====================
-col1,col2,col3 = st.columns(3)
-col1.metric("当前价格", f"{price:.2f}")
-col2.metric("AI趋势", ai_trend)
-col3.metric("仓位张数", contracts)
+# 资金曲线
+st.subheader("资金曲线")
+st.line_chart(equity_curve)
 
-if signal:
-    st.success(f"{signal} | 入场 {price:.2f} | 止损 {stop:.2f} | 止盈 {tp:.2f} | RR {rr}")
-else:
-    st.warning("等待信号")
+# 胜率曲线
+if total_trades > 0:
+    win_curve = np.cumsum([1 if t["pnl"]>0 else 0 for t in trade_log])
+    trade_count_curve = np.arange(1, len(win_curve)+1)
+    rolling_winrate = win_curve / trade_count_curve
+    st.subheader("胜率曲线")
+    st.line_chart(rolling_winrate)
 
-st.caption("工业级稳定版 | 已修复全部结构性错误")
+# 日志
+if trade_log:
+    st.subheader("交易日志")
+    st.dataframe(pd.DataFrame(trade_log))
