@@ -11,19 +11,19 @@ from datetime import datetime
 import websocket
 
 st.set_page_config(layout="wide", page_title="ETH WS高频完美版")
-st.title("🚀 ETH-USDT-SWAP 5分钟高频监控（**WebSocket毫秒级·终极完美版**）")
+st.title("🚀 ETH-USDT-SWAP 5分钟高频监控（WebSocket毫秒级·云端终极完美版）")
 
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "signals_history.csv"
 
-# ========================== Session State 初始化（彻底安全） ==========================
+# ========================== Session State（云端稳定） ==========================
 for key in ["df", "history", "ws_thread", "last_signal_time"]:
     if key not in st.session_state:
         st.session_state[key] = pd.DataFrame() if key in ["df", "history"] else None
 if "lock" not in st.session_state:
     st.session_state.lock = threading.Lock()
 
-st_autorefresh(interval=800, key="perfect_refresh")
+st_autorefresh(interval=800, key="cloud_refresh")
 
 # ========================== 100元本金 + 开关 ==========================
 st.sidebar.header("💰 100元本金模拟")
@@ -32,10 +32,9 @@ leverage = st.sidebar.slider("杠杆倍数", 10, 50, 20)
 risk_percent = st.sidebar.slider("单笔风险%", 0.5, 5.0, 2.0) / 100
 long_only = st.sidebar.checkbox("🔒 只做多单（100元强烈推荐）", value=True)
 
-# ========================== WebSocket线程（锁已完美修复） ==========================
+# ========================== WebSocket线程（云端完美） ==========================
 def ws_thread_func():
     ws_url = "wss://ws.okx.com:8443/ws/v5/public"
-    
     def on_message(ws, message):
         try:
             data = json.loads(message)
@@ -53,11 +52,9 @@ def ws_thread_func():
                     else:
                         st.session_state.df = pd.concat([df, pd.DataFrame([row])], ignore_index=True).tail(300)
         except:
-            pass  # 忽略解析异常
-
+            pass
     def on_open(ws):
         ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "candle5m", "instId": SYMBOL}]}))
-
     while True:
         try:
             ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message)
@@ -65,19 +62,18 @@ def ws_thread_func():
         except:
             time.sleep(5)
 
-# 启动线程（只启动一次）
 if not st.session_state.ws_thread or not st.session_state.ws_thread.is_alive():
     st.session_state.ws_thread = threading.Thread(target=ws_thread_func, daemon=True)
     st.session_state.ws_thread.start()
 
 if st.session_state.df.empty:
-    st.warning("⏳ 连接OKX WebSocket中... 首次需3秒")
+    st.warning("⏳ 连接OKX WebSocket中...（Cloud首次加载需3-5秒）")
     time.sleep(3)
     st.rerun()
 
 df = st.session_state.df.copy()
 
-# ========================== 指标计算（NaN防护完美） ==========================
+# ========================== 指标计算 ==========================
 def add_indicators(df):
     df = df.copy()
     df["EMA60"] = ta.trend.ema_indicator(df["close"], 60)
@@ -92,13 +88,13 @@ def add_indicators(df):
 
 df = add_indicators(df)
 if df.empty:
-    st.error("数据不足")
+    st.error("数据不足，稍等几秒")
     st.stop()
 
 latest = df.iloc[-1]
 price = latest["close"]
 
-# ========================== 信号逻辑（多空对称 + 评分优化） ==========================
+# ========================== 信号逻辑（多空对称） ==========================
 trend = 1 if price > latest["EMA60"] else -1
 mean = df["close"].rolling(20).mean().iloc[-1]
 std = df["close"].rolling(20).std().iloc[-1]
@@ -134,14 +130,14 @@ elif not long_only and trend < 0:  # 空单
 
 quality = "⭐⭐⭐ 高" if score >= 9 else "⭐⭐ 中" if score >= 6 else "低"
 
-# ========================== 仓位与爆仓价（多空不同） ==========================
+# ========================== 仓位计算 ==========================
 risk_amount = capital * risk_percent
 contracts = int((risk_amount / stop_distance) * leverage * 0.01) if stop_distance > 0 else 0
 margin_used = (price * contracts * 0.01) / leverage
 liq_factor = 1.05 if direction == "多单" else 0.95
 liquidation_price = round(price * (1 - (1 / leverage) * liq_factor), 2) if contracts else 0
 
-# ========================== 历史记录加载 ==========================
+# ========================== 历史记录 ==========================
 def load_history():
     if os.path.exists(HISTORY_FILE):
         return pd.read_csv(HISTORY_FILE)
@@ -149,12 +145,12 @@ def load_history():
 
 history = load_history()
 
-# ========================== TP/SL自动结算（胜率终于真实！） ==========================
+# ========================== TP/SL真实结算（胜率真实） ==========================
 def update_results(history, df):
     if history.empty:
         return history
     for idx, row in history.iterrows():
-        if row["result"] in [None, "", ""]:
+        if pd.isna(row["result"]) or row["result"] == "":
             signal_ts = pd.to_datetime(row["signal_ts"])
             after = df[df["ts"] >= signal_ts]
             if after.empty:
@@ -176,7 +172,7 @@ def update_results(history, df):
 
 history = update_results(history, df)
 
-# ========================== 信号记录（防重复完美） ==========================
+# ========================== 记录信号（防重复） ==========================
 if signal:
     current_time = datetime.now()
     if (st.session_state.last_signal_time is None or 
@@ -206,7 +202,7 @@ completed = history[history["result"].notna()]
 win_rate = round((completed["result"] == "win").mean() * 100, 2) if not completed.empty else 0.0
 net_profit = round(history["net"].sum(), 4) if "net" in history else 0.0
 
-# ========================== 图表 & 面板 ==========================
+# ========================== 图表 ==========================
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=df["ts"], open=df["open"], high=df["high"], low=df["low"], close=df["close"]))
 fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA60"], name="EMA60", line=dict(color="orange")))
@@ -250,4 +246,4 @@ if not history.empty:
         fig2 = go.Figure(go.Scatter(x=completed_h["time"], y=completed_h["win_rate_curve"], mode="lines"))
         st.plotly_chart(fig2, use_container_width=True)
 
-st.caption("✅ **终极完美版** | WebSocket已连接 | 纯模拟监控 | 100元高频极易爆仓，实盘前必须OKX模拟盘跑满30天！")
+st.caption("✅ **云端终极完美版** 已运行 | WebSocket实时 | 纯模拟监控 | 100元高频极易爆仓，实盘前必须OKX模拟盘测试30天！")
