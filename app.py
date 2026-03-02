@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import ta
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots  # 必须导入！
 from streamlit_autorefresh import st_autorefresh
 import os
 from datetime import datetime
