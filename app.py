@@ -9,16 +9,15 @@ import os
 from datetime import datetime
 
 st.set_page_config(layout="wide")
-st.title("ETH 高频监控 + 胜率统计 (轻量顶级)")
+st.title("ETH 高频监控 + 胜率统计 (终极防御版)")
 
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "signals_history.csv"
 
-# 高频刷新（可调：10000=10秒）
-st_autorefresh(interval=10000, key="refresh")
+st_autorefresh(interval=15000, key="refresh")  # 15秒更稳
 
 # ==========================
-# 数据获取（高容错）
+# 数据获取（限流+容错）
 # ==========================
 def get_data(interval):
     url = "https://www.okx.com/api/v5/market/candles"
@@ -26,7 +25,7 @@ def get_data(interval):
     try:
         r = requests.get(url, params=params, timeout=5)
         j = r.json()
-        if "data" not in j:
+        if "data" not in j or not j["data"]:
             return pd.DataFrame()
         data = j["data"]
         df = pd.DataFrame(data, columns=[
@@ -36,22 +35,21 @@ def get_data(interval):
         df = df.astype(float)
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
         return df.sort_values("ts")
-    except Exception as e:
-        st.warning(f"数据获取失败: {e}")
+    except Exception:
         return pd.DataFrame()
 
 df = get_data("5m")
 df_htf = get_data("1H")
 
 if df.empty or df_htf.empty:
-    st.error("无K线数据，接口或网络异常")
+    st.error("数据为空：接口/网络/限流")
     st.stop()
 
 # ==========================
 # 指标（安全计算）
 # ==========================
-def safe_indicator(df):
-    if len(df) < 30:
+def safe_indicators(df):
+    if len(df) < 50:
         df["EMA20"] = np.nan
         df["EMA60"] = np.nan
         df["VWAP"] = np.nan
@@ -61,31 +59,36 @@ def safe_indicator(df):
 
     df["EMA20"] = ta.trend.ema_indicator(df["close"], 20)
     df["EMA60"] = ta.trend.ema_indicator(df["close"], 60)
-    df["VWAP"] = ta.volume.volume_weighted_average_price(
-        df["high"], df["low"], df["close"], df["volume"]
-    )
+
+    try:
+        df["VWAP"] = ta.volume.volume_weighted_average_price(
+            df["high"], df["low"], df["close"], df["volume"]
+        )
+    except Exception:
+        df["VWAP"] = np.nan
+
     df["RSI"] = ta.momentum.rsi(df["close"], 14)
     df["ATR"] = ta.volatility.average_true_range(
         df["high"], df["low"], df["close"], 14
     )
     return df
 
-df = safe_indicator(df)
+df = safe_indicators(df)
 
-def safe_indicator_htf(df):
+def safe_indicators_htf(df):
     if len(df) < 60:
         df["EMA60"] = np.nan
     else:
         df["EMA60"] = ta.trend.ema_indicator(df["close"], 60)
     return df
 
-df_htf = safe_indicator_htf(df_htf)
+df_htf = safe_indicators_htf(df_htf)
 
 latest = df.iloc[-1]
 htf = df_htf.iloc[-1]
 
 # ==========================
-# 趋势判断
+# 趋势
 # ==========================
 trend = "无趋势"
 if latest["EMA20"] > latest["EMA60"] and htf["close"] > htf["EMA60"]:
@@ -108,12 +111,10 @@ if not np.isnan(latest["RSI"]):
     if (trend == "多头" and latest["RSI"] > 50) or (trend == "空头" and latest["RSI"] < 50):
         score += 1
 
-# 波动率过滤
 atr_mean = df["ATR"].rolling(20).mean().iloc[-1]
 if not np.isnan(latest["ATR"]) and latest["ATR"] > atr_mean * 0.6:
     score += 1
 
-# RR计算
 entry = latest["close"]
 if trend == "多头":
     stop = entry - latest["ATR"] * 1.2
@@ -131,7 +132,7 @@ if rr >= 1.5:
 signal = trend if score >= 6 else None
 
 # ==========================
-# 历史记录
+# 历史（防重复/胜率）
 # ==========================
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -151,9 +152,10 @@ def calc_winrate():
     wins = len(dfh[dfh["result"] == "WIN"])
     return (wins / total * 100 if total > 0 else 0), total
 
-# 防止重复写入相同信号
 dfh = load_history()
 last_dir = dfh.iloc[-1]["direction"] if len(dfh) > 0 else None
+
+# 只记录新方向信号
 if signal and signal != last_dir:
     row = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -174,7 +176,8 @@ fig.add_trace(go.Candlestick(
 ))
 fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA20"], name="EMA20"))
 fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA60"], name="EMA60"))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["VWAP"], name="VWAP"))
+if not df["VWAP"].isna().all():
+    fig.add_trace(go.Scatter(x=df["ts"], y=df["VWAP"], name="VWAP"))
 
 st.plotly_chart(fig, use_container_width=True)
 
@@ -195,7 +198,7 @@ st.subheader("胜率统计")
 st.write("已统计信号:", total)
 st.write("胜率:", f"{round(winrate,2)}%")
 
-# 手动标记胜负（生产级必备）
+# 手动标记
 st.subheader("标记最近信号结果")
 col1, col2 = st.columns(2)
 if col1.button("最近信号：赢"):
@@ -212,7 +215,7 @@ if col2.button("最近信号：亏"):
         dfh.to_csv(HISTORY_FILE, index=False)
         st.success("已标记 LOSS")
 
-# 历史展示
+# 历史
 st.subheader("信号历史")
 st.dataframe(load_history().tail(20))
 
