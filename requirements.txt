@@ -1,9 +1,7 @@
 streamlit
 pandas
-ta
 plotly
 streamlit-autorefresh
-okx
 scikit-learn
 tensorflow
 websocket-client
