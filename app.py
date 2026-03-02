@@ -1,5 +1,5 @@
 """
-5分钟趋势合约系统（专业版）- 持久化账户 + 多时间框架验证
+5分钟趋势合约系统（专业版）- 整合实时价格 + 自动刷新
 策略：EMA趋势 + ADX强度 + ATR自适应回调 + K线确认 + 结构支撑阻力
 """
 
@@ -15,13 +15,17 @@ import json
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 5分钟趋势合约系统（专业版）")
+st.title("📈 5分钟趋势合约系统（实时版）")
 
 SYMBOL = "ETH-USDT-SWAP"
 CACHE_FILE_5M = "market_data_5m_cache.csv"
 CACHE_FILE_15M = "market_data_15m_cache.csv"
 SIGNAL_HISTORY_FILE = "signal_history.json"
 ACCOUNT_FILE = "account.json"
+
+# 自动刷新（每5秒）
+from streamlit_autorefresh import st_autorefresh
+st_autorefresh(interval=5000, key="refresh")
 
 # ==========================
 # 侧边栏参数
@@ -40,17 +44,19 @@ initial_balance = st.sidebar.number_input("初始资金 (USDT)", value=100.0, st
 # 多时间框架验证开关
 use_tf_filter = st.sidebar.checkbox("启用15分钟EMA验证", value=True, help="要求15分钟EMA方向与主趋势一致")
 
-# 趋势持续确认周期
-trend_confirm_bars = 3
+# 手动刷新按钮
+if st.sidebar.button("🔄 强制刷新数据"):
+    st.cache_data.clear()
+    st.rerun()
 
 # ==========================
-# 带指数退避的数据获取（5分钟）
+# 数据获取（5分钟 + 15分钟 + 实时ticker）
 # ==========================
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=3)  # 缩短缓存时间至3秒，使K线更新更及时
 def fetch_okx_candles(bar="5m", limit=300):
     url = "https://www.okx.com/api/v5/market/candles"
     params = {"instId": SYMBOL, "bar": bar, "limit": limit}
-    max_retries = 5
+    max_retries = 3
     for attempt in range(max_retries):
         try:
             r = requests.get(url, timeout=5, params=params)
@@ -87,7 +93,7 @@ def get_5m_data():
             return pd.DataFrame()
 
 def get_15m_data():
-    data = fetch_okx_candles("15m", 100)  # 15分钟需要足够计算EMA20，100根足够
+    data = fetch_okx_candles("15m", 100)
     if data is not None:
         df = pd.DataFrame(data, columns=[
             "ts", "open", "high", "low", "close", "volume",
@@ -107,6 +113,18 @@ def get_15m_data():
         else:
             return pd.DataFrame()
 
+def get_ticker():
+    """获取实时最新价"""
+    url = f"https://www.okx.com/api/v5/market/ticker?instId={SYMBOL}"
+    try:
+        r = requests.get(url, timeout=3)
+        data = r.json()
+        if data.get("code") == "0":
+            return float(data["data"][0]["last"])
+    except:
+        pass
+    return None
+
 df_5m = get_5m_data()
 if df_5m.empty:
     st.error("无法获取5分钟数据")
@@ -116,6 +134,8 @@ df_15m = get_15m_data()
 if df_15m.empty and use_tf_filter:
     st.warning("无法获取15分钟数据，多时间框架验证将禁用")
     use_tf_filter = False
+
+real_price = get_ticker()
 
 # ==========================
 # 5分钟指标计算
@@ -138,7 +158,7 @@ df["trend_down_confirm"] = (df["EMA_fast"] < df["EMA_slow"]) & df["EMA_fast_down
 df["trend_up_streak"] = df["trend_up_confirm"].rolling(trend_confirm_bars).sum() == trend_confirm_bars
 df["trend_down_streak"] = df["trend_down_confirm"].rolling(trend_confirm_bars).sum() == trend_confirm_bars
 
-# 寻找结构高点/低点（真正的前高前低）
+# 寻找结构高点/低点
 def find_swing_highs(df, window=5):
     highs = []
     for i in range(window, len(df)-window):
@@ -168,14 +188,13 @@ prev = df.iloc[-2] if len(df) > 1 else latest
 # ==========================
 # 15分钟EMA计算
 # ==========================
-tf_ok = True  # 默认通过
+tf_ok = True
 if use_tf_filter and not df_15m.empty:
     df_15m["EMA20"] = ta.trend.ema_indicator(df_15m["close"], window=20)
     df_15m = df_15m.dropna().reset_index(drop=True)
     if len(df_15m) > 1:
         latest_15m = df_15m.iloc[-1]
         prev_15m = df_15m.iloc[-2]
-        # 多头要求15分钟EMA20上升，空头要求下降
         if latest["trend_up_streak"]:
             tf_ok = latest_15m["EMA20"] > prev_15m["EMA20"]
         elif latest["trend_down_streak"]:
@@ -184,7 +203,7 @@ if use_tf_filter and not df_15m.empty:
         tf_ok = False
 
 # ==========================
-# 趋势判断（加入持续确认）
+# 趋势判断
 # ==========================
 trend = None
 if latest["trend_up_streak"] and latest["ADX"] > adx_threshold and tf_ok:
@@ -193,11 +212,10 @@ elif latest["trend_down_streak"] and latest["ADX"] > adx_threshold and tf_ok:
     trend = "空"
 
 # ==========================
-# 回调入场信号（基于ATR + 方向约束）
+# 回调入场信号
 # ==========================
 signal = None
 if trend == "多":
-    # 方向约束：价格在慢线之上
     if latest["close"] > latest["EMA_slow"] and \
        abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * callback_atr_mult and \
        prev["close"] < prev["EMA_fast"]:
@@ -221,7 +239,6 @@ def load_signal_history():
     if os.path.exists(SIGNAL_HISTORY_FILE):
         with open(SIGNAL_HISTORY_FILE, 'r') as f:
             data = json.load(f)
-            # 将时间字符串转回datetime
             for item in data:
                 item['time'] = datetime.fromisoformat(item['time'])
             return data
@@ -254,7 +271,7 @@ if signal:
         save_signal_history(st.session_state.signal_history)
 
 # ==========================
-# 模拟账户（持久化到文件）
+# 模拟账户（持久化）
 # ==========================
 class TradingAccount:
     def __init__(self, initial_balance):
@@ -458,7 +475,7 @@ if signal:
     ))
 
 fig.update_layout(
-    title=f"{SYMBOL} 5分钟图 (专业版)",
+    title=f"{SYMBOL} 5分钟图 (实时版)",
     template="plotly_dark",
     height=700,
     xaxis_rangeslider_visible=False
@@ -466,17 +483,22 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ==========================
-# 状态面板
+# 状态面板（含实时价格）
 # ==========================
 st.subheader("📊 当前状态")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric("趋势方向", trend if trend else "无")
 with col2:
     st.metric("ADX", f"{latest['ADX']:.1f}")
 with col3:
-    st.metric("最新价", f"{latest['close']:.2f}")
+    st.metric("K线收盘价", f"{latest['close']:.2f}")
 with col4:
+    if real_price:
+        st.metric("实时价格", f"{real_price:.2f}", delta=f"{real_price - latest['close']:.2f}")
+    else:
+        st.metric("实时价格", "N/A")
+with col5:
     st.metric("ATR", f"{latest['ATR']:.4f}")
 
 st.write(f"**滚动支撑** (最近{lookback_sr}根): {latest['support_roll']:.2f}")
@@ -488,6 +510,9 @@ if signal:
 else:
     st.info("⏳ 无信号")
 
+# 显示数据更新时间
+st.caption(f"数据更新于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
 # ==========================
 # 账户面板
 # ==========================
@@ -496,7 +521,7 @@ col_acc1, col_acc2, col_acc3 = st.columns(3)
 with col_acc1:
     st.metric("余额 (USDT)", f"{account.balance:.2f}")
 with col_acc2:
-    equity = account.get_equity(latest["close"])
+    equity = account.get_equity(real_price if real_price else latest["close"])
     st.metric("权益 (USDT)", f"{equity:.2f}")
 with col_acc3:
     if account.position:
