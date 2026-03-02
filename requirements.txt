@@ -3,4 +3,4 @@ pandas
 ta
 plotly
 streamlit-autorefresh
-websocket-client
+tensorflow
