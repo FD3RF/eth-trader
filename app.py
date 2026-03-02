@@ -8,16 +8,20 @@ from streamlit_autorefresh import st_autorefresh
 import os
 from datetime import datetime
 
+# ==========================
+# 配置
+# ==========================
 st.set_page_config(layout="wide")
-st.title("ETH 高频监控 + 胜率统计 (终极防御版)")
+st.title("ETH 高频监控 + 胜率统计 (终极稳定版)")
 
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "signals_history.csv"
 
-st_autorefresh(interval=15000, key="refresh")  # 15秒更稳
+# 15秒刷新（高频但不过载）
+st_autorefresh(interval=15000, key="refresh")
 
 # ==========================
-# 数据获取（限流+容错）
+# 数据获取（容错）
 # ==========================
 def get_data(interval):
     url = "https://www.okx.com/api/v5/market/candles"
@@ -46,7 +50,7 @@ if df.empty or df_htf.empty:
     st.stop()
 
 # ==========================
-# 指标（安全计算）
+# 指标计算（安全）
 # ==========================
 def safe_indicators(df):
     if len(df) < 50:
@@ -88,7 +92,7 @@ latest = df.iloc[-1]
 htf = df_htf.iloc[-1]
 
 # ==========================
-# 趋势
+# 趋势判断
 # ==========================
 trend = "无趋势"
 if latest["EMA20"] > latest["EMA60"] and htf["close"] > htf["EMA60"]:
@@ -132,7 +136,7 @@ if rr >= 1.5:
 signal = trend if score >= 6 else None
 
 # ==========================
-# 历史（防重复/胜率）
+# 历史与胜率
 # ==========================
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -141,6 +145,8 @@ def load_history():
 
 def save_history(row):
     dfh = load_history()
+    # 防止concat空警告（先过滤空行）
+    dfh = dfh.dropna(how="all")
     dfh = pd.concat([dfh, pd.DataFrame([row])], ignore_index=True)
     dfh.to_csv(HISTORY_FILE, index=False)
 
@@ -155,7 +161,7 @@ def calc_winrate():
 dfh = load_history()
 last_dir = dfh.iloc[-1]["direction"] if len(dfh) > 0 else None
 
-# 只记录新方向信号
+# 只记录新方向
 if signal and signal != last_dir:
     row = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -167,7 +173,7 @@ if signal and signal != last_dir:
     save_history(row)
 
 # ==========================
-# 图表
+# 图表（新API）
 # ==========================
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
@@ -179,7 +185,7 @@ fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA60"], name="EMA60"))
 if not df["VWAP"].isna().all():
     fig.add_trace(go.Scatter(x=df["ts"], y=df["VWAP"], name="VWAP"))
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # ==========================
 # 状态面板
@@ -219,7 +225,7 @@ if col2.button("最近信号：亏"):
 st.subheader("信号历史")
 st.dataframe(load_history().tail(20))
 
-# 信号提示
+# 提示
 if signal == "多头":
     st.success("📈 高质量做多")
 elif signal == "空头":
