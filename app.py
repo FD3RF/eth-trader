@@ -1,202 +1,194 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import plotly.graph_objects as go
+import requests
+from datetime import datetime
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(layout="wide")
-st.title("🔥 ETH 5分钟 AI 高频统计交易系统（工业稳定版）")
+st.set_page_config(layout="wide", page_title="ETH 高频AI交易")
+st.title("🚀 高频AI交易：5分钟 + 统计期望（100元模拟）")
 
+# =========================
+# 配置
+# =========================
 SYMBOL = "ETH-USDT-SWAP"
-BAR = "5m"
-LIMIT = 500
-
-INITIAL_CAPITAL = 100
-RISK_PER_TRADE = 0.02
-RR = 1.4
-FEE_RATE = 0.0005
-
+HISTORY_FILE = "history.csv"
+MODEL_FILE = "ai_model.keras"
+st_autorefresh = st.autorefresh if hasattr(st, "autorefresh") else None
 
 # =========================
-# 获取K线
+# 模拟资金
 # =========================
-@st.cache_data(ttl=60)
+st.sidebar.header("💰 模拟账户")
+capital = st.sidebar.number_input("初始资金(RMB)", value=100.0, min_value=50.0)
+leverage = st.sidebar.slider("杠杆", 5, 50, 20)
+risk_percent = st.sidebar.slider("单笔风险%", 0.5, 5.0, 2.0) / 100
+
+# =========================
+# 数据获取
+# =========================
 def get_data():
-    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={BAR}&limit={LIMIT}"
-    r = requests.get(url).json()
-    data = r["data"]
-
-    df = pd.DataFrame(data, columns=[
-        "ts","open","high","low","close","vol",
-        "volCcy","volCcyQuote","confirm"
-    ])
-
-    df = df.astype({
-        "open":float,"high":float,"low":float,
-        "close":float,"vol":float
-    })
-
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-    df = df.sort_values("ts").reset_index(drop=True)
-
-    return df
-
+    url = "https://www.okx.com/api/v5/market/candles"
+    params = {"instId": SYMBOL, "bar": "5m", "limit": 300}
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        j = r.json()
+        if "data" not in j:
+            return pd.DataFrame()
+        df = pd.DataFrame(j["data"], columns=[
+            "ts","open","high","low","close","volume","volCcy","volCcyQuote","confirm"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+        for col in ["open","high","low","close","volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.sort_values("ts")
+    except:
+        return pd.DataFrame()
 
 df = get_data()
+if df.empty:
+    st.error("数据获取失败")
+    st.stop()
 
 # =========================
-# 手写 EMA
+# 手动指标（轻量高频）
 # =========================
-df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
+def add_indicators(df):
+    df = df.copy()
+    df["EMA20"] = df["close"].ewm(span=20).mean()
+    df["EMA60"] = df["close"].ewm(span=60).mean()
+    df["RSI"] = 100 - (100 / (1 + (
+        df["close"].diff().clip(lower=0).rolling(14).mean() /
+        (-df["close"].diff().clip(upper=0)).rolling(14).mean()
+    )))
+    df["ATR"] = (df["high"] - df["low"]).rolling(14).mean()
+    df["Z"] = (df["close"] - df["close"].rolling(20).mean()) / df["close"].rolling(20).std()
+    return df.dropna()
+
+df = add_indicators(df)
+latest = df.iloc[-1]
+price = latest["close"]
 
 # =========================
-# 手写 RSI
+# 高频信号逻辑（激进）
 # =========================
-delta = df["close"].diff()
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
+trend = 1 if price > latest["EMA20"] else -1
+z = latest["Z"]
 
-avg_gain = gain.rolling(14).mean()
-avg_loss = loss.rolling(14).mean()
+# 高频条件（不苛刻）
+long_cond = (
+    trend > 0 and
+    z < -1.0 and
+    latest["RSI"] < 45
+)
 
-rs = avg_gain / avg_loss
-df["rsi"] = 100 - (100 / (1 + rs))
+short_cond = (
+    trend < 0 and
+    z > 1.0 and
+    latest["RSI"] > 55
+)
 
-# =========================
-# Z-score
-# =========================
-rolling_mean = df["close"].rolling(20).mean()
-rolling_std = df["close"].rolling(20).std()
-df["z"] = (df["close"] - rolling_mean) / rolling_std
+signal = "多单" if long_cond else "空单" if short_cond else None
 
-vol_ma = df["vol"].rolling(20).mean()
-df["vol_ratio"] = df["vol"] / vol_ma
+# RR模型
+atr = latest["ATR"] if not pd.isna(latest["ATR"]) else price * 0.005
+stop_distance = max(atr * 1.1, price * 0.004)
 
-# =========================
+if signal == "多单":
+    stop = price - stop_distance
+    tp = price + stop_distance * 1.4
+else:
+    stop = price + stop_distance
+    tp = price - stop_distance * 1.4
+
+rr = round(abs((tp - price) / stop_distance), 2)
+
 # 评分
-# =========================
-def score_row(row):
-    score = 0
-
-    if abs(row["z"]) > 1.2:
-        score += 2
-    elif abs(row["z"]) > 1:
-        score += 1
-
-    if row["rsi"] < 35 or row["rsi"] > 65:
-        score += 2
-    elif row["rsi"] < 45 or row["rsi"] > 55:
-        score += 1
-
-    if row["ema9"] > row["ema21"] or row["ema9"] < row["ema21"]:
-        score += 1
-
-    if row["vol_ratio"] > 1.2:
-        score += 1
-
-    return score
-
-df["score"] = df.apply(score_row, axis=1)
+score = 0
+if abs(z) > 1.0: score += 2
+if latest["RSI"] < 45 or latest["RSI"] > 55: score += 1
+if rr >= 1.2: score += 2
+quality = "高" if score >= 4 else "中"
 
 # =========================
-# 回测
+# 100元模拟仓位
 # =========================
-capital = INITIAL_CAPITAL
-equity_curve = []
-wins = 0
-losses = 0
-trade_log = []
-
-for i in range(30, len(df)-2):
-
-    row = df.iloc[i]
-    next_open = df.iloc[i+1]["open"]
-
-    if row["score"] < 4:
-        equity_curve.append(capital)
-        continue
-
-    direction = None
-
-    if row["z"] < -1.2 and row["rsi"] < 40:
-        direction = "long"
-    elif row["z"] > 1.2 and row["rsi"] > 60:
-        direction = "short"
-
-    if direction is None:
-        equity_curve.append(capital)
-        continue
-
-    risk_amount = capital * RISK_PER_TRADE
-
-    if direction == "long":
-        sl = df.iloc[i-5:i]["low"].min()
-        entry = next_open
-        risk = entry - sl
-        tp = entry + risk * RR
-    else:
-        sl = df.iloc[i-5:i]["high"].max()
-        entry = next_open
-        risk = sl - entry
-        tp = entry - risk * RR
-
-    if risk <= 0:
-        equity_curve.append(capital)
-        continue
-
-    result = None
-
-    for j in range(i+1, len(df)):
-        high = df.iloc[j]["high"]
-        low = df.iloc[j]["low"]
-
-        if direction == "long":
-            if low <= sl:
-                result = -risk_amount
-                losses += 1
-                break
-            if high >= tp:
-                result = risk_amount * RR
-                wins += 1
-                break
-        else:
-            if high >= sl:
-                result = -risk_amount
-                losses += 1
-                break
-            if low <= tp:
-                result = risk_amount * RR
-                wins += 1
-                break
-
-    if result is None:
-        equity_curve.append(capital)
-        continue
-
-    fee = capital * FEE_RATE * 2
-    capital += result - fee
-
-    trade_log.append({
-        "time": row["ts"],
-        "dir": direction,
-        "score": row["score"],
-        "pnl": result - fee,
-        "capital": capital
-    })
-
-    equity_curve.append(capital)
+risk_amount = capital * risk_percent
+contracts = int((risk_amount / stop_distance) * leverage * 0.01) if stop_distance > 0 else 0
+margin_used = (price * contracts * 0.01) / leverage
 
 # =========================
+# 历史（统计期望）
+# =========================
+def load_history():
+    try:
+        return pd.read_csv(HISTORY_FILE)
+    except:
+        return pd.DataFrame(columns=["time","direction","entry","stop","tp","result","rr"])
+
+history = load_history()
+
+if signal:
+    row = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "direction": signal,
+        "entry": round(price,4),
+        "stop": round(stop,4),
+        "tp": round(tp,4),
+        "result": "",
+        "rr": rr
+    }
+    history = pd.concat([history, pd.DataFrame([row])], ignore_index=True).tail(5000)
+    history.to_csv(HISTORY_FILE, index=False)
+
+# 胜率统计
+completed = history[history["result"].notna()]
+win_rate = round((completed["result"] == "win").mean() * 100, 2) if not completed.empty else 0
+
+# =========================
+# 图表
+# =========================
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df["ts"], open=df["open"], high=df["high"],
+    low=df["low"], close=df["close"]
+))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA20"], name="EMA20"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA60"], name="EMA60"))
+st.plotly_chart(fig, use_container_width=True)
+
+# =========================
+# 面板
+# =========================
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("当前价格", f"{price:.2f}")
+with col2:
+    st.metric("信号", signal or "等待")
+with col3:
+    st.metric("历史胜率", f"{win_rate}%")
+
+if signal:
+    st.success(f"""
+🚀 {signal}
+入场: {round(price,4)}
+止损: {round(stop,4)}
+止盈: {round(tp,4)}
+RR: {rr}
+建议仓位: {contracts}张
+""")
+else:
+    st.warning("等待高频机会...")
+
+# 历史
+st.subheader("历史信号")
+st.dataframe(history.tail(15))
+
 # 统计
-# =========================
-total_trades = wins + losses
-winrate = wins / total_trades if total_trades > 0 else 0
+st.subheader("统计")
+st.write(f"胜率: {win_rate}% | 总信号: {len(history)}")
 
-st.metric("交易次数", total_trades)
-st.metric("胜率", f"{winrate*100:.2f}%")
-
-st.line_chart(equity_curve)
-
-if trade_log:
-    st.dataframe(pd.DataFrame(trade_log))
+st.caption("100元模拟 | 高频策略 | 真实数据 | 激进版")
