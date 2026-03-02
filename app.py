@@ -1,197 +1,214 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
 import requests
-from datetime import datetime
+import pandas as pd
+import ta
+import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+import os
+from datetime import datetime
 
-st.set_page_config(layout="wide", page_title="AI 高频 5m")
-st.title("🚀 AI高频：5分钟分析 + TP/SL + 期望统计")
+# ==========================
+# 基础配置
+# ==========================
+st.set_page_config(layout="wide")
+st.title("顶级模型 | 高质量单（胜率优先）")
 
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "history.csv"
+LAST_SIGNAL_FILE = "last_signal.txt"
 
-# 高频刷新
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=8000, key="refresh")
 
-# =========================
-# 模拟账户（100元）
-# =========================
-st.sidebar.header("模拟账户")
-capital = st.sidebar.number_input("本金(RMB)", value=100.0, min_value=50.0)
-leverage = st.sidebar.slider("杠杆", 5, 50, 20)
-risk_percent = st.sidebar.slider("单笔风险%", 0.5, 5.0, 2.0) / 100
 
-# =========================
-# 数据（真实K线）
-# =========================
+# ==========================
+# 数据获取（可靠降级）
+# ==========================
 def get_data():
+    url = "https://www.okx.com/api/v5/market/candles"
+    params = {"instId": SYMBOL, "bar": "5m", "limit": 300}
     try:
-        r = requests.get(
-            "https://www.okx.com/api/v5/market/candles",
-            params={"instId": SYMBOL, "bar": "5m", "limit": 300},
-            timeout=5
-        )
+        r = requests.get(url, timeout=5, params=params)
         j = r.json()
-        if "data" not in j:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(j["data"], columns=[
-            "ts","open","high","low","close","volume","volCcy","volCcyQuote","confirm"
-        ])
-        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-        df[["open","high","low","close","volume"]] = df[
-            ["open","high","low","close","volume"]
-        ].apply(pd.to_numeric, errors="coerce")
-        return df.sort_values("ts")
-    except:
+    except Exception:
         return pd.DataFrame()
+
+    if "data" not in j:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(j["data"], columns=[
+        "ts","open","high","low","close","volume",
+        "volCcy","volCcyQuote","confirm"
+    ])
+    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+    for c in ["open","high","low","close","volume"]:
+        df[c] = df[c].astype(float)
+    return df.sort_values("ts")
+
 
 df = get_data()
 if df.empty:
     st.error("数据获取失败")
     st.stop()
 
-# =========================
-# 指标（轻量高频）
-# =========================
-def indicators(df):
-    df = df.copy()
-    df["EMA20"] = df.close.ewm(span=20).mean()
-    df["EMA60"] = df.close.ewm(span=60).mean()
+# ==========================
+# 指标
+# ==========================
+df["EMA20"] = ta.trend.ema_indicator(df["close"], 20)
+df["EMA60"] = ta.trend.ema_indicator(df["close"], 60)
+df["RSI"] = ta.momentum.rsi(df["close"], 14)
+df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], 14)
+df = df.dropna()
 
-    gain = df.close.diff().clip(lower=0).rolling(14).mean()
-    loss = (-df.close.diff().clip(upper=0)).rolling(14).mean()
-    df["RSI"] = 100 - (100 / (1 + gain / (loss + 1e-9)))
-
-    df["ATR"] = (df.high - df.low).rolling(14).mean()
-    df["Z"] = (df.close - df.close.rolling(20).mean()) / df.close.rolling(20).std()
-
-    return df.dropna()
-
-df = indicators(df)
 latest = df.iloc[-1]
-price = latest.close
 
-# =========================
-# 高频信号逻辑（10–30单目标）
-# =========================
-trend = 1 if price > latest.EMA20 else -1
-z = latest.Z
+# ==========================
+# 趋势
+# ==========================
+trend = "无"
+if (df["EMA20"].iloc[-3:] > df["EMA60"].iloc[-3:]).all():
+    trend = "多"
+elif (df["EMA20"].iloc[-3:] < df["EMA60"].iloc[-3:]).all():
+    trend = "空"
 
-# 激进但不过度
-long_cond = (
-    trend > 0 and
-    z < -1.2 and
-    latest.RSI < 42
-)
+# ==========================
+# 结构与回调（高胜率核心）
+# ==========================
+# 关键结构
+res = df["high"].iloc[-20:].max()
+sup = df["low"].iloc[-20:].min()
 
-short_cond = (
-    trend < 0 and
-    z > 1.2 and
-    latest.RSI > 58
-)
+# 回调定义
+def is_retest(price, level):
+    return price <= level * 1.002 and price >= level * 0.998
 
-signal = "多单" if long_cond else "空单" if short_cond else None
+# 假突破过滤
+def big_shadow(row):
+    body = abs(row["close"] - row["open"])
+    upper = row["high"] - max(row["close"], row["open"])
+    return upper > body * 1.2
 
-# TP/SL + RR
-atr = latest.ATR if not pd.isna(latest.ATR) else price * 0.005
-stop_distance = max(atr * 1.1, price * 0.004)
-
-if signal == "多单":
-    stop = price - stop_distance
-    tp = price + stop_distance * 1.4
+if big_shadow(latest):
+    structure_ok = False
 else:
-    stop = price + stop_distance
-    tp = price - stop_distance * 1.4
+    structure_ok = True
 
-rr = round(abs((tp - price) / stop_distance), 2) if stop_distance > 0 else 0
-quality = "高" if rr >= 1.3 and abs(z) > 1 else "中"
+# 动能
+rsi = latest["RSI"]
+rsi_ok = (45 <= rsi <= 65) if trend == "多" else (35 <= rsi <= 55)
 
-# =========================
-# 模拟仓位（100元）
-# =========================
-risk_amount = capital * risk_percent
-contracts = int((risk_amount / stop_distance) * leverage * 0.01) if stop_distance > 0 else 0
+# 盈亏比
+entry = latest["close"]
+atr = latest["ATR"]
+stop = entry - atr if trend == "多" else entry + atr
+tp = entry + atr * 2 if trend == "多" else entry - atr * 2
+rr = abs((tp - entry) / (entry - stop)) if (entry - stop) != 0 else 0
 
-# =========================
-# 历史与期望统计
-# =========================
-def load_history():
+# 成交量过滤
+volume_avg = df["volume"].rolling(20).mean().iloc[-1]
+volume_ok = latest["volume"] > volume_avg * 1.3
+
+# 最终信号（极苛刻）
+signal = None
+if structure_ok and volume_ok and rsi_ok and rr >= 2 and is_retest(entry, res if trend=="多" else sup):
+    signal = "多" if trend == "多" else "空"
+
+quality = "高" if signal else "无"
+
+# ==========================
+# 防重复
+# ==========================
+def already(sig, price):
+    if not os.path.exists(LAST_SIGNAL_FILE):
+        return False
     try:
-        return pd.read_csv(HISTORY_FILE)
+        with open(LAST_SIGNAL_FILE) as f:
+            s = f.read().split(",")
+            return s[0]==sig and abs(float(s[1])-price)<0.001
     except:
-        return pd.DataFrame(columns=["time","direction","entry","stop","tp","result","rr"])
+        return False
 
-history = load_history()
+def mark(sig, price):
+    with open(LAST_SIGNAL_FILE,"w") as f:
+        f.write(f"{sig},{price}")
 
-if signal:
-    row = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "direction": signal,
-        "entry": round(price,4),
-        "stop": round(stop,4),
-        "tp": round(tp,4),
-        "result": "",
-        "rr": rr
-    }
-    history = pd.concat([history, pd.DataFrame([row])], ignore_index=True).tail(5000)
-    history.to_csv(HISTORY_FILE, index=False)
+# ==========================
+# 历史
+# ==========================
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        return pd.read_csv(HISTORY_FILE)
+    return pd.DataFrame(columns=["time","direction","entry","stop","tp","result"])
 
-completed = history[history.result.notna()]
-win_rate = round((completed.result == "win").mean() * 100, 2) if not completed.empty else 0
+def save(row):
+    dfh = load_history()
+    dfh = pd.concat([dfh,pd.DataFrame([row])],ignore_index=True)
+    dfh = dfh.tail(5000)
+    dfh.to_csv(HISTORY_FILE,index=False)
 
-# =========================
-# 可视化（真实K线 + 点位）
-# =========================
+def update_results():
+    dfh = load_history()
+    if dfh.empty:
+        return dfh
+    price = latest["close"]
+    for i,r in dfh.iterrows():
+        if pd.isna(r.get("result")) or r["result"]=="":
+            if r["direction"]=="多":
+                if price>=r["tp"]: dfh.at[i,"result"]="win"
+                elif price<=r["stop"]: dfh.at[i,"result"]="lose"
+            else:
+                if price<=r["tp"]: dfh.at[i,"result"]="win"
+                elif price>=r["stop"]: dfh.at[i,"result"]="lose"
+    dfh.to_csv(HISTORY_FILE,index=False)
+    return dfh
+
+history = update_results()
+
+# ==========================
+# 生成信号
+# ==========================
+if signal and not already(signal, entry):
+    save({
+        "time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "direction":signal,
+        "entry":round(entry,4),
+        "stop":round(stop,4),
+        "tp":round(tp,4),
+        "result":""
+    })
+    mark(signal, entry)
+
+# ==========================
+# 图表
+# ==========================
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
-    x=df.ts, open=df.open, high=df.high,
-    low=df.low, close=df.close
+    x=df["ts"], open=df["open"], high=df["high"],
+    low=df["low"], close=df["close"]
 ))
-fig.add_trace(go.Scatter(x=df.ts, y=df.EMA20, name="EMA20"))
-fig.add_trace(go.Scatter(x=df.ts, y=df.EMA60, name="EMA60"))
-
-# 标记进场点
-if signal:
-    fig.add_trace(go.Scatter(
-        x=[latest.ts],
-        y=[price],
-        mode="markers",
-        marker=dict(size=12),
-        name="进场"
-    ))
-
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA20"], name="EMA20"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA60"], name="EMA60"))
 st.plotly_chart(fig, use_container_width=True)
 
-# =========================
+# ==========================
 # 面板
-# =========================
-col1, col2, col3 = st.columns(3)
-col1.metric("价格", f"{price:.2f}")
-col2.metric("信号", signal or "等待")
-col3.metric("历史胜率", f"{win_rate}%")
+# ==========================
+st.subheader("状态")
+st.write("趋势:", trend)
+st.write("RSI:", round(rsi,2))
+st.write("RR:", round(rr,2))
+st.write("质量:", quality)
 
-if signal:
-    st.success(f"""
-{signal}
-入场: {round(price,4)}
-止损: {round(stop,4)}
-止盈: {round(tp,4)}
-RR: {rr}
-仓位: {contracts}张
-""")
+st.subheader("建议")
+st.write("入场:", round(entry,4))
+st.write("止损:", round(stop,4))
+st.write("止盈:", round(tp,4))
+
+if signal=="多":
+    st.success("📈 高质量做多")
+elif signal=="空":
+    st.error("📉 高质量做空")
 else:
-    st.warning("等待高频机会")
+    st.warning("暂无高质量机会")
 
-# =========================
-# 历史
-# =========================
 st.subheader("历史")
-st.dataframe(history.tail(15))
-
-st.subheader("统计")
-st.write(f"胜率: {win_rate}% | 总信号: {len(history)}")
-
-st.caption("100元模拟 | 高频 | 真实K线 | 期望统计")
+st.dataframe(history.tail(20))
