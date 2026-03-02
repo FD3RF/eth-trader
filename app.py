@@ -17,11 +17,11 @@ st.title("ETH 高频监控 + 胜率统计 (终极稳定版)")
 SYMBOL = "ETH-USDT-SWAP"
 HISTORY_FILE = "signals_history.csv"
 
-# 15秒刷新（高频但不过载）
+# 15秒刷新
 st_autorefresh(interval=15000, key="refresh")
 
 # ==========================
-# 数据获取（容错）
+# 数据获取
 # ==========================
 def get_data(interval):
     url = "https://www.okx.com/api/v5/market/candles"
@@ -50,7 +50,7 @@ if df.empty or df_htf.empty:
     st.stop()
 
 # ==========================
-# 指标计算（安全）
+# 指标计算
 # ==========================
 def safe_indicators(df):
     if len(df) < 50:
@@ -136,6 +136,31 @@ if rr >= 1.5:
 signal = trend if score >= 6 else None
 
 # ==========================
+# 入场条件（策略过滤）
+# ==========================
+can_entry = False
+
+if signal == "多头":
+    can_entry = (
+        trend == "多头" and
+        score >= 6 and
+        rr >= 1.5 and
+        not np.isnan(latest["ATR"]) and
+        latest["volume"] > df["volume"].rolling(20).mean().iloc[-1]
+    )
+
+elif signal == "空头":
+    can_entry = (
+        trend == "空头" and
+        score >= 6 and
+        rr >= 1.5 and
+        not np.isnan(latest["ATR"]) and
+        latest["volume"] > df["volume"].rolling(20).mean().iloc[-1]
+    )
+
+entry_tip = "🚀 可进场" if can_entry else "⛔ 不满足进场"
+
+# ==========================
 # 历史与胜率
 # ==========================
 def load_history():
@@ -145,7 +170,6 @@ def load_history():
 
 def save_history(row):
     dfh = load_history()
-    # 防止concat空警告（先过滤空行）
     dfh = dfh.dropna(how="all")
     dfh = pd.concat([dfh, pd.DataFrame([row])], ignore_index=True)
     dfh.to_csv(HISTORY_FILE, index=False)
@@ -173,7 +197,7 @@ if signal and signal != last_dir:
     save_history(row)
 
 # ==========================
-# 图表（新API）
+# 图表
 # ==========================
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
@@ -199,6 +223,7 @@ st.write("RSI:", round(latest["RSI"], 2) if not np.isnan(latest["RSI"]) else "N/
 st.write("RR:", rr)
 st.write("建议止损:", round(stop, 4))
 st.write("建议止盈:", round(tp, 4))
+st.write("进场条件:", entry_tip)
 
 st.subheader("胜率统计")
 st.write("已统计信号:", total)
