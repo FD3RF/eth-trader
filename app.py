@@ -1,12 +1,13 @@
 """
-ETH 战神 V2600 - 高胜率·盈亏优化版（最终修正版）
+ETH 战神 V2600 - 高胜率·盈亏优化版（最终完整版）
 核心策略：
   1. 15分钟EMA20方向确定主趋势（严格使用历史数据，无未来函数）
   2. 5分钟局部结构突破 (Higher Low / Lower High) —— 结构点延迟确认，避免未来数据
   3. 成交量确认 + 假突破过滤
   4. 小止损0.6ATR，小止盈0.8ATR (盈亏比1.33)
-  5. 回测模块展示盈利表现及资金曲线
-  6. 实时信号提示
+  5. 模拟账户自动交易（开仓、止损止盈、资金曲线）
+  6. 回测模块展示历史表现
+  7. 实时信号提示及自动交易执行
 """
 
 import streamlit as st
@@ -16,11 +17,15 @@ import plotly.graph_objects as go
 import requests
 import numpy as np
 from datetime import datetime, timedelta
+import threading
+import json
+import os
 
-st.set_page_config(layout="wide", page_title="战神 V2600（最终版）")
-st.title("🛡️ ETH 战神 V2600 (最终修正版)")
+st.set_page_config(layout="wide", page_title="战神 V2600（完整版）")
+st.title("🛡️ ETH 战神 V2600 (最终完整版)")
 
 SYMBOL = "ETH-USDT-SWAP"
+ACCOUNT_FILE = "sim_account.json"
 
 # --------------------------
 # 侧边栏参数
@@ -37,9 +42,10 @@ with st.sidebar:
     atr_tp_mult = st.number_input("止盈ATR倍数", value=0.8, step=0.1)
     risk_percent = st.slider("单笔风险 %", 0.5, 2.0, 1.0, step=0.1)
     slippage = st.number_input("滑点 (百分比)", value=0.05, step=0.01, format="%.2f", help="模拟成交价格偏差")
+    initial_balance = st.number_input("初始资金 (USDT)", value=1000.0, step=100.0)
 
     st.divider()
-    st.info("💡 核心逻辑：15M趋势锁死（无未来数据） + 5M结构突破（延迟确认） + 量能确认 + 小止损小止盈")
+    st.info("💡 核心逻辑：15M趋势锁死 + 5M结构突破 + 量能确认 + 小止损小止盈")
     if st.button("🔄 强制刷新数据"):
         st.cache_data.clear()
         st.rerun()
@@ -89,7 +95,6 @@ def find_swing_points(df, window=3):
     highs, lows = [], []
     for i in range(window, len(df)-window):
         if df['high'].iloc[i] == max(df['high'].iloc[i-window:i+window+1]):
-            # 该高点需要等待 window 根K线才能确认，所以确认时间 = 当前时间 + window*5分钟
             confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
             highs.append((df['ts'].iloc[i], df['high'].iloc[i], confirm_time))
         if df['low'].iloc[i] == min(df['low'].iloc[i-window:i+window+1]):
@@ -109,6 +114,138 @@ def is_fake_break(row):
     return upper > body * 1.5 or lower > body * 1.5
 
 # --------------------------
+# 模拟账户类（线程安全，持久化）
+# --------------------------
+class TradingAccount:
+    def __init__(self, initial_balance):
+        self.initial = initial_balance
+        self.file = ACCOUNT_FILE
+        self.lock = threading.Lock()
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.file):
+            with self.lock:
+                try:
+                    with open(self.file, 'r') as f:
+                        data = json.load(f)
+                        self.balance = data.get('balance', self.initial)
+                        self.position = data.get('position', None)
+                        self.trades = data.get('trades', [])
+                except:
+                    self.reset()
+        else:
+            self.reset()
+
+    def save(self):
+        if len(self.trades) > 100:
+            self.trades = self.trades[-100:]
+        with self.lock:
+            data = {
+                'balance': self.balance,
+                'position': self.position,
+                'trades': self.trades
+            }
+            with open(self.file, 'w') as f:
+                json.dump(data, f, indent=2, default=str)
+
+    def reset(self):
+        self.balance = self.initial
+        self.position = None
+        self.trades = []
+        self.save()
+
+    def can_open(self):
+        return self.position is None
+
+    def open_position(self, direction, price, atr):
+        if direction == "多":
+            stop_loss = price - atr * atr_sl_mult
+            take_profit = price + atr * atr_tp_mult
+        else:
+            stop_loss = price + atr * atr_sl_mult
+            take_profit = price - atr * atr_tp_mult
+
+        risk_amount = self.balance * (risk_percent / 100)
+        stop_distance = abs(price - stop_loss)
+        if stop_distance == 0:
+            return False, "止损距离为零"
+
+        raw_qty = risk_amount / stop_distance
+        min_qty = 0.01
+        qty = round(raw_qty / min_qty) * min_qty
+        if qty < min_qty:
+            qty = min_qty
+
+        fee = price * qty * 0.0005
+        if self.balance < fee:
+            return False, "余额不足"
+
+        self.balance -= fee
+        self.position = {
+            'direction': direction,
+            'entry': price,
+            'qty': qty,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'open_time': datetime.now().isoformat()
+        }
+        self.save()
+        return True, "开仓成功"
+
+    def check_stop_take(self, current_price):
+        if not self.position:
+            return None
+        pos = self.position
+        direction = pos['direction']
+        entry = pos['entry']
+        stop = pos['stop_loss']
+        tp = pos['take_profit']
+        qty = pos['qty']
+
+        if direction == "多":
+            if current_price <= stop:
+                reason, close_price = "止损", stop
+            elif current_price >= tp:
+                reason, close_price = "止盈", tp
+            else:
+                return None
+        else:
+            if current_price >= stop:
+                reason, close_price = "止损", stop
+            elif current_price <= tp:
+                reason, close_price = "止盈", tp
+            else:
+                return None
+
+        pnl = (close_price - entry) * qty if direction == "多" else (entry - close_price) * qty
+        fee = close_price * qty * 0.0005
+        net_pnl = pnl - fee
+
+        self.balance += net_pnl
+        self.trades.append({
+            **pos,
+            'close_price': close_price,
+            'close_time': datetime.now().isoformat(),
+            'reason': reason,
+            'pnl': pnl,
+            'fee': fee,
+            'net_pnl': net_pnl
+        })
+        self.position = None
+        self.save()
+        return reason, net_pnl
+
+    def get_equity(self, current_price):
+        if not self.position:
+            return self.balance
+        pos = self.position
+        if pos['direction'] == "多":
+            return self.balance + (current_price - pos['entry']) * pos['qty']
+        else:
+            return self.balance + (pos['entry'] - current_price) * pos['qty']
+
+# --------------------------
 # 回测引擎（严格使用历史数据）
 # --------------------------
 def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
@@ -117,12 +254,11 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
     position = None
     equity_curve = [capital]
 
-    for i in range(1, len(df)-1):  # 从第二根开始，到倒数第二根结束
+    for i in range(1, len(df)-1):
         row = df.iloc[i]
         current_time = row['ts']
 
-        # ---------- 获取15分钟趋势方向（仅使用过去数据） ----------
-        # 15分钟K线在 current_time - 15分钟 之前才被视为已知
+        # 15分钟趋势方向（只使用过去数据）
         past_15m = df_15m_full[df_15m_full['ts'] <= current_time - timedelta(minutes=15)]
         if len(past_15m) >= 2:
             last_ema = past_15m['EMA20'].iloc[-1]
@@ -131,11 +267,9 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
         else:
             tf15_dir = "无"
 
-        # ---------- 获取已确认的结构点（延迟 window 根K线） ----------
-        # 只取确认时间 <= current_time 的结构点
+        # 已确认的结构点
         valid_highs = [(t, p) for t, p, ct in swing_highs if ct <= current_time]
         valid_lows = [(t, p) for t, p, ct in swing_lows if ct <= current_time]
-
         last_high = valid_highs[-1] if valid_highs else None
         last_low = valid_lows[-1] if valid_lows else None
         prev_high = valid_highs[-2] if len(valid_highs) >= 2 else None
@@ -144,7 +278,7 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
         bull_structure = prev_low and last_low and last_low[1] > prev_low[1]
         bear_structure = prev_high and last_high and last_high[1] < prev_high[1]
 
-        # ---------- 信号判断 ----------
+        # 信号判断
         signal = None
         if (row["trend_up_streak"] and tf15_dir == "多" and bull_structure and not is_fake_break(row)):
             if last_high and row["close"] > last_high[1]:
@@ -161,11 +295,9 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
                         if row["vol"] > row["volume_ma"] * volume_mult:
                             signal = "空"
 
-        # ---------- 开仓 ----------
+        # 开仓
         if signal and position is None:
-            # 使用下一根K线开盘价入场（模拟真实情况）
             entry_price = df.iloc[i+1]["open"]
-            # 添加滑点
             if signal == "多":
                 entry_price *= (1 + slippage/100)
             else:
@@ -185,7 +317,6 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
                 qty = risk_amount / stop_dist
             else:
                 qty = 0
-            # 最小交易单位 0.01 张
             min_qty = 0.01
             qty = round(qty / min_qty) * min_qty
             if qty < min_qty:
@@ -204,7 +335,7 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
                     "open_time": df.iloc[i+1]["ts"]
                 }
 
-        # ---------- 持仓管理 ----------
+        # 持仓管理
         if position is not None:
             exit_price = None
             reason = None
@@ -232,7 +363,6 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
                 exit_price = df.iloc[-1]["close"]
                 reason = "时间平仓"
 
-            # 离场滑点
             if position["direction"] == "多":
                 exit_price *= (1 - slippage/100)
             else:
@@ -255,7 +385,7 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
 
         equity_curve.append(capital)
 
-    # ---------- 绩效计算 ----------
+    # 绩效计算
     if trades:
         df_t = pd.DataFrame(trades)
         wins = len(df_t[df_t["盈亏"] > 0])
@@ -285,26 +415,26 @@ if df_5m.empty:
     st.error("无法获取行情数据")
     st.stop()
 
-# 获取15分钟数据（用于回测和实时信号）
+# 获取15分钟数据
 df_15m_full = get_klines("15m", 200)
 if not df_15m_full.empty:
     df_15m_full["EMA20"] = ta.trend.ema_indicator(df_15m_full["close"], window=20)
     df_15m_full = df_15m_full.dropna().reset_index(drop=True)
 else:
     st.warning("15分钟数据获取失败，将使用5分钟自身趋势")
-    df_15m_full = pd.DataFrame()  # 空DataFrame
+    df_15m_full = pd.DataFrame()
 
 # 计算5分钟指标
 df = compute_indicators(df_5m)
 
-# 预先计算结构点（包含确认时间）
+# 预先计算结构点
 swing_highs, swing_lows = find_swing_points(df, window=swing_window)
 
-# ---------- 实时信号（基于最新K线，无未来数据） ----------
+# ---------- 实时信号判断 ----------
 latest = df.iloc[-1]
 current_time = latest['ts']
 
-# 实时15分钟方向：只能用已收盘的15分钟K线（即 current_time - 15min 之前的数据）
+# 实时15分钟方向
 past_15m = df_15m_full[df_15m_full['ts'] <= current_time - timedelta(minutes=15)]
 if len(past_15m) >= 2:
     last_ema = past_15m['EMA20'].iloc[-1]
@@ -313,7 +443,7 @@ if len(past_15m) >= 2:
 else:
     tf15_dir_real = "无"
 
-# 实时结构点：只能使用已确认的点（确认时间 <= current_time）
+# 实时结构点
 valid_highs = [(t, p) for t, p, ct in swing_highs if ct <= current_time]
 valid_lows = [(t, p) for t, p, ct in swing_lows if ct <= current_time]
 last_high = valid_highs[-1] if valid_highs else None
@@ -340,6 +470,25 @@ elif (latest["trend_down_streak"] and tf15_dir_real == "空" and bear_structure 
                 if latest["vol"] > latest["volume_ma"] * volume_mult:
                     signal = "空"
 
+# ---------- 初始化模拟账户 ----------
+if "account" not in st.session_state:
+    st.session_state.account = TradingAccount(initial_balance=initial_balance)
+account = st.session_state.account
+
+# ---------- 自动交易 ----------
+if signal and account.can_open():
+    success, msg = account.open_position(signal, latest["close"], latest["ATR"])
+    if success:
+        st.sidebar.success(f"✅ 自动开仓 {signal}")
+    else:
+        st.sidebar.warning(f"开仓失败: {msg}")
+
+if account.position:
+    result = account.check_stop_take(latest["close"])
+    if result:
+        reason, net = result
+        st.sidebar.info(f"📌 平仓: {reason} 盈亏: {net:+.2f}")
+
 # ---------- 顶部面板 ----------
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("15分钟方向", tf15_dir_real)
@@ -349,6 +498,21 @@ if signal:
     c4.success(f"📢 实时信号: {signal}")
 else:
     c4.info("无信号")
+
+# ---------- 侧边栏账户显示 ----------
+with st.sidebar:
+    st.divider()
+    st.subheader("💰 模拟账户")
+    st.write(f"余额: {account.balance:.2f} USDT")
+    if account.position:
+        pos = account.position
+        st.write(f"持仓: {pos['direction']} {pos['qty']:.2f}张")
+        st.write(f"入场: {pos['entry']:.2f} | 止损: {pos['stop_loss']:.2f} | 止盈: {pos['take_profit']:.2f}")
+    else:
+        st.write("无持仓")
+    if st.button("重置账户"):
+        account.reset()
+        st.rerun()
 
 # ---------- 回测结果 ----------
 with st.spinner("回测进行中..."):
@@ -368,7 +532,7 @@ if trades:
 
     # 资金曲线图
     fig_equity = go.Figure()
-    equity_times = df['ts'].iloc[:len(equity_curve)]  # 对齐时间
+    equity_times = df['ts'].iloc[:len(equity_curve)]
     fig_equity.add_trace(go.Scatter(x=equity_times, y=equity_curve, mode='lines', name='资金曲线'))
     fig_equity.update_layout(title="资金曲线", xaxis_title="时间", yaxis_title="资金 (USDT)", height=400)
     st.plotly_chart(fig_equity, width='stretch')
@@ -382,7 +546,7 @@ fig = go.Figure(data=[go.Candlestick(
 )])
 fig.add_trace(go.Scatter(x=df['ts'], y=df['EMA_fast'], line=dict(color='yellow', width=1), name=f"EMA{ema_fast_period}"))
 fig.add_trace(go.Scatter(x=df['ts'], y=df['EMA_slow'], line=dict(color='orange', width=1), name=f"EMA{ema_slow_period}"))
-# 绘制已确认的结构点（在回测中使用的那些，这里为了简化，绘制所有点）
+# 绘制结构点
 if swing_highs:
     sh_x, sh_y = zip(*[(t, p) for t, p, ct in swing_highs])
     fig.add_trace(go.Scatter(x=sh_x, y=sh_y, mode='markers', marker=dict(symbol='triangle-down', size=8, color='red'), name='结构高点'))
