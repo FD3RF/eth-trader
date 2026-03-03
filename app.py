@@ -1,463 +1,103 @@
-"""
-小利润交易策略专业版（文件上传版）- 带自动参数优化
-- 手动回测 + 自动网格搜索
-- 记录所有组合绩效并显示最优结果
-"""
+# 在 compute_indicators 函数中添加以下逻辑
 
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import ta
-import numpy as np
-from datetime import datetime, timedelta
-import itertools
-import time
+def compute_indicators(df):
+    # 原有指标计算（现价、净流入、买压等）保留
+    current_price = df['close'].iloc[-1]
+    # ... 其他基础指标保持不变 ...
 
-st.set_page_config(layout="wide", page_title="小利润策略·自动优化版")
-st.title("📈 小利润交易策略（自动优化版）")
-
-with st.sidebar:
-    st.header("⚙️ 手动回测参数")
-    use_structure = st.checkbox("结构突破", value=True)
-    use_trend = st.checkbox("趋势过滤", value=False)
-    use_volume = st.checkbox("成交量放大", value=False)
-    use_fake = st.checkbox("假突破过滤", value=False)
-
-    st.divider()
-    st.subheader("📐 策略参数")
-    ema_fast = st.slider("EMA快线", 5, 20, 8)
-    ema_slow = st.slider("EMA慢线", 20, 60, 30)
-    adx_thr = st.slider("ADX阈值", 18, 35, 22)
-    vol_mult = st.slider("放量倍数", 1.0, 2.0, 1.3, step=0.1)
-    sl_mult = st.number_input("止损ATR倍数", 0.4, 1.2, 0.6, step=0.1)
-    tp_mult = st.number_input("止盈ATR倍数", 0.6, 2.0, 0.9, step=0.1)
-    risk_pct = st.slider("单笔风险 %", 0.5, 2.0, 1.0, step=0.1)
-    slippage = st.number_input("滑点 %", 0.0, 0.2, 0.05, step=0.01)
-
-    st.divider()
-    st.header("🤖 自动参数优化")
-    optimize = st.checkbox("启用自动优化")
-    if optimize:
-        st.info("选择要优化的参数范围（其他参数使用当前侧边栏值）")
-        opt_adx = st.checkbox("优化ADX阈值", value=True)
-        opt_sl = st.checkbox("优化止损倍数", value=True)
-        opt_tp = st.checkbox("优化止盈倍数", value=True)
-        opt_vol = st.checkbox("优化放量倍数", value=True)
-        opt_modules = st.checkbox("优化模块开关（趋势/成交量/假突破）", value=False)
-
-        adx_range = st.slider("ADX范围", 15, 35, (18, 28), step=1, disabled=not opt_adx)
-        sl_range = st.slider("止损倍数范围", 0.4, 1.5, (0.6, 1.2), step=0.1, disabled=not opt_sl)
-        tp_range = st.slider("止盈倍数范围", 0.8, 2.5, (1.0, 2.0), step=0.1, disabled=not opt_tp)
-        vol_range = st.slider("放量倍数范围", 1.0, 2.5, (1.2, 1.8), step=0.1, disabled=not opt_vol)
-
-        max_combos = st.number_input("最大组合数（过多会慢）", 10, 200, 50, step=10)
-        if st.button("🚀 开始优化"):
-            st.session_state['optimize'] = True
-    else:
-        if 'optimize' in st.session_state:
-            del st.session_state['optimize']
-
-    uploaded_file = st.file_uploader("📂 上传CSV (包含列: ts, open, high, low, close, vol)", type=["csv"])
-
-# ==========================
-# 数据加载与预处理
-# ==========================
-if uploaded_file is not None:
-    df_raw = pd.read_csv(uploaded_file)
-    required_cols = ["ts", "open", "high", "low", "close", "vol"]
-    if not all(col in df_raw.columns for col in required_cols):
-        st.error(f"CSV必须包含列: {required_cols}")
-        st.stop()
-
-    if df_raw['ts'].dtype in ['int64', 'float64']:
-        df_raw['ts'] = pd.to_datetime(df_raw['ts'], unit='ms')
-    else:
-        df_raw['ts'] = pd.to_datetime(df_raw['ts'])
-
-    st.success(f"文件加载成功，共 {len(df_raw)} 行")
-    st.write(f"时间范围: {df_raw['ts'].min()} 至 {df_raw['ts'].max()}")
-    df_raw = df_raw.sort_values('ts').reset_index(drop=True)
-else:
-    st.warning("请上传CSV文件")
-    st.stop()
-
-# ==========================
-# 指标计算（依赖固定参数，优化时会重新计算）
-# ==========================
-def prepare_data(df_raw, ema_fast, ema_slow):
-    df = df_raw.copy()
-    df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=ema_fast)
-    df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_slow)
-    df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
-    df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=10)
-    df["volume_ma"] = df["vol"].rolling(window=20).mean()
-    return df.dropna().reset_index(drop=True)
-
-# 结构点检测（仅依赖数据，与参数无关）
-def find_swing_points(df, window=3):
-    highs, lows = [], []
-    for i in range(window, len(df)-window):
-        if df['high'].iloc[i] == max(df['high'].iloc[i-window:i+window+1]):
-            confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
-            highs.append((df['ts'].iloc[i], df['high'].iloc[i], confirm_time))
-        if df['low'].iloc[i] == min(df['low'].iloc[i-window:i+window+1]):
-            confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
-            lows.append((df['ts'].iloc[i], df['low'].iloc[i], confirm_time))
-    return highs, lows
-
-# 假突破检测（与参数无关）
-def is_fake(row):
-    body = abs(row["close"] - row["open"])
-    if body == 0:
-        return True
-    upper = row["high"] - max(row["close"], row["open"])
-    lower = min(row["close"], row["open"]) - row["low"]
-    return upper > body * 1.5 or lower > body * 1.5
-
-# 回测引擎（参数化）
-def run_backtest(df, swing_highs, swing_lows, modules, adx_thr, vol_mult, sl_mult, tp_mult, risk_pct, slippage):
-    capital = 20.0
-    position = None
-    trades = []
-    equity_curve = [capital]
-
-    for i in range(1, len(df)-1):
-        row = df.iloc[i]
-        current_time = row['ts']
-
-        valid_highs = [(t, p) for t, p, ct in swing_highs if ct <= current_time]
-        valid_lows = [(t, p) for t, p, ct in swing_lows if ct <= current_time]
-        last_high = valid_highs[-1] if valid_highs else None
-        last_low = valid_lows[-1] if valid_lows else None
-        prev_high = valid_highs[-2] if len(valid_highs) >= 2 else None
-        prev_low = valid_lows[-2] if len(valid_lows) >= 2 else None
-
-        bull_struct = prev_low and last_low and last_low[1] > prev_low[1]
-        bear_struct = prev_high and last_high and last_high[1] < prev_high[1]
-
-        signal = None
-        if modules["structure"]:
-            if bull_struct and last_high and row["close"] > last_high[1]:
-                signal = "多"
-            elif bear_struct and last_low and row["close"] < last_low[1]:
-                signal = "空"
-
-        if signal and modules["trend"]:
-            trend_up = row["EMA_fast"] > row["EMA_slow"]
-            trend_down = row["EMA_fast"] < row["EMA_slow"]
-            if signal == "多" and not trend_up:
-                signal = None
-            if signal == "空" and not trend_down:
-                signal = None
-
-        if signal and row["ADX"] <= adx_thr:
-            signal = None
-
-        if signal and modules["volume"]:
-            if row["vol"] <= row["volume_ma"] * vol_mult:
-                signal = None
-
-        if signal and modules["fake"]:
-            if is_fake(row):
-                signal = None
-
-        if signal and position is None:
-            entry_price = df.iloc[i+1]["open"]
-            if signal == "多":
-                entry_price *= (1 + slippage/100)
-                sl = entry_price - row["ATR"] * sl_mult
-                tp = entry_price + row["ATR"] * tp_mult
+    # ---------- 新增：判断市场状态 ----------
+    # 使用 ADX 或 EMA 斜率判断趋势强度
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    # 计算 ADX（简化版，实际可使用 talib 或手动计算）
+    period = 14
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(1)
+    atr = tr.rolling(period).mean()
+    plus_dm = (high - high.shift()).clip(lower=0)
+    minus_dm = (low.shift() - low).clip(lower=0)
+    plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9))
+    adx = dx.rolling(period).mean().iloc[-1]
+    
+    # 判断趋势/震荡
+    is_trend = adx > 25   # ADX > 25 认为有趋势
+    is_oscillation = not is_trend
+    
+    # ---------- 方案A：回调顺势 ----------
+    # 确定趋势方向
+    ema_fast = close.ewm(span=8).mean()
+    ema_slow = close.ewm(span=21).mean()
+    trend_up = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+    trend_down = ema_fast.iloc[-1] < ema_slow.iloc[-1]
+    
+    # 寻找回调（以多头为例）
+    if trend_up and is_trend:
+        # 价格回踩EMA8但不破EMA21
+        if close.iloc[-1] < ema_fast.iloc[-1] * 1.002 and close.iloc[-1] > ema_slow.iloc[-1]:
+            # 前一根K线确认（如收阳）
+            if close.iloc[-2] > open.iloc[-2]:
+                signal = "回调做多"
+                entry = current_price
+                stop_loss = min(ema_slow.iloc[-1], close.iloc[-2] * 0.998)  # EMA21下方或前低
+                take_profit = entry + (entry - stop_loss) * 1.5  # 盈亏比1.5:1
             else:
-                entry_price *= (1 - slippage/100)
-                sl = entry_price + row["ATR"] * sl_mult
-                tp = entry_price - row["ATR"] * tp_mult
-
-            risk = capital * (risk_pct / 100)
-            stop_dist = abs(entry_price - sl)
-            if stop_dist <= 0:
-                continue
-            qty = risk / stop_dist
-            qty = round(qty / 0.01) * 0.01
-            if qty < 0.01:
-                qty = 0.01
-
-            fee = entry_price * qty * 0.0005
-            if capital > fee:
-                capital -= fee
-                position = {
-                    "dir": signal,
-                    "entry": entry_price,
-                    "sl": sl,
-                    "tp": tp,
-                    "qty": qty,
-                    "open_idx": i+1,
-                    "open_time": df.iloc[i+1]["ts"]
-                }
-
-        if position:
-            exit_price = None
-            reason = None
-            for k in range(position["open_idx"]+1, min(position["open_idx"]+30, len(df))):
-                cur = df.iloc[k]
-                if position["dir"] == "多":
-                    if cur["low"] <= position["sl"]:
-                        exit_price = position["sl"]
-                        reason = "止损"
-                        break
-                    if cur["high"] >= position["tp"]:
-                        exit_price = position["tp"]
-                        reason = "止盈"
-                        break
-                else:
-                    if cur["high"] >= position["sl"]:
-                        exit_price = position["sl"]
-                        reason = "止损"
-                        break
-                    if cur["low"] <= position["tp"]:
-                        exit_price = position["tp"]
-                        reason = "止盈"
-                        break
-            if exit_price is None:
-                exit_price = df.iloc[-1]["close"]
-                reason = "时间"
-
-            if position["dir"] == "多":
-                exit_price *= (1 - slippage/100)
-            else:
-                exit_price *= (1 + slippage/100)
-
-            pnl = (exit_price - position["entry"]) * position["qty"] if position["dir"]=="多" else (position["entry"]-exit_price)*position["qty"]
-            fee = exit_price * position["qty"] * 0.0005
-            net = pnl - fee
-            capital += net
-            trades.append({
-                "时间": position["open_time"],
-                "方向": position["dir"],
-                "入场": round(position["entry"], 2),
-                "离场": round(exit_price, 2),
-                "盈亏": round(net, 2),
-                "原因": reason
-            })
-            position = None
-
-        equity_curve.append(capital)
-
-    if trades:
-        df_t = pd.DataFrame(trades)
-        wins = len(df_t[df_t["盈亏"] > 0])
-        losses = len(df_t[df_t["盈亏"] < 0])
-        total = wins + losses
-        win_rate = wins / total * 100 if total > 0 else 0
-        net_profit = capital - 20
-        avg_win = df_t[df_t["盈亏"]>0]["盈亏"].mean() if wins>0 else 0
-        avg_loss = abs(df_t[df_t["盈亏"]<0]["盈亏"].mean()) if losses>0 else 0
-        rr = avg_win / avg_loss if avg_loss>0 else 0
-
-        if len(equity_curve) > 1:
-            returns = np.diff(equity_curve) / equity_curve[:-1]
-            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365*24*12) if np.std(returns) > 1e-9 else 0
+                signal = "观望中"
         else:
-            sharpe = 0
-
-        peak = np.maximum.accumulate(equity_curve)
-        drawdown = (peak - equity_curve) / peak
-        max_dd = np.max(drawdown) * 100
-
-        return trades, win_rate, net_profit, sharpe, max_dd, rr, equity_curve, total
+            signal = "观望中"
+    elif trend_down and is_trend:
+        # 空头回调
+        if close.iloc[-1] > ema_fast.iloc[-1] * 0.998 and close.iloc[-1] < ema_slow.iloc[-1]:
+            if close.iloc[-2] < open.iloc[-2]:
+                signal = "回调做空"
+                entry = current_price
+                stop_loss = max(ema_slow.iloc[-1], close.iloc[-2] * 1.002)
+                take_profit = entry - (stop_loss - entry) * 1.5
+            else:
+                signal = "观望中"
+        else:
+            signal = "观望中"
+    
+    # ---------- 方案B：均值回归 ----------
+    elif is_oscillation:
+        rsi = df['rsi'].iloc[-1]  # 假设已有RSI列
+        if rsi < 25:
+            signal = "超卖做多"
+            entry = current_price
+            stop_loss = current_price * 0.995
+            take_profit = current_price * 1.005  # 小止盈
+        elif rsi > 75:
+            signal = "超买做空"
+            entry = current_price
+            stop_loss = current_price * 1.005
+            take_profit = current_price * 0.995
+        else:
+            signal = "观望中"
     else:
-        return [], 0, 0, 0, 0, 0, equity_curve, 0
-
-# ==========================
-# 数据准备（固定EMA参数，其他在回测中传入）
-# ==========================
-df_base = prepare_data(df_raw, ema_fast, ema_slow)
-swing_highs, swing_lows = find_swing_points(df_base, window=3)
-
-# ==========================
-# 手动回测
-# ==========================
-if st.sidebar.button("🚀 运行手动回测"):
-    modules = {
-        "structure": use_structure,
-        "trend": use_trend,
-        "volume": use_volume,
-        "fake": use_fake
+        signal = "观望中"
+    
+    # 如果信号未触发，使用默认值
+    if signal == "观望中":
+        entry = current_price
+        stop_loss = current_price * 0.998
+        take_profit = current_price * 1.002
+        risk_reward = 1.0
+    else:
+        risk = abs(entry - stop_loss)
+        reward = abs(take_profit - entry)
+        risk_reward = reward / risk if risk > 0 else 0
+    
+    return {
+        'current_price': current_price,
+        'net_inflow': net_inflow,
+        'buy_pressure': buy_pressure,
+        'mode': "趋势模式" if is_trend else "震荡模式",
+        'suggestion': "顺势回调" if is_trend else "高抛低吸",
+        'signal': signal,
+        'entry': entry,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'risk_reward': risk_reward
     }
-    with st.spinner("回测进行中..."):
-        trades, win_rate, net_profit, sharpe, max_dd, rr, equity_curve, trade_cnt = run_backtest(
-            df_base, swing_highs, swing_lows, modules, adx_thr, vol_mult, sl_mult, tp_mult, risk_pct, slippage
-        )
-
-    st.subheader("📊 手动回测结果")
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.metric("交易次数", trade_cnt)
-    col2.metric("胜率", f"{win_rate:.1f}%")
-    col3.metric("净利润", f"{net_profit:+.2f}")
-    col4.metric("盈亏比", f"{rr:.2f}")
-    col5.metric("夏普", f"{sharpe:.2f}")
-    col6.metric("最大回撤", f"{max_dd:.2f}%")
-
-    if trades:
-        fig_eq = go.Figure()
-        times = df_base['ts'].iloc[:len(equity_curve)]
-        fig_eq.add_trace(go.Scatter(x=times, y=equity_curve, mode='lines', name='资金曲线'))
-        fig_eq.update_layout(title="资金曲线", height=400)
-        st.plotly_chart(fig_eq, use_container_width=True)
-
-        st.dataframe(pd.DataFrame(trades).tail(20), use_container_width=True)
-    else:
-        st.info("该组合下无交易")
-
-# ==========================
-# 自动优化
-# ==========================
-if 'optimize' in st.session_state and st.session_state.get('optimize'):
-    st.subheader("🤖 参数优化进行中...")
-    # 生成参数网格
-    adx_values = list(range(adx_range[0], adx_range[1]+1)) if opt_adx else [adx_thr]
-    sl_values = [round(x, 1) for x in np.arange(sl_range[0], sl_range[1]+0.1, 0.1)] if opt_sl else [sl_mult]
-    tp_values = [round(x, 1) for x in np.arange(tp_range[0], tp_range[1]+0.1, 0.1)] if opt_tp else [tp_mult]
-    vol_values = [round(x, 1) for x in np.arange(vol_range[0], vol_range[1]+0.1, 0.1)] if opt_vol else [vol_mult]
-
-    # 模块开关组合
-    if opt_modules:
-        module_combos = [
-            {"trend": t, "volume": v, "fake": f}
-            for t in [False, True]
-            for v in [False, True]
-            for f in [False, True]
-        ]
-    else:
-        module_combos = [{"trend": use_trend, "volume": use_volume, "fake": use_fake}]
-
-    all_combos = list(itertools.product(adx_values, sl_values, tp_values, vol_values, module_combos))
-    total_combos = len(all_combos)
-    if total_combos > max_combos:
-        st.warning(f"组合数 {total_combos} 超过最大限制 {max_combos}，将随机采样 {max_combos} 组")
-        indices = np.random.choice(total_combos, max_combos, replace=False)
-        all_combos = [all_combos[i] for i in indices]
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    results = []
-
-    for idx, (adx, sl, tp, vol, mods) in enumerate(all_combos):
-        status_text.text(f"测试组合 {idx+1}/{len(all_combos)}: ADX={adx}, SL={sl}, TP={tp}, VOL={vol}, 模块={mods}")
-        modules = {
-            "structure": True,  # 结构突破始终开启
-            "trend": mods["trend"],
-            "volume": mods["volume"],
-            "fake": mods["fake"]
-        }
-        _, win_rate, net_profit, sharpe, max_dd, rr, _, trade_cnt = run_backtest(
-            df_base, swing_highs, swing_lows, modules, adx, vol, sl, tp, risk_pct, slippage
-        )
-        results.append({
-            "ADX": adx,
-            "止损倍数": sl,
-            "止盈倍数": tp,
-            "放量倍数": vol,
-            "趋势过滤": mods["trend"],
-            "成交量": mods["volume"],
-            "假突破": mods["fake"],
-            "交易次数": trade_cnt,
-            "胜率%": round(win_rate, 1),
-            "净利润": round(net_profit, 2),
-            "盈亏比": round(rr, 2),
-            "夏普": round(sharpe, 2),
-            "最大回撤%": round(max_dd, 2)
-        })
-        progress_bar.progress((idx+1)/len(all_combos))
-
-    df_results = pd.DataFrame(results)
-    # 按夏普比率排序（可改为按净利润）
-    df_results = df_results.sort_values("夏普", ascending=False).reset_index(drop=True)
-
-    st.subheader("🏆 优化结果 TOP10")
-    st.dataframe(df_results.head(10), use_container_width=True)
-
-    # 最佳参数
-    best = df_results.iloc[0]
-    st.success(f"最佳组合: ADX={best['ADX']}, 止损={best['止损倍数']}, 止盈={best['止盈倍数']}, 放量={best['放量倍数']}, 趋势={best['趋势过滤']}, 成交量={best['成交量']}, 假突破={best['假突破']}")
-    st.metric("夏普比率", best["夏普"])
-    st.metric("净利润", best["净利润"])
-    st.metric("胜率", f"{best['胜率%']}%")
-
-    # 清空优化状态，避免重复运行
-    del st.session_state['optimize']
-
-# ==========================
-# 模块组合对比（始终显示）
-# ==========================
-st.divider()
-st.subheader("📈 模块组合对比分析")
-
-combinations = [
-    {"name": "仅结构突破", "structure": True, "trend": False, "volume": False, "fake": False},
-    {"name": "+趋势过滤", "structure": True, "trend": True, "volume": False, "fake": False},
-    {"name": "+成交量", "structure": True, "trend": True, "volume": True, "fake": False},
-    {"name": "+假突破过滤", "structure": True, "trend": True, "volume": True, "fake": True},
-]
-
-results_comp = []
-for comb in combinations:
-    modules = {k: v for k, v in comb.items() if k != "name"}
-    t, wr, npnl, shr, mdd, rr, _, cnt = run_backtest(
-        df_base, swing_highs, swing_lows, modules, adx_thr, vol_mult, sl_mult, tp_mult, risk_pct, slippage
-    )
-    results_comp.append({
-        "组合": comb["name"],
-        "交易次数": cnt,
-        "胜率%": round(wr, 1),
-        "净利润": round(npnl, 2),
-        "盈亏比": round(rr, 2),
-        "夏普": round(shr, 2),
-        "最大回撤%": round(mdd, 2)
-    })
-
-df_comp = pd.DataFrame(results_comp)
-st.dataframe(df_comp, use_container_width=True)
-
-# 边际贡献分析
-base_row = df_comp[df_comp["组合"] == "仅结构突破"]
-if not base_row.empty:
-    base_profit = base_row["净利润"].values[0]
-    base_win = base_row["胜率%"].values[0]
-    base_cnt = base_row["交易次数"].values[0]
-    st.subheader("📌 边际贡献（相对于基础组合）")
-    contrib = []
-    for _, row in df_comp.iterrows():
-        if row["组合"] == "仅结构突破":
-            continue
-        contrib.append({
-            "组合": row["组合"],
-            "净利润变化": f"{row['净利润'] - base_profit:+.2f}",
-            "交易次数变化": f"{row['交易次数'] - base_cnt:+d}",
-            "胜率变化": f"{row['胜率%'] - base_win:+.1f}%"
-        })
-    st.dataframe(pd.DataFrame(contrib), use_container_width=True)
-
-# ==========================
-# K线图
-# ==========================
-st.subheader("📉 K线图（最后200根）")
-df_plot = df_base.tail(200)
-fig = go.Figure()
-fig.add_trace(go.Candlestick(
-    x=df_plot["ts"], open=df_plot["open"], high=df_plot["high"],
-    low=df_plot["low"], close=df_plot["close"], name="K线"
-))
-fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_fast"], name="EMA快", line=dict(color='yellow')))
-fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_slow"], name="EMA慢", line=dict(color='orange')))
-
-swing_highs_plot = [(t, p) for t, p, ct in swing_highs if t >= df_plot['ts'].min()]
-swing_lows_plot = [(t, p) for t, p, ct in swing_lows if t >= df_plot['ts'].min()]
-if swing_highs_plot:
-    sh_x, sh_y = zip(*swing_highs_plot)
-    fig.add_trace(go.Scatter(x=sh_x, y=sh_y, mode='markers', marker=dict(symbol='triangle-down', size=8, color='red'), name='结构高点'))
-if swing_lows_plot:
-    sl_x, sl_y = zip(*swing_lows_plot)
-    fig.add_trace(go.Scatter(x=sl_x, y=sl_y, mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name='结构低点'))
-
-fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
