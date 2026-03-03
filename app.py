@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (滚动交叉验证 + XGBoost)
+终极量化交易策略 - 多空阈值分离优化版 (稳健增强版 + 交易计划提示)
 作者：AI Assistant
-版本：8.1 (兼容XGBoost)
-说明：上传ETHUSDT_5m数据，系统自动优化多空阈值，输出测试集结果。
-      包含滚动验证、增强特征、趋势过滤、强制平仓等机制，有效防止过拟合。
+版本：9.1
+说明：整合结构目标、多周期共振、随机优化，并展示完整的交易策略计划。
 """
 
 import streamlit as st
@@ -12,11 +11,11 @@ import pandas as pd
 import numpy as np
 import warnings
 import xgboost as xgb
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import accuracy_score
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="量化策略·稳健优化版", layout="wide")
-st.title("🚀 终极量化策略 - 滚动交叉验证版 (XGBoost)")
+st.set_page_config(page_title="量化策略·增强版", layout="wide")
+st.title("🚀 终极量化策略 - 结构目标 + 多周期共振 (XGBoost分类)")
 
 # ====================== 侧边栏参数 ======================
 st.sidebar.header("⚙️ 交易成本")
@@ -49,45 +48,61 @@ with st.spinner("加载数据中..."):
     df = load_data(uploaded_file)
 st.success(f"✅ 数据加载成功！总K线数: {len(df)}")
 
-# ====================== 特征工程（增强版） ======================
+# ====================== 多周期数据构建（无未来泄漏） ======================
+def compute_ema_history(df, period='15min', span=20):
+    """用前一根重采样K线的EMA填充当前，避免未来信息"""
+    full_idx = df.index
+    resampled = df['close'].resample(period).last()
+    ema_resampled = resampled.ewm(span=span, adjust=False).mean()
+    ema = ema_resampled.reindex(full_idx, method='ffill')
+    return ema
+
+df['ema_15m'] = compute_ema_history(df, '15min', 20)
+df['ema_1h'] = compute_ema_history(df, '1h', 20)
+
+# ====================== 特征工程（结构目标） ======================
 @st.cache_data
 def create_features(df):
     df = df.copy()
     
-    # 基础价格特征
-    df['return_1'] = df['close'].pct_change(1)
+    # 基础趋势结构
+    df['high_3_prev'] = df['high'].shift(1).rolling(3).max()
+    df['low_3_prev'] = df['low'].shift(1).rolling(3).min()
+    df['high_increasing'] = (df['high'].shift(1) > df['high'].shift(2)) & (df['high'].shift(2) > df['high'].shift(3))
+    df['low_increasing'] = (df['low'].shift(1) > df['low'].shift(2)) & (df['low'].shift(2) > df['low'].shift(3))
+    
+    # 上升结构：高点抬高 + 低点抬高 + 价格在近期低点之上
+    df['uptrend_structure'] = (
+        df['high_increasing'] & df['low_increasing'] &
+        (df['close'] > df['low'].shift(1))
+    ).astype(int)
+    
+    # 下降结构：高点降低 + 低点降低 + 价格在近期高点之下
+    df['high_decreasing'] = (df['high'].shift(1) < df['high'].shift(2)) & (df['high'].shift(2) < df['high'].shift(3))
+    df['low_decreasing'] = (df['low'].shift(1) < df['low'].shift(2)) & (df['low'].shift(2) < df['low'].shift(3))
+    df['downtrend_structure'] = (
+        df['high_decreasing'] & df['low_decreasing'] &
+        (df['close'] < df['high'].shift(1))
+    ).astype(int)
+    
+    # 目标：当前是否处于上升结构（二分类）
+    df['target'] = df['uptrend_structure']
+    
+    # 常用技术指标
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema_distance'] = (df['close'] - df['ema20']) / df['close']
     df['return_5'] = df['close'].pct_change(5)
     df['return_10'] = df['close'].pct_change(10)
-    df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
-    df['close_position'] = (df['close'] - df['low']) / (df['high'] - df['low'])
     
-    # 成交量特征
-    df['volume_ma5'] = df['volume'].rolling(5).mean()
-    df['volume_ma20'] = df['volume'].rolling(20).mean()
-    df['volume_ratio'] = df['volume'] / df['volume_ma20']
-    
-    # EMA
-    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['ema_cross'] = (df['ema10'] - df['ema20']) / df['close']
-    df['trend'] = np.where(df['close'] > df['ema20'], 1, -1)  # 趋势过滤器
-    
-    # RSI
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss
     df['rsi'] = 100 - 100 / (1 + rs)
     
-    # MACD
-    exp12 = df['close'].ewm(span=12, adjust=False).mean()
-    exp26 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp12 - exp26
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
+    df['volume_ma20'] = df['volume'].rolling(20).mean()
+    df['volume_ratio'] = df['volume'] / df['volume_ma20']
     
-    # ATR
     tr = pd.concat([
         df['high'] - df['low'],
         (df['high'] - df['close'].shift()).abs(),
@@ -96,18 +111,6 @@ def create_features(df):
     df['atr'] = tr.rolling(14).mean()
     df['atr_ratio'] = df['atr'] / df['close']
     
-    # 布林带
-    df['bb_mid'] = df['close'].rolling(20).mean()
-    df['bb_std'] = df['close'].rolling(20).std()
-    df['bb_width'] = 2 * df['bb_std'] / df['bb_mid']
-    df['bb_position'] = (df['close'] - df['bb_mid']) / (2 * df['bb_std'])
-    
-    # OBV (On-Balance Volume)
-    df['obv'] = (np.sign(df['return_1']) * df['volume']).fillna(0).cumsum()
-    df['obv_ma5'] = df['obv'].rolling(5).mean()
-    df['obv_ratio'] = df['obv'] / df['obv_ma5']
-    
-    # ADX (Average Directional Index) - 简化计算
     def compute_adx(df, period=14):
         high, low, close = df['high'], df['low'], df['close']
         plus_dm = high.diff()
@@ -123,24 +126,13 @@ def create_features(df):
         return adx
     df['adx'] = compute_adx(df)
     
-    # 时间特征
-    df['hour'] = df.index.hour
-    df['day_of_week'] = df.index.dayofweek
+    # 回调比例
+    df['pullback'] = (df['close'] - df['low'].rolling(5).min()) / (df['high'].rolling(5).max() - df['low'].rolling(5).min())
     
-    # 滞后特征（精选）
-    for lag in [1,2]:
-        df[f'close_lag{lag}'] = df['close'].shift(lag)
-        df[f'volume_lag{lag}'] = df['volume'].shift(lag)
-        df[f'rsi_lag{lag}'] = df['rsi'].shift(lag)
-    
-    # 滚动统计
-    for window in [5,20]:
-        df[f'close_max_{window}'] = df['close'].rolling(window).max()
-        df[f'close_min_{window}'] = df['close'].rolling(window).min()
-        df[f'close_std_{window}'] = df['close'].rolling(window).std()
-    
-    # 目标变量：预测未来3根K线的累计收益率（回归）
-    df['target'] = df['close'].pct_change(3).shift(-3)  # 未来3根K线累计收益
+    # 多周期趋势一致（仅用历史值）
+    df['trend_align'] = ((df['close'] > df['ema20']) & 
+                         (df['close'] > df['ema_15m']) & 
+                         (df['close'] > df['ema_1h'])).astype(int)
     
     df.dropna(inplace=True)
     return df
@@ -149,7 +141,7 @@ with st.spinner("生成特征中..."):
     df_feat = create_features(df)
 st.success("✅ 特征生成完成！")
 
-# ====================== 数据分割（时间顺序） ======================
+# ====================== 数据分割 ======================
 def split_data(df, train_ratio=0.6, val_ratio=0.2):
     n = len(df)
     train_end = int(n * train_ratio)
@@ -163,92 +155,57 @@ train, val, test = split_data(df_feat)
 st.info(f"📊 训练集: {len(train)} | 验证集: {len(val)} | 测试集: {len(test)}")
 
 # ====================== 特征列 ======================
-features = [col for col in df_feat.columns if col not in ['open','high','low','close','volume','target','trend']]
+features = [
+    'ema_distance', 'return_5', 'return_10', 'rsi', 'volume_ratio', 'atr_ratio',
+    'adx', 'pullback', 'trend_align'
+]
 
-# ====================== 训练XGBoost回归模型（自适应早停） ======================
+# ====================== 训练XGBoost分类模型 ======================
 def train_xgboost(train, val, features):
     X_train = train[features]
     y_train = train['target']
     X_val = val[features]
     y_val = val['target']
     
-    model = None
-    try:
-        # 尝试使用 early_stopping_rounds (新版本XGBoost)
-        model = xgb.XGBRegressor(
-            n_estimators=1000,
-            max_depth=5,
-            learning_rate=0.01,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=0.1,
-            random_state=42,
-            early_stopping_rounds=50,
-            eval_metric='rmse'
-        )
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=False
-        )
-        st.info("✅ 使用 early_stopping_rounds 训练成功")
-    except TypeError:
-        try:
-            # 尝试使用 callbacks (xgboost 2.x 推荐)
-            model = xgb.XGBRegressor(
-                n_estimators=1000,
-                max_depth=5,
-                learning_rate=0.01,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_alpha=0.1,
-                reg_lambda=0.1,
-                random_state=42,
-                eval_metric='rmse'
-            )
-            model.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                callbacks=[xgb.callback.EarlyStopping(rounds=50)],
-                verbose=False
-            )
-            st.info("✅ 使用 callbacks 训练成功")
-        except (TypeError, AttributeError):
-            # 降级为固定迭代次数
-            st.warning("⚠️ 当前XGBoost版本不支持早停，将使用固定迭代次数训练。")
-            model = xgb.XGBRegressor(
-                n_estimators=200,  # 适当减少
-                max_depth=5,
-                learning_rate=0.01,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_alpha=0.1,
-                reg_lambda=0.1,
-                random_state=42
-            )
-            model.fit(X_train, y_train)
-            st.info("✅ 使用固定迭代次数训练成功")
+    if y_train.nunique() < 2:
+        st.error("目标变量只有一个类别，无法训练。")
+        st.stop()
+    
+    model = xgb.XGBClassifier(
+        n_estimators=500,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        eval_metric='logloss',
+        early_stopping_rounds=50
+    )
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
     
     y_pred = model.predict(X_val)
-    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
-    st.write(f"✅ 验证集 RMSE: {rmse:.6f}")
+    acc = accuracy_score(y_val, y_pred)
+    st.write(f"✅ 验证集准确率: {acc:.3f}")
     return model
 
-with st.spinner("训练XGBoost回归模型中..."):
+with st.spinner("训练XGBoost分类模型中..."):
     model = train_xgboost(train, val, features)
 
-# ====================== 回测函数（增加趋势过滤、强制平仓） ======================
-def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr):
+# ====================== 回测函数（使用预计算概率 + 结构出场） ======================
+def backtest_with_probs(df, probs, th_long, th_short, fee_rate, slippage, atr_mult, rr):
     df = df.copy()
-    df['pred'] = model.predict(df[features])  # 预测未来3根累计收益
+    df['prob'] = probs
     
-    # 生成信号（结合趋势过滤和ADX>20避免震荡）
+    # 信号生成：概率区间 + 多周期趋势 + ADX过滤 + 回调比例过滤
     df['signal'] = 0
-    # 做多条件：预测收益 > th_long 且 价格在EMA20之上 且 ADX>20（趋势非震荡）
-    df.loc[(df['pred'] >= th_long) & (df['close'] > df['ema20']) & (df['adx'] > 20), 'signal'] = 1
-    # 做空条件：预测收益 < th_short 且 价格在EMA20之下 且 ADX>20
-    df.loc[(df['pred'] <= th_short) & (df['close'] < df['ema20']) & (df['adx'] > 20), 'signal'] = -1
+    df.loc[(df['prob'] >= th_long) & (df['trend_align'] == 1) & (df['adx'] > 20) & (df['pullback'] < 0.8), 'signal'] = 1
+    df.loc[(df['prob'] <= th_short) & (df['trend_align'] == 0) & (df['adx'] > 20) & (df['pullback'] > 0.2), 'signal'] = -1
     
     position = 0
     entry_price = 0.0
@@ -272,13 +229,21 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
             stop = entry_price - atr_mult * entry_atr
             take = entry_price + rr * atr_mult * entry_atr
             exit_price = None
+            exit_reason = None
             if low <= stop:
                 exit_price = stop
+                exit_reason = "止损"
             elif high >= take:
                 exit_price = take
-            # 强制平仓：持仓超过15根K线（75分钟）
-            elif entry_time is not None and (current_time - entry_time).seconds > 4500:  # 5min*15=4500秒
+                exit_reason = "止盈"
+            # 趋势结构破坏（出现下降结构）
+            elif row['downtrend_structure'] == 1:
                 exit_price = open_price
+                exit_reason = "结构破坏"
+            # 强制平仓：持仓超过20根K线
+            elif entry_time is not None and (current_time - entry_time).seconds > 6000:
+                exit_price = open_price
+                exit_reason = "超时"
             if exit_price is not None:
                 pnl = (exit_price - entry_price) * (1 - fee_rate * 2) - slippage
                 equity.append(equity[-1] + pnl)
@@ -290,12 +255,19 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
             stop = entry_price + atr_mult * entry_atr
             take = entry_price - rr * atr_mult * entry_atr
             exit_price = None
+            exit_reason = None
             if high >= stop:
                 exit_price = stop
+                exit_reason = "止损"
             elif low <= take:
                 exit_price = take
-            elif entry_time is not None and (current_time - entry_time).seconds > 4500:
+                exit_reason = "止盈"
+            elif row['uptrend_structure'] == 1:
                 exit_price = open_price
+                exit_reason = "结构破坏"
+            elif entry_time is not None and (current_time - entry_time).seconds > 6000:
+                exit_price = open_price
+                exit_reason = "超时"
             if exit_price is not None:
                 pnl = (entry_price - exit_price) * (1 - fee_rate * 2) - slippage
                 equity.append(equity[-1] + pnl)
@@ -343,7 +315,6 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
     drawdown = max_equity - equity
     max_dd = np.max(drawdown)
     
-    # 计算Calmar比率
     if max_dd != 0:
         calmar = total_pnl / max_dd
     else:
@@ -358,49 +329,49 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
         'equity': equity
     }
 
-# ====================== 滚动时间窗口交叉验证优化 ======================
+# ====================== 随机采样优化（5折滚动验证） ======================
 @st.cache_data
-def walk_forward_optimize(val_df, _model, features, fee_rate, slippage, long_range, short_range, n_splits=3):
-    """
-    将验证集等分为 n_splits 个连续子区间，选择中位数Calmar最高的参数。
-    """
-    val_len = len(val_df)
-    fold_size = val_len // n_splits
+def random_optimize(val_df, _model, features, fee_rate, slippage, long_range, short_range, n_iter=200):
+    val_probs = _model.predict_proba(val_df[features])[:, 1]
+    
     best_score = -999
     best_params = None
     best_result = None
 
-    long_ths = np.arange(long_range[0], long_range[1] + 0.01, 0.1)
-    short_ths = np.arange(short_range[0], short_range[1] + 0.01, 0.1)
-    atr_mults = [1.5, 2.0]
-    rrs = [2.0, 2.5]
+    np.random.seed(42)
+    long_ths = np.random.uniform(long_range[0], long_range[1], n_iter)
+    short_ths = np.random.uniform(short_range[0], short_range[1], n_iter)
+    atr_mults = np.random.choice([1.5, 2.0, 2.5], n_iter)
+    rrs = np.random.choice([2.0, 2.5, 3.0], n_iter)
 
-    total = len(long_ths) * len(short_ths) * len(atr_mults) * len(rrs)
-    progress_bar = st.progress(0, text="滚动优化中...")
-    count = 0
+    val_len = len(val_df)
+    fold_size = val_len // 5
+    n_splits = 5
 
-    for th_l in long_ths:
-        for th_s in short_ths:
-            for atr in atr_mults:
-                for rr in rrs:
-                    calmars = []
-                    for fold in range(n_splits):
-                        start = fold * fold_size
-                        end = (fold + 1) * fold_size if fold < n_splits - 1 else val_len
-                        val_fold = val_df.iloc[start:end].copy()
-                        res = backtest(val_fold, _model, features, th_l, th_s, fee_rate, slippage, atr, rr)
-                        if res['trades'] >= 10:
-                            calmars.append(res['calmar'])
-                    if len(calmars) >= 2:  # 至少两个分段有效
-                        median_calmar = np.median(calmars)
-                        if median_calmar > best_score:
-                            best_score = median_calmar
-                            best_params = (th_l, th_s, atr, rr)
-                            # 用完整验证集计算最终结果（用于显示）
-                            full_res = backtest(val_df, _model, features, th_l, th_s, fee_rate, slippage, atr, rr)
-                            best_result = full_res
-                    count += 1
-                    progress_bar.progress(count / total)
+    progress_bar = st.progress(0, text="随机优化中...")
+    for i in range(n_iter):
+        th_l = long_ths[i]
+        th_s = short_ths[i]
+        atr = atr_mults[i]
+        rr = rrs[i]
+        
+        calmars = []
+        for fold in range(n_splits):
+            start = fold * fold_size
+            end = (fold + 1) * fold_size if fold < n_splits - 1 else val_len
+            val_fold = val_df.iloc[start:end].copy()
+            probs_fold = val_probs[start:end]
+            res = backtest_with_probs(val_fold, probs_fold, th_l, th_s, fee_rate, slippage, atr, rr)
+            if res['trades'] >= 10:
+                calmars.append(res['calmar'])
+        if len(calmars) >= 3:
+            median_calmar = np.median(calmars)
+            if median_calmar > best_score:
+                best_score = median_calmar
+                best_params = (th_l, th_s, atr, rr)
+                full_res = backtest_with_probs(val_df, val_probs, th_l, th_s, fee_rate, slippage, atr, rr)
+                best_result = full_res
+        progress_bar.progress((i+1) / n_iter)
 
     progress_bar.empty()
     return best_params, best_result
@@ -408,8 +379,8 @@ def walk_forward_optimize(val_df, _model, features, fee_rate, slippage, long_ran
 long_range = (long_th_min, long_th_max)
 short_range = (short_th_min, short_th_max)
 
-st.write("🔄 正在验证集上进行滚动交叉验证优化...")
-best_params, val_res = walk_forward_optimize(val, model, features, fee_rate, slippage, long_range, short_range)
+st.write("🔄 正在验证集上进行随机采样优化（5折滚动验证）...")
+best_params, val_res = random_optimize(val, model, features, fee_rate, slippage, long_range, short_range)
 
 if best_params is None:
     st.error("❌ 未找到符合条件的参数组合，请调整参数范围或检查数据。")
@@ -417,7 +388,7 @@ if best_params is None:
 
 th_long, th_short, atr_mult, rr = best_params
 
-st.success("✅ 滚动优化完成！")
+st.success("✅ 随机优化完成！")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("做多阈值", f"{th_long:.2f}")
 col2.metric("做空阈值", f"{th_short:.2f}")
@@ -427,9 +398,39 @@ col4.metric("盈亏比", f"{rr}")
 st.write("📈 验证集最优结果（完整验证集）：")
 st.json(val_res)
 
+# ====================== 显示交易策略计划 ======================
+with st.expander("📋 交易策略计划（点击展开）", expanded=True):
+    st.markdown("""
+    ### 🎯 进场条件
+    - **做多**：
+        - 模型预测上涨概率 ≥ 做多阈值 (`{th_long:.2f}`)
+        - 多周期趋势一致：5min、15min、1h EMA20 均向上
+        - 趋势强度 ADX > 20
+        - 回调比例 < 0.8（避免追高）
+    - **做空**：
+        - 模型预测上涨概率 ≤ 做空阈值 (`{th_short:.2f}`)
+        - 多周期趋势一致（均向下）
+        - ADX > 20
+        - 回调比例 > 0.2（避免杀跌）
+
+    ### 🛑 出场条件
+    - **止盈**：盈利达到 盈亏比 × ATR 倍数 (`{rr:.1f} × {atr_mult:.1f} × ATR`)
+    - **止损**：亏损达到 ATR 倍数 (`{atr_mult:.1f} × ATR`)
+    - **趋势结构破坏**：
+        - 做多后出现下降结构（高点降低 + 低点降低）
+        - 做空后出现上升结构（高点抬高 + 低点抬高）
+    - **超时平仓**：持仓超过 20 根K线（100分钟）
+
+    ### ⚖️ 风险控制
+    - 单笔最大亏损由 ATR 止损固定
+    - 建议每笔交易风险不超过总资金的 1-2%
+    - 策略在优化时要求每个分段至少有10笔交易，确保统计意义
+    """.format(th_long=th_long, th_short=th_short, rr=rr, atr_mult=atr_mult))
+
 # ====================== 测试集验证 ======================
 st.write("🔄 在测试集上验证...")
-test_res = backtest(test, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr)
+test_probs = model.predict_proba(test[features])[:, 1]
+test_res = backtest_with_probs(test, test_probs, th_long, th_short, fee_rate, slippage, atr_mult, rr)
 
 st.header("🎯 测试集最终结果")
 col1, col2, col3, col4, col5 = st.columns(5)
