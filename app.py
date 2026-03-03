@@ -334,7 +334,7 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
 
 # ====================== 多空阈值联合优化 ======================
 @st.cache_data
-def optimize_params(val_df, model, features, fee_rate, slippage, long_range, short_range):
+def optimize_params(val_df, _model, features, fee_rate, slippage, long_range, short_range):
     best_sharpe = -999
     best_params = None
     best_result = None
@@ -352,7 +352,7 @@ def optimize_params(val_df, model, features, fee_rate, slippage, long_range, sho
         for th_s in short_ths:
             for atr in atr_mults:
                 for rr in rrs:
-                    res = backtest(val_df, model, features, th_l, th_s, fee_rate, slippage, atr, rr)
+                    res = backtest(val_df, _model, features, th_l, th_s, fee_rate, slippage, atr, rr)
                     if res['sharpe'] > best_sharpe and res['trades'] >= 20:
                         best_sharpe = res['sharpe']
                         best_params = (th_l, th_s, atr, rr)
