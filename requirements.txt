@@ -1,8 +1,7 @@
-streamlit
-pandas
-plotly
-streamlit-autorefresh
-scikit-learn
-tensorflow
-websocket-client
-ta
+streamlit==1.41.0
+pandas>=1.5
+ta>=0.10
+plotly>=5
+requests>=2
+streamlit-autorefresh>=1.0
+numpy>=1.24
