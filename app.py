@@ -1,6 +1,10 @@
 """
-5分钟趋势合约系统（生产级最终完美版）
-- 异步数据线程 + 心跳监控 + 自动重启
+5分钟趋势合约系统（生产级最终完美版V2）
+- 依赖版本锁定：streamlit==1.41.0 等
+- 省电模式开关（5秒/15秒刷新）
+- 信号防抖：避免重复叠加标记
+- 注记位置优化：不遮挡K线
+- 异步数据线程 + 心跳 + 自动重启
 - 回测模块：夏普比率、最大回撤
 - 模拟账户 + 信号历史 + 实时UI
 - 日志轮转 + 文件备份 + 防空
@@ -35,7 +39,7 @@ logging.basicConfig(
 )
 
 st.set_page_config(layout="wide")
-st.title("📈 5分钟趋势合约系统（生产级最终完美版）")
+st.title("📈 5分钟趋势合约系统（最终完美版V2）")
 
 SYMBOL = "ETH-USDT-SWAP"
 CACHE_FILE_5M = "market_data_5m_cache.csv"
@@ -44,7 +48,13 @@ SIGNAL_HISTORY_FILE = "signal_history.json"
 ACCOUNT_FILE = "account.json"
 BACKUP_DIR = "backup"
 
-st_autorefresh(interval=5000, key="refresh")
+# --------------------------
+# 省电模式开关
+# --------------------------
+st.sidebar.header("⚙️ 系统设置")
+power_saving = st.sidebar.checkbox("省电模式", value=False, help="开启后刷新间隔延长至15秒")
+refresh_interval = 15000 if power_saving else 5000  # 毫秒
+st_autorefresh(interval=refresh_interval, key="refresh")
 
 # --------------------------
 # 文件备份与截断
@@ -771,7 +781,7 @@ def calculate_performance(trades):
     }
 
 # --------------------------
-# 绘图
+# 绘图（含防抖和优化注记位置）
 # --------------------------
 def find_swing_highs(df, window=3):
     highs = []
@@ -810,19 +820,28 @@ if swing_lows:
     sl_x, sl_y = zip(*swing_lows)
     fig.add_trace(go.Scatter(x=sl_x, y=sl_y, mode='markers', marker=dict(symbol='triangle-up', size=8, color='green'), name='结构低点'))
 
-if signal:
+# 防抖：仅当信号时间戳变化时才添加新标记
+if signal and st.session_state.get("last_signal_ts") != latest["ts"]:
+    st.session_state.last_signal_ts = latest["ts"]
+    # 计算注记位置：多单放高点上方，空单放低点下方，避免遮挡K线
+    if signal == "多":
+        y_pos = latest["high"] * 1.002
+        symbol = "arrow-up"
+    else:
+        y_pos = latest["low"] * 0.998
+        symbol = "arrow-down"
     fig.add_trace(go.Scatter(
         x=[latest["ts"]],
-        y=[latest["close"]],
+        y=[y_pos],
         mode="markers+text",
-        marker=dict(symbol="arrow-up" if signal=="多" else "arrow-down", size=15, color="yellow"),
+        marker=dict(symbol=symbol, size=15, color="yellow"),
         text=signal,
-        textposition="top center",
+        textposition="top center" if signal == "多" else "bottom center",
         name="新信号"
     ))
 
 fig.update_layout(
-    title=f"{SYMBOL} 5分钟图（最终完美版）",
+    title=f"{SYMBOL} 5分钟图（最终完美版V2）",
     template="plotly_dark",
     height=700,
     xaxis_rangeslider_visible=False
