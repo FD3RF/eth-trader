@@ -1,13 +1,14 @@
 """
-ETH 战神 V2600 - 高胜率·盈亏优化版（最终完整版）
+ETH 战神 V2600 - 高胜率·盈亏优化版（最终完整版 + 交易计划展示）
 核心策略：
   1. 15分钟EMA20方向确定主趋势（严格使用历史数据，无未来函数）
   2. 5分钟局部结构突破 (Higher Low / Lower High) —— 结构点延迟确认，避免未来数据
   3. 成交量确认 + 假突破过滤
   4. 小止损0.6ATR，小止盈0.8ATR (盈亏比1.33)
   5. 模拟账户自动交易（开仓、止损止盈、资金曲线）
-  6. 回测模块展示历史表现
-  7. 实时信号提示及自动交易执行
+  6. 回测模块展示历史表现（初始资金20 USDT）
+  7. 实时信号提示及自动交易执行，并显示详细的交易计划
+  8. K线图置顶，回测绩效放底部
 """
 
 import streamlit as st
@@ -21,8 +22,8 @@ import threading
 import json
 import os
 
-st.set_page_config(layout="wide", page_title="战神 V2600（完整版）")
-st.title("🛡️ ETH 战神 V2600 (最终完整版)")
+st.set_page_config(layout="wide", page_title="战神 V2600（最终版）")
+st.title("🛡️ ETH 战神 V2600 (最终版)")
 
 SYMBOL = "ETH-USDT-SWAP"
 ACCOUNT_FILE = "sim_account.json"
@@ -42,7 +43,7 @@ with st.sidebar:
     atr_tp_mult = st.number_input("止盈ATR倍数", value=0.8, step=0.1)
     risk_percent = st.slider("单笔风险 %", 0.5, 2.0, 1.0, step=0.1)
     slippage = st.number_input("滑点 (百分比)", value=0.05, step=0.01, format="%.2f", help="模拟成交价格偏差")
-    initial_balance = st.number_input("初始资金 (USDT)", value=1000.0, step=100.0)
+    initial_balance = st.number_input("初始资金 (USDT)", value=20.0, step=10.0)  # 默认20
 
     st.divider()
     st.info("💡 核心逻辑：15M趋势锁死 + 5M结构突破 + 量能确认 + 小止损小止盈")
@@ -246,11 +247,11 @@ class TradingAccount:
             return self.balance + (pos['entry'] - current_price) * pos['qty']
 
 # --------------------------
-# 回测引擎（严格使用历史数据）
+# 回测引擎（严格使用历史数据，初始资金与模拟账户一致）
 # --------------------------
 def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
     trades = []
-    capital = 1000
+    capital = initial_balance  # 使用侧边栏设定的初始资金
     position = None
     equity_curve = [capital]
 
@@ -392,7 +393,7 @@ def run_backtest(df, df_15m_full, swing_highs, swing_lows, window):
         losses = len(df_t[df_t["盈亏"] < 0])
         total = wins + losses
         win_rate = wins / total * 100 if total > 0 else 0
-        net_profit = capital - 1000
+        net_profit = capital - initial_balance
         if len(equity_curve) > 1:
             returns = np.diff(equity_curve) / equity_curve[:-1]
             sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365*24*12) if np.std(returns) > 0 else 0
@@ -475,6 +476,41 @@ if "account" not in st.session_state:
     st.session_state.account = TradingAccount(initial_balance=initial_balance)
 account = st.session_state.account
 
+# ---------- 计算交易计划（如果有信号且无持仓） ----------
+plan = None
+if signal and account.can_open():
+    entry_price = latest["close"]
+    atr = latest["ATR"]
+    if signal == "多":
+        stop_loss = entry_price - atr * atr_sl_mult
+        take_profit = entry_price + atr * atr_tp_mult
+    else:
+        stop_loss = entry_price + atr * atr_sl_mult
+        take_profit = entry_price - atr * atr_tp_mult
+
+    risk_amount = account.balance * (risk_percent / 100)
+    stop_distance = abs(entry_price - stop_loss)
+    if stop_distance > 0:
+        raw_qty = risk_amount / stop_distance
+        min_qty = 0.01
+        qty = round(raw_qty / min_qty) * min_qty
+        if qty < min_qty:
+            qty = min_qty
+    else:
+        qty = 0
+
+    rr = abs(take_profit - entry_price) / abs(entry_price - stop_loss) if abs(entry_price - stop_loss) > 0 else 0
+
+    plan = {
+        "方向": signal,
+        "入场价": round(entry_price, 2),
+        "止损价": round(stop_loss, 2),
+        "止盈价": round(take_profit, 2),
+        "数量": round(qty, 4),
+        "盈亏比": round(rr, 2),
+        "理由": f"{tf15_dir_real}趋势 + 结构确认 + 放量突破"
+    }
+
 # ---------- 自动交易 ----------
 if signal and account.can_open():
     success, msg = account.open_position(signal, latest["close"], latest["ATR"])
@@ -489,7 +525,7 @@ if account.position:
         reason, net = result
         st.sidebar.info(f"📌 平仓: {reason} 盈亏: {net:+.2f}")
 
-# ---------- 顶部面板 ----------
+# ---------- 顶部状态面板 ----------
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("15分钟方向", tf15_dir_real)
 c2.metric("ADX", f"{latest['ADX']:.1f}")
@@ -499,47 +535,7 @@ if signal:
 else:
     c4.info("无信号")
 
-# ---------- 侧边栏账户显示 ----------
-with st.sidebar:
-    st.divider()
-    st.subheader("💰 模拟账户")
-    st.write(f"余额: {account.balance:.2f} USDT")
-    if account.position:
-        pos = account.position
-        st.write(f"持仓: {pos['direction']} {pos['qty']:.2f}张")
-        st.write(f"入场: {pos['entry']:.2f} | 止损: {pos['stop_loss']:.2f} | 止盈: {pos['take_profit']:.2f}")
-    else:
-        st.write("无持仓")
-    if st.button("重置账户"):
-        account.reset()
-        st.rerun()
-
-# ---------- 回测结果 ----------
-with st.spinner("回测进行中..."):
-    trades, win_rate, net_profit, sharpe, max_dd, equity_curve = run_backtest(
-        df, df_15m_full, swing_highs, swing_lows, swing_window
-    )
-
-if trades:
-    st.subheader("📊 回测绩效 (1000 USDT 初始资金)")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("总交易", len(trades))
-    col2.metric("胜率", f"{win_rate:.1f}%")
-    col3.metric("净利润", f"{net_profit:+.2f}")
-    col4.metric("夏普比率", f"{sharpe:.2f}")
-    col5.metric("最大回撤", f"{max_dd:.2f}%")
-    st.dataframe(pd.DataFrame(trades).tail(20), width='stretch')
-
-    # 资金曲线图
-    fig_equity = go.Figure()
-    equity_times = df['ts'].iloc[:len(equity_curve)]
-    fig_equity.add_trace(go.Scatter(x=equity_times, y=equity_curve, mode='lines', name='资金曲线'))
-    fig_equity.update_layout(title="资金曲线", xaxis_title="时间", yaxis_title="资金 (USDT)", height=400)
-    st.plotly_chart(fig_equity, width='stretch')
-else:
-    st.warning("回测期间无交易")
-
-# ---------- K线图 ----------
+# ---------- K线图（置顶）----------
 fig = go.Figure(data=[go.Candlestick(
     x=df['ts'], open=df['open'], high=df['high'],
     low=df['low'], close=df['close'], name="ETH 5m"
@@ -567,6 +563,60 @@ if signal:
     ))
 fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, width='stretch')
+
+# ---------- 交易计划展示 ----------
+if plan:
+    with st.container():
+        st.markdown("---")
+        st.subheader("📋 当前交易计划")
+        col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
+        col_p1.metric("方向", plan["方向"])
+        col_p2.metric("入场价", plan["入场价"])
+        col_p3.metric("止损价", plan["止损价"])
+        col_p4.metric("止盈价", plan["止盈价"])
+        col_p5.metric("盈亏比", f"{plan['盈亏比']}:1")
+        st.caption(f"计划开仓数量: {plan['数量']} 张 | 理由: {plan['理由']}")
+        st.markdown("---")
+
+# ---------- 侧边栏账户显示 ----------
+with st.sidebar:
+    st.divider()
+    st.subheader("💰 模拟账户")
+    st.write(f"余额: {account.balance:.2f} USDT")
+    if account.position:
+        pos = account.position
+        st.write(f"持仓: {pos['direction']} {pos['qty']:.2f}张")
+        st.write(f"入场: {pos['entry']:.2f} | 止损: {pos['stop_loss']:.2f} | 止盈: {pos['take_profit']:.2f}")
+    else:
+        st.write("无持仓")
+    if st.button("重置账户"):
+        account.reset()
+        st.rerun()
+
+# ---------- 回测结果（底部）----------
+with st.spinner("回测进行中..."):
+    trades, win_rate, net_profit, sharpe, max_dd, equity_curve = run_backtest(
+        df, df_15m_full, swing_highs, swing_lows, swing_window
+    )
+
+if trades:
+    st.subheader("📊 回测绩效 (20 USDT 初始资金)")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("总交易", len(trades))
+    col2.metric("胜率", f"{win_rate:.1f}%")
+    col3.metric("净利润", f"{net_profit:+.2f}")
+    col4.metric("夏普比率", f"{sharpe:.2f}")
+    col5.metric("最大回撤", f"{max_dd:.2f}%")
+    st.dataframe(pd.DataFrame(trades).tail(20), width='stretch')
+
+    # 资金曲线图
+    fig_equity = go.Figure()
+    equity_times = df['ts'].iloc[:len(equity_curve)]
+    fig_equity.add_trace(go.Scatter(x=equity_times, y=equity_curve, mode='lines', name='资金曲线'))
+    fig_equity.update_layout(title="资金曲线", xaxis_title="时间", yaxis_title="资金 (USDT)", height=400)
+    st.plotly_chart(fig_equity, width='stretch')
+else:
+    st.warning("回测期间无交易")
 
 # ---------- 信号历史 ----------
 st.subheader("📜 最近信号记录")
