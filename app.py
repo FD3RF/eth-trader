@@ -1,22 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (最终完美版)
+终极量化交易策略 - 多空阈值分离优化版 (最终完美版，自适应XGBoost版本)
 作者：AI Assistant
-版本：5.2
-说明：上传CSV文件，自动优化多空阈值，显示测试集结果。已包含完整错误处理和性能优化。
-我已自己排查100000遍代码，修复XGBoost早停Bug，使用xgb.train实现。系统推算演示1000000遍回测，确保胜利盈利。性能优化到极致：使用Numba加速回测循环，缓存所有可缓存部分。
+版本：7.0
+说明：上传ETHUSDT_5m数据，自动优化多空阈值，输出测试集结果。
+      包含完备的错误处理、数据校验、性能优化和XGBoost版本自适应。
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import warnings
+import time
 warnings.filterwarnings('ignore')
-from numba import jit, prange  # 性能优化：Numba加速
-import xgboost as xgb  # XGBoost导入
-from sklearn.metrics import accuracy_score
 
-# 页面设置
+# ====================== 页面配置 ======================
 st.set_page_config(page_title="终极量化策略·多空优化", layout="wide")
 st.title("🚀 终极量化交易策略 - 多空阈值分离优化版 (最终完美版)")
 st.markdown("上传您的 **ETHUSDT_5m_last_90days.csv** 文件，系统将自动优化多空阈值并给出测试集结果。")
@@ -26,6 +24,12 @@ st.sidebar.header("⚙️ 交易成本设置")
 fee_rate = st.sidebar.number_input("双向手续费率 (例如0.0004)", value=0.0004, format="%.4f")
 slippage = st.sidebar.number_input("滑点 (USDT)", value=0.5, step=0.1)
 
+st.sidebar.header("🎛️ 优化参数范围")
+long_th_min = st.sidebar.slider("做多阈值最小值", 0.5, 0.7, 0.5, 0.05)
+long_th_max = st.sidebar.slider("做多阈值最大值", 0.55, 0.8, 0.75, 0.05)
+short_th_min = st.sidebar.slider("做空阈值最小值", 0.2, 0.4, 0.2, 0.05)
+short_th_max = st.sidebar.slider("做空阈值最大值", 0.25, 0.5, 0.45, 0.05)
+
 # ====================== 文件上传 ======================
 uploaded_file = st.file_uploader("选择 CSV 文件", type=["csv"])
 if uploaded_file is None:
@@ -33,14 +37,17 @@ if uploaded_file is None:
     st.stop()
 
 # ====================== 数据加载 ======================
-with st.spinner("加载数据中..."):
-    df = pd.read_csv(uploaded_file)
+@st.cache_data
+def load_data(file):
+    df = pd.read_csv(file)
     df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
     df.set_index('datetime', inplace=True)
     df.sort_index(inplace=True)
     df.rename(columns={'vol':'volume'}, inplace=True)
-    df = df[['open','high','low','close','volume']]
+    return df[['open','high','low','close','volume']]
 
+with st.spinner("加载数据中..."):
+    df = load_data(uploaded_file)
 st.success(f"✅ 数据加载成功！总K线数: {len(df)}")
 
 # ====================== 特征工程 ======================
@@ -134,7 +141,8 @@ st.info(f"📊 训练集: {len(train)} | 验证集: {len(val)} | 测试集: {len
 # ====================== 特征列 ======================
 features = [col for col in df_feat.columns if col not in ['open','high','low','close','volume','target']]
 
-# ====================== 训练XGBoost ======================
+# ====================== 训练XGBoost（自适应版本） ======================
+import xgboost as xgb
 from sklearn.metrics import accuracy_score
 
 def train_xgboost(train, val, features):
@@ -143,7 +151,7 @@ def train_xgboost(train, val, features):
     X_val = val[features]
     y_val = val['target']
     
-    # 数据检查
+    # 数据完整性检查
     if X_train.isnull().any().any():
         st.error("❌ 训练特征包含 NaN 值，请检查特征工程")
         st.stop()
@@ -151,194 +159,188 @@ def train_xgboost(train, val, features):
         st.error("❌ 训练目标包含 NaN 值")
         st.stop()
     if len(y_train.unique()) < 2:
-        st.warning(f"⚠️ 目标变量类别数 {len(y_train.unique())}，可能影响模型训练。")
+        st.error("❌ 目标变量只有一个类别，模型无法训练。请检查特征或调整目标定义。")
+        st.stop()
     
+    model = None
+    # 尝试多种训练方式以适应不同XGBoost版本
     try:
-        dtrain = xgb.DMatrix(X_train, label=y_train)
-        dval = xgb.DMatrix(X_val, label=y_val)
-        
-        params = {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'max_depth': 4,
-            'learning_rate': 0.05,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'seed': 42
-        }
-        
-        evals = [(dtrain, 'train'), (dval, 'val')]
-        
-        model = xgb.train(
-            params,
-            dtrain,
-            num_boost_round=500,
-            evals=evals,
-            early_stopping_rounds=30,
-            verbose_eval=False
+        # 方式1: 使用 early_stopping_rounds (xgboost 1.x 和部分2.x)
+        model = xgb.XGBClassifier(
+            n_estimators=500,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            eval_metric='logloss'
         )
-        
-        y_pred_val = model.predict(dval) > 0.5
-        acc = accuracy_score(y_val, y_pred_val)
-        st.write(f"✅ 验证集准确率: {acc:.3f}")
-        return model
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            early_stopping_rounds=30,
+            verbose=False
+        )
+        st.info("✅ 使用 early_stopping_rounds 训练成功")
+    except TypeError:
+        try:
+            # 方式2: 使用 callbacks (xgboost 2.x 推荐)
+            model = xgb.XGBClassifier(
+                n_estimators=500,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                eval_metric='logloss'
+            )
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                callbacks=[xgb.callback.EarlyStopping(rounds=30)],
+                verbose=False
+            )
+            st.info("✅ 使用 callbacks 训练成功")
+        except (TypeError, AttributeError):
+            # 方式3: 不带早停，使用固定迭代次数
+            st.warning("⚠️ 当前XGBoost版本不支持早停，将使用固定迭代次数训练（可能较慢但兼容）。")
+            model = xgb.XGBClassifier(
+                n_estimators=200,  # 适当减少
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42
+            )
+            model.fit(X_train, y_train)
+            st.info("✅ 使用固定迭代次数训练成功")
     except Exception as e:
         st.error(f"🔥 模型训练失败: {str(e)}")
         st.error("请检查数据或联系开发者")
         st.stop()
+    
+    y_pred_val = model.predict(X_val)
+    acc = accuracy_score(y_val, y_pred_val)
+    st.write(f"✅ 验证集准确率: {acc:.3f}")
+    return model
 
 with st.spinner("训练XGBoost模型中..."):
     model = train_xgboost(train, val, features)
 
-# ====================== 回测函数（Numba加速） ======================
-@jit(nopython=True, parallel=True)
-def backtest_optimized(prob, signal, open_p, high, low, close, atr, th_long, th_short, fee_rate, slippage, atr_mult, rr, n):
-    position = 0
-    entry_price = 0.0
-    entry_atr = 0.0
-    equity = np.zeros(n)
-    trades = 0
-    wins = 0
-    total_pnl = 0.0
-    max_equity = 0.0
-    max_dd = 0.0
-    
-    for i in prange(1, n):
-        curr_prob = prob[i-1]
-        curr_signal = signal[i-1]
-        curr_open = open_p[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_close = close[i]
-        curr_atr = atr[i]
-        
-        # 处理持仓
-        if position == 1:
-            stop = entry_price - atr_mult * entry_atr
-            take = entry_price + rr * atr_mult * entry_atr
-            exit_price = -1.0
-            if curr_low <= stop:
-                exit_price = stop
-            elif curr_high >= take:
-                exit_price = take
-            if exit_price > 0:
-                pnl = (exit_price - entry_price) * (1 - fee_rate * 2) - slippage
-                total_pnl += pnl
-                trades += 1
-                if pnl > 0: wins += 1
-                position = 0
-                curr_equity = equity[i-1] + pnl
-                if curr_equity > max_equity:
-                    max_equity = curr_equity
-                curr_dd = max_equity - curr_equity
-                if curr_dd > max_dd:
-                    max_dd = curr_dd
-                equity[i] = curr_equity
-            else:
-                equity[i] = equity[i-1]
-        
-        elif position == -1:
-            stop = entry_price + atr_mult * entry_atr
-            take = entry_price - rr * atr_mult * entry_atr
-            exit_price = -1.0
-            if curr_high >= stop:
-                exit_price = stop
-            elif curr_low <= take:
-                exit_price = take
-            if exit_price > 0:
-                pnl = (entry_price - exit_price) * (1 - fee_rate * 2) - slippage
-                total_pnl += pnl
-                trades += 1
-                if pnl > 0: wins += 1
-                position = 0
-                curr_equity = equity[i-1] + pnl
-                if curr_equity > max_equity:
-                    max_equity = curr_equity
-                curr_dd = max_equity - curr_equity
-                if curr_dd > max_dd:
-                    max_dd = curr_dd
-                equity[i] = curr_equity
-            else:
-                equity[i] = equity[i-1]
-        
-        # 新信号
-        if curr_signal == 1 and position != 1:
-            if position == -1:
-                pnl = (entry_price - curr_open) * (1 - fee_rate * 2) - slippage
-                total_pnl += pnl
-                trades += 1
-                if pnl > 0: wins += 1
-            position = 1
-            entry_price = curr_open
-            entry_atr = curr_atr
-            equity[i] = equity[i-1]
-        
-        elif curr_signal == -1 and position != -1:
-            if position == 1:
-                pnl = (curr_open - entry_price) * (1 - fee_rate * 2) - slippage
-                total_pnl += pnl
-                trades += 1
-                if pnl > 0: wins += 1
-            position = -1
-            entry_price = curr_open
-            entry_atr = curr_atr
-            equity[i] = equity[i-1]
-    
-    # 最后平仓
-    if position != 0:
-        last_price = close[n-1]
-        if position == 1:
-            pnl = (last_price - entry_price) * (1 - fee_rate * 2) - slippage
-        else:
-            pnl = (entry_price - last_price) * (1 - fee_rate * 2) - slippage
-        total_pnl += pnl
-        trades += 1
-        if pnl > 0: wins += 1
-    
-    win_rate = wins / trades if trades > 0 else 0
-    sharpe = total_pnl / np.std(equity) * np.sqrt(365*24*60/5) if trades > 1 else 0
-    
-    return total_pnl, win_rate, max_dd, sharpe, trades, equity
-
+# ====================== 回测函数 ======================
 def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr):
+    """
+    回测核心逻辑，返回绩效指标
+    """
     df = df.copy()
-    
-    dtest = xgb.DMatrix(df[features])
-    df['prob'] = model.predict(dtest)
-    
+    df['prob'] = model.predict_proba(df[features])[:, 1]
     df['signal'] = 0
     df.loc[df['prob'] >= th_long, 'signal'] = 1
     df.loc[df['prob'] <= th_short, 'signal'] = -1
     
-    # 准备Numba数组
-    n = len(df)
-    prob = df['prob'].values
-    signal = df['signal'].values
-    open_p = df['open'].values
-    high = df['high'].values
-    low = df['low'].values
-    close = df['close'].values
-    atr = df['atr'].values
+    position = 0
+    entry_price = 0.0
+    entry_atr = 0.0
+    equity = [0.0]
+    trades = []
+    wins = 0
     
-    total_pnl, win_rate, max_dd, sharpe, trades, equity = backtest_optimized(prob, signal, open_p, high, low, close, atr, th_long, th_short, fee_rate, slippage, atr_mult, rr, n)
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i-1]
+        open_price = row['open']
+        high = row['high']
+        low = row['low']
+        atr = row['atr']
+        
+        # 现有持仓管理
+        if position == 1:
+            stop = entry_price - atr_mult * entry_atr
+            take = entry_price + rr * atr_mult * entry_atr
+            exit_price = None
+            if low <= stop:
+                exit_price = stop
+            elif high >= take:
+                exit_price = take
+            if exit_price is not None:
+                pnl = (exit_price - entry_price) * (1 - fee_rate * 2) - slippage
+                equity.append(equity[-1] + pnl)
+                trades.append(pnl)
+                if pnl > 0: wins += 1
+                position = 0
+        
+        elif position == -1:
+            stop = entry_price + atr_mult * entry_atr
+            take = entry_price - rr * atr_mult * entry_atr
+            exit_price = None
+            if high >= stop:
+                exit_price = stop
+            elif low <= take:
+                exit_price = take
+            if exit_price is not None:
+                pnl = (entry_price - exit_price) * (1 - fee_rate * 2) - slippage
+                equity.append(equity[-1] + pnl)
+                trades.append(pnl)
+                if pnl > 0: wins += 1
+                position = 0
+        
+        # 新信号处理（使用上一根K线的信号）
+        if prev['signal'] == 1 and position != 1:
+            if position == -1:
+                pnl = (entry_price - open_price) * (1 - fee_rate * 2) - slippage
+                equity.append(equity[-1] + pnl)
+                trades.append(pnl)
+                if pnl > 0: wins += 1
+            position = 1
+            entry_price = open_price
+            entry_atr = atr
+        
+        elif prev['signal'] == -1 and position != -1:
+            if position == 1:
+                pnl = (open_price - entry_price) * (1 - fee_rate * 2) - slippage
+                equity.append(equity[-1] + pnl)
+                trades.append(pnl)
+                if pnl > 0: wins += 1
+            position = -1
+            entry_price = open_price
+            entry_atr = atr
+    
+    # 最后平仓
+    if position != 0:
+        last_price = df['close'].iloc[-1]
+        if position == 1:
+            pnl = (last_price - entry_price) * (1 - fee_rate * 2) - slippage
+        else:
+            pnl = (entry_price - last_price) * (1 - fee_rate * 2) - slippage
+        equity.append(equity[-1] + pnl)
+        trades.append(pnl)
+        if pnl > 0: wins += 1
+    
+    total_pnl = sum(trades)
+    win_rate = wins / len(trades) if trades else 0
+    max_equity = np.maximum.accumulate(equity)
+    drawdown = max_equity - equity
+    max_dd = np.max(drawdown)
+    sharpe = np.mean(trades) / np.std(trades) * np.sqrt(365*24*60/5) if len(trades)>1 and np.std(trades)!=0 else 0
     
     return {
         'total_pnl': total_pnl,
         'win_rate': win_rate,
         'max_dd': max_dd,
         'sharpe': sharpe,
-        'trades': trades
+        'trades': len(trades),
+        'equity': equity
     }
 
 # ====================== 多空阈值联合优化 ======================
 @st.cache_data
-def optimize_params(val_df, model, features, fee_rate, slippage):
+def optimize_params(val_df, model, features, fee_rate, slippage, long_range, short_range):
     best_sharpe = -999
     best_params = None
     best_result = None
     
-    long_ths = np.arange(0.5, 0.8, 0.05)
-    short_ths = np.arange(0.2, 0.5, 0.05)
+    long_ths = np.arange(long_range[0], long_range[1] + 0.01, 0.05)
+    short_ths = np.arange(short_range[0], short_range[1] + 0.01, 0.05)
     atr_mults = [1.0, 1.5, 2.0]
     rrs = [1.5, 2.0, 2.5, 3.0]
     
@@ -361,8 +363,11 @@ def optimize_params(val_df, model, features, fee_rate, slippage):
     progress_bar.empty()
     return best_params, best_result
 
+long_range = (long_th_min, long_th_max)
+short_range = (short_th_min, short_th_max)
+
 st.write("🔄 正在验证集上优化多空阈值及交易参数...")
-best_params, val_res = optimize_params(val, model, features, fee_rate, slippage)
+best_params, val_res = optimize_params(val, model, features, fee_rate, slippage, long_range, short_range)
 
 if best_params is None:
     st.error("❌ 未找到符合条件的参数组合，请调整参数范围或检查数据。")
@@ -392,10 +397,30 @@ col3.metric("总盈利", f"{test_res['total_pnl']:.2f} USDT")
 col4.metric("最大回撤", f"{test_res['max_dd']:.2f} USDT")
 col5.metric("夏普比率", f"{test_res['sharpe']:.2f}")
 
+# ====================== 资金曲线图 ======================
+if test_res['trades'] > 0:
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=test.index[:len(test_res['equity'])],
+        y=test_res['equity'],
+        mode='lines',
+        name='资金曲线',
+        line=dict(color='#00ff88', width=2)
+    ))
+    fig.update_layout(
+        title="测试集资金曲线",
+        xaxis_title="时间",
+        yaxis_title="累积盈亏 (USDT)",
+        template="plotly_dark",
+        height=400
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# ====================== 结论 ======================
 if test_res['sharpe'] > 1.0:
     st.success("✨ 测试结果优秀！可以考虑进一步优化或实盘模拟。")
 elif test_res['sharpe'] > 0:
     st.info("📊 测试结果为正收益，但稳定性一般。可尝试调整特征或参数范围。")
 else:
     st.warning("⚠️ 测试结果为负，策略可能无效。请检查特征或逻辑。")
-```<|control12|>
