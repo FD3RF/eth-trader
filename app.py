@@ -1,7 +1,7 @@
 """
-小利润交易策略专业版（文件上传版）- 修复时间戳和结构点错误
+小利润交易策略专业版（文件上传版）- 修复结构点检测函数
 - 自动转换毫秒时间戳
-- 修正 find_swing_points 函数
+- 正确的结构点检测
 """
 
 import streamlit as st
@@ -16,7 +16,6 @@ st.title("📈 小利润交易策略（修复版）")
 
 with st.sidebar:
     st.header("⚙️ 参数设置")
-    # 模块开关
     use_structure = st.checkbox("结构突破", value=True)
     use_trend = st.checkbox("趋势过滤", value=False)
     use_volume = st.checkbox("成交量放大", value=False)
@@ -40,13 +39,11 @@ with st.sidebar:
 # ==========================
 if uploaded_file is not None:
     df_raw = pd.read_csv(uploaded_file)
-    # 检查必填列
     required_cols = ["ts", "open", "high", "low", "close", "vol"]
     if not all(col in df_raw.columns for col in required_cols):
         st.error(f"CSV必须包含列: {required_cols}")
         st.stop()
 
-    # 转换时间戳（毫秒 → datetime）
     if df_raw['ts'].dtype in ['int64', 'float64']:
         df_raw['ts'] = pd.to_datetime(df_raw['ts'], unit='ms')
     else:
@@ -54,8 +51,6 @@ if uploaded_file is not None:
 
     st.success(f"文件加载成功，共 {len(df_raw)} 行")
     st.write(f"时间范围: {df_raw['ts'].min()} 至 {df_raw['ts'].max()}")
-
-    # 按时间排序
     df_raw = df_raw.sort_values('ts').reset_index(drop=True)
 else:
     st.warning("请上传CSV文件")
@@ -73,14 +68,16 @@ df["volume_ma"] = df["vol"].rolling(window=20).mean()
 df = df.dropna().reset_index(drop=True)
 
 # ==========================
-# 结构点检测（延迟确认）
+# 结构点检测（延迟确认）- 修复版本
 # ==========================
 def find_swing_points(df, window=3):
     highs, lows = [], []
     for i in range(window, len(df)-window):
+        # 检测高点
         if df['high'].iloc[i] == max(df['high'].iloc[i-window:i+window+1]):
             confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
             highs.append((df['ts'].iloc[i], df['high'].iloc[i], confirm_time))
+        # 检测低点
         if df['low'].iloc[i] == min(df['low'].iloc[i-window:i+window+1]):
             confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
             lows.append((df['ts'].iloc[i], df['low'].iloc[i], confirm_time))
@@ -112,7 +109,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         row = df.iloc[i]
         current_time = row['ts']
 
-        # 获取截止当前时间的结构点
         valid_highs = [(t, p) for t, p, ct in swing_highs if ct <= current_time]
         valid_lows = [(t, p) for t, p, ct in swing_lows if ct <= current_time]
         last_high = valid_highs[-1] if valid_highs else None
@@ -123,7 +119,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         bull_struct = prev_low and last_low and last_low[1] > prev_low[1]
         bear_struct = prev_high and last_high and last_high[1] < prev_high[1]
 
-        # 基础信号：结构突破
         signal = None
         if modules["structure"]:
             if bull_struct and last_high and row["close"] > last_high[1]:
@@ -131,7 +126,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
             elif bear_struct and last_low and row["close"] < last_low[1]:
                 signal = "空"
 
-        # 趋势过滤
         if signal and modules["trend"]:
             trend_up = row["EMA_fast"] > row["EMA_slow"]
             trend_down = row["EMA_fast"] < row["EMA_slow"]
@@ -140,25 +134,19 @@ def run_backtest(df, swing_highs, swing_lows, modules):
             if signal == "空" and not trend_down:
                 signal = None
 
-        # ADX过滤（始终启用）
-        if signal:
-            if row["ADX"] <= adx_thr:
-                signal = None
+        if signal and row["ADX"] <= adx_thr:
+            signal = None
 
-        # 成交量放大
         if signal and modules["volume"]:
             if row["vol"] <= row["volume_ma"] * vol_mult:
                 signal = None
 
-        # 假突破过滤
         if signal and modules["fake"]:
             if is_fake(row):
                 signal = None
 
-        # 开仓
         if signal and position is None:
             entry_price = df.iloc[i+1]["open"]
-            # 滑点
             if signal == "多":
                 entry_price *= (1 + slippage/100)
                 sl = entry_price - row["ATR"] * sl_mult
@@ -190,7 +178,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
                     "open_time": df.iloc[i+1]["ts"]
                 }
 
-        # 持仓管理
         if position:
             exit_price = None
             reason = None
@@ -218,7 +205,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
                 exit_price = df.iloc[-1]["close"]
                 reason = "时间"
 
-            # 离场滑点
             if position["dir"] == "多":
                 exit_price *= (1 - slippage/100)
             else:
@@ -240,7 +226,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
 
         equity_curve.append(capital)
 
-    # 绩效计算
     if trades:
         df_t = pd.DataFrame(trades)
         wins = len(df_t[df_t["盈亏"] > 0])
@@ -267,7 +252,7 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         return [], 0, 0, 0, 0, 0, equity_curve, 0
 
 # ==========================
-# 运行回测（当前模块组合）
+# 运行回测
 # ==========================
 if st.sidebar.button("🚀 运行回测"):
     modules = {
@@ -291,7 +276,6 @@ if st.sidebar.button("🚀 运行回测"):
     col6.metric("最大回撤", f"{max_dd:.2f}%")
 
     if trades:
-        # 资金曲线
         fig_eq = go.Figure()
         times = df['ts'].iloc[:len(equity_curve)]
         fig_eq.add_trace(go.Scatter(x=times, y=equity_curve, mode='lines', name='资金曲线'))
@@ -303,7 +287,7 @@ if st.sidebar.button("🚀 运行回测"):
         st.info("该组合下无交易")
 
 # ==========================
-# 模块组合对比（自动运行）
+# 模块组合对比
 # ==========================
 st.divider()
 st.subheader("📈 模块组合对比分析")
@@ -332,7 +316,6 @@ for comb in combinations:
 df_comp = pd.DataFrame(results)
 st.dataframe(df_comp, use_container_width=True)
 
-# 边际贡献分析
 base_row = df_comp[df_comp["组合"] == "仅结构突破"]
 if not base_row.empty:
     base_profit = base_row["净利润"].values[0]
@@ -352,7 +335,7 @@ if not base_row.empty:
     st.dataframe(pd.DataFrame(contrib), use_container_width=True)
 
 # ==========================
-# K线图（最后200根）
+# K线图
 # ==========================
 st.subheader("📉 K线图（最后200根）")
 df_plot = df.tail(200)
@@ -364,7 +347,6 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_fast"], name="EMA快", line=dict(color='yellow')))
 fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_slow"], name="EMA慢", line=dict(color='orange')))
 
-# 绘制结构点（仅显示最后200根内的）
 swing_highs_plot = [(t, p) for t, p, ct in swing_highs if t >= df_plot['ts'].min()]
 swing_lows_plot = [(t, p) for t, p, ct in swing_lows if t >= df_plot['ts'].min()]
 if swing_highs_plot:
