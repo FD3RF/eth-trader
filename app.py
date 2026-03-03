@@ -1,230 +1,238 @@
 """
-工程级小利润趋势系统（一次性完整版）
-可直接运行
+Streamlit 小利润策略（模拟交易 + 回测）
+可跑版本：OKX 5分钟数据
+资金：模拟 100 USDT
+策略：趋势 + 小回调 + 有利润进场
 """
 
 import streamlit as st
 import pandas as pd
 import ta
 import plotly.graph_objects as go
-import numpy as np
 import requests
-import threading
-import time
-import logging
-from logging.handlers import RotatingFileHandler
-from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
+import numpy as np
+from datetime import datetime, timedelta
 
-# --------------------------
-# 日志
-# --------------------------
-log_handler = RotatingFileHandler("error.log", maxBytes=5*1024*1024, backupCount=3)
-logging.basicConfig(handlers=[log_handler], level=logging.INFO)
-
-# --------------------------
-# 页面
-# --------------------------
-st.set_page_config(layout="wide")
-st.title("📈 工程级趋势结构小利润系统")
-
-# --------------------------
-# 省电刷新
-# --------------------------
-power_saving = st.sidebar.checkbox("省电模式", value=False)
-refresh_interval = 15000 if power_saving else 5000
-st_autorefresh(interval=refresh_interval, key="refresh")
-
-# --------------------------
-# OKX 接入
-# --------------------------
+# =========================
+# 配置
+# =========================
 SYMBOL = "ETH-USDT-SWAP"
-API_URL = "https://www.okx.com/api/v5/market/candles"
+INITIAL_BALANCE = 100.0
+ATR_MULT_STOP = 0.6
+ATR_MULT_TP = 0.8
 
-headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
-}
+st.set_page_config(layout="wide")
+st.title("📈 小利润策略（模拟 + 回测）")
 
-# --------------------------
-# 数据线程（工程级）
-# --------------------------
-class DataFetcher:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self._data = None
-        self.fail = 0
-        self.last_heartbeat = time.time()
-        self.stop_flag = False
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
+# =========================
+# 数据获取
+# =========================
+@st.cache_data(ttl=10)
+def fetch_5m(limit=300):
+    url = "https://www.okx.com/api/v5/market/candles"
+    params = {"instId": SYMBOL, "bar": "5m", "limit": limit}
+    r = requests.get(url, params=params)
+    data = r.json().get("data", [])
+    df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume","volCcy","volCcyQuote","confirm"])
+    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+    for col in ["open","high","low","close","volume"]:
+        df[col] = df[col].astype(float)
+    return df.sort_values("ts").reset_index(drop=True)
 
-    def _fetch(self):
-        params = {"instId": SYMBOL, "bar": "5m", "limit": 300}
-        for attempt in range(3):
-            try:
-                r = requests.get(API_URL, params=params, headers=headers, timeout=8)
-                if r.status_code == 200:
-                    j = r.json()
-                    return j.get("data")
-            except Exception:
-                time.sleep(2 ** attempt)
-        return None
-
-    def _run(self):
-        while not self.stop_flag:
-            try:
-                data = self._fetch()
-                if data:
-                    df = pd.DataFrame(data, columns=[
-                        "ts","open","high","low","close","volume",
-                        "volCcy","volCcyQuote","confirm"
-                    ])
-                    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-                    for col in ["open","high","low","close","volume"]:
-                        df[col] = df[col].astype(float)
-                    df = df.sort_values("ts")
-                    with self.lock:
-                        self._data = df
-                self.fail = 0
-                self.last_heartbeat = time.time()
-            except Exception:
-                self.fail += 1
-                logging.exception("数据线程异常")
-                if self.fail > 5:
-                    self.stop_flag = True
-            time.sleep(5)
-
-    def get(self):
-        with self.lock:
-            return self._data.copy() if self._data is not None else None
-
-# 初始化
-if "fetcher" not in st.session_state:
-    st.session_state.fetcher = DataFetcher()
-
-df = st.session_state.fetcher.get()
-if df is None or df.empty:
-    st.info("等待数据...")
+df = fetch_5m()
+if df.empty:
+    st.error("无法获取数据")
     st.stop()
 
-# --------------------------
-# 指标计算
-# --------------------------
-df["EMA20"] = ta.trend.ema_indicator(df["close"], window=20)
-df["EMA50"] = ta.trend.ema_indicator(df["close"], window=50)
+# =========================
+# 指标
+# =========================
+df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=12)
+df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=50)
 df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
 df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
-
-# --------------------------
-# 结构检测（Swing）
-# --------------------------
-def find_swing(df, window=3):
-    highs = []
-    lows = []
-    for i in range(window, len(df)-window):
-        if df["high"].iloc[i] > df["high"].iloc[i-window:i].max() and df["high"].iloc[i] > df["high"].iloc[i+1:i+window+1].max():
-            highs.append((df["ts"].iloc[i], df["high"].iloc[i]))
-        if df["low"].iloc[i] < df["low"].iloc[i-window:i].min() and df["low"].iloc[i] < df["low"].iloc[i+1:i+window+1].min():
-            lows.append((df["ts"].iloc[i], df["low"].iloc[i]))
-    return highs, lows
-
-highs, lows = find_swing(df)
-
+df.dropna(inplace=True)
 latest = df.iloc[-1]
 prev = df.iloc[-2]
 
-# 趋势状态
-trend_up = latest["EMA20"] > latest["EMA50"] and latest["ADX"] > 22
-trend_down = latest["EMA20"] < latest["EMA50"] and latest["ADX"] > 22
+# =========================
+# 小利润信号
+# =========================
+def small_profit_signal(latest, prev):
+    trend_up = latest["EMA_fast"] > latest["EMA_slow"] and latest["ADX"] > 20
+    structure_up = latest["low"] > prev["low"]          # 低点抬高
+    pullback = latest["close"] > latest["EMA_fast"]      # 回到快线以上
+    distance = abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * 0.7
 
-# --------------------------
-# 小利润信号（工程级）
-# --------------------------
-def small_profit_signal(df):
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    atr = latest["ATR"]
+    if trend_up and structure_up and pullback and distance:
+        body = abs(latest["close"] - latest["open"])
+        lower_shadow = min(latest["close"], latest["open"]) - latest["low"]
+        if lower_shadow > body * 1.2 or latest["close"] > latest["open"]:
+            return "多"
 
-    # 趋势
-    if latest["EMA20"] > latest["EMA50"] and latest["ADX"] > 22:
-        trend = "多"
-    elif latest["EMA20"] < latest["EMA50"] and latest["ADX"] > 22:
-        trend = "空"
-    else:
-        return None
+    trend_down = latest["EMA_fast"] < latest["EMA_slow"] and latest["ADX"] > 20
+    structure_down = latest["high"] < prev["high"]
+    pullback_down = latest["close"] < latest["EMA_fast"]
+    distance_down = abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * 0.7
 
-    # 多单回调
-    if trend == "多":
-        if latest["close"] > latest["EMA20"] and prev["close"] < prev["EMA20"]:
-            if abs(latest["close"] - latest["EMA20"]) < atr * 0.7:
-                return "多"
-
-    # 空单回调
-    if trend == "空":
-        if latest["close"] < latest["EMA20"] and prev["close"] > prev["EMA20"]:
-            if abs(latest["close"] - latest["EMA20"]) < atr * 0.7:
-                return "空"
+    if trend_down and structure_down and pullback_down and distance_down:
+        body = abs(latest["close"] - latest["open"])
+        upper_shadow = latest["high"] - max(latest["close"], latest["open"])
+        if upper_shadow > body * 1.2 or latest["close"] < latest["open"]:
+            return "空"
 
     return None
 
-signal = small_profit_signal(df)
+signal = small_profit_signal(latest, prev)
 
-# 防抖
-if signal and st.session_state.get("last_signal_ts") != latest["ts"]:
-    st.session_state.last_signal_ts = latest["ts"]
+# =========================
+# 模拟账户
+# =========================
+if "balance" not in st.session_state:
+    st.session_state.balance = INITIAL_BALANCE
+    st.session_state.trades = []
 
-# --------------------------
-# 绘图
-# --------------------------
-fig = go.Figure()
-fig.add_trace(go.Candlestick(
-    x=df["ts"], open=df["open"], high=df["high"],
-    low=df["low"], close=df["close"], name="K线"
-))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA20"], name="EMA20"))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA50"], name="EMA50"))
+def open_trade(direction, price, atr):
+    if direction == "多":
+        stop = price - atr * ATR_MULT_STOP
+        tp = price + atr * ATR_MULT_TP
+    else:
+        stop = price + atr * ATR_MULT_STOP
+        tp = price - atr * ATR_MULT_TP
 
-if highs:
-    hx, hy = zip(*highs)
-    fig.add_trace(go.Scatter(x=hx, y=hy, mode="markers",
-                            marker=dict(symbol="triangle-down", size=8),
-                            name="结构高点"))
-if lows:
-    lx, ly = zip(*lows)
-    fig.add_trace(go.Scatter(x=lx, y=ly, mode="markers",
-                            marker=dict(symbol="triangle-up", size=8),
-                            name="结构低点"))
+    risk = st.session_state.balance * 0.02
+    dist = abs(price - stop)
+    qty = risk / dist if dist > 0 else 0.01
+    qty = max(round(qty, 2), 0.01)
 
+    st.session_state.trades.append({
+        "time": latest["ts"],
+        "dir": direction,
+        "entry": price,
+        "stop": stop,
+        "tp": tp,
+        "qty": qty,
+        "status": "open"
+    })
+
+def close_positions(price):
+    for t in st.session_state.trades:
+        if t["status"] != "open":
+            continue
+        if t["dir"] == "多":
+            if price <= t["stop"]:
+                pnl = (t["stop"] - t["entry"]) * t["qty"]
+                st.session_state.balance += pnl
+                t["status"] = "stop"
+            elif price >= t["tp"]:
+                pnl = (t["tp"] - t["entry"]) * t["qty"]
+                st.session_state.balance += pnl
+                t["status"] = "tp"
+        else:
+            if price >= t["stop"]:
+                pnl = (t["entry"] - t["stop"]) * t["qty"]
+                st.session_state.balance += pnl
+                t["status"] = "stop"
+            elif price <= t["tp"]:
+                pnl = (t["entry"] - t["tp"]) * t["qty"]
+                st.session_state.balance += pnl
+                t["status"] = "tp"
+
+# 平仓检测
+close_positions(latest["close"])
+
+# 开仓
 if signal:
-    y = latest["high"] * 1.002 if signal == "多" else latest["low"] * 0.998
-    fig.add_trace(go.Scatter(
-        x=[latest["ts"]],
-        y=[y],
-        mode="markers+text",
-        text=signal,
-        marker=dict(symbol="arrow-up" if signal=="多" else "arrow-down", size=15),
-        name="信号"
-    ))
+    open_trade(signal, latest["close"], latest["ATR"])
 
-fig.update_layout(title="趋势结构小利润", height=650)
-st.plotly_chart(fig, use_container_width=True)
-
-# --------------------------
-# 状态面板
-# --------------------------
-st.subheader("状态")
+# =========================
+# 面板
+# =========================
+st.subheader("📊 状态")
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric("趋势", "多头" if trend_up else "空头" if trend_down else "震荡")
+    st.metric("趋势", "多头" if latest["EMA_fast"] > latest["EMA_slow"] else "空头")
 with col2:
     st.metric("ADX", f"{latest['ADX']:.1f}")
 with col3:
-    st.metric("ATR", f"{latest['ATR']:.4f}")
+    st.metric("信号", signal or "无")
 
-if signal:
-    st.success(f"小利润信号: {signal}")
-else:
-    st.info("无信号")
+st.metric("模拟余额", f"{st.session_state.balance:.2f} USDT")
 
-st.caption(f"更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# =========================
+# 回测（简化）
+# =========================
+def backtest(df):
+    balance = INITIAL_BALANCE
+    trades = []
+
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i-1]
+        sig = small_profit_signal(row, prev)
+        atr = row["ATR"]
+        price = row["close"]
+
+        # 开仓
+        if sig == "多":
+            stop = price - atr * ATR_MULT_STOP
+            tp = price + atr * ATR_MULT_TP
+        elif sig == "空":
+            stop = price + atr * ATR_MULT_STOP
+            tp = price - atr * ATR_MULT_TP
+        else:
+            continue
+
+        risk = balance * 0.02
+        dist = abs(price - stop)
+        qty = risk / dist if dist > 0 else 0.01
+        qty = max(round(qty, 2), 0.01)
+
+        # 模拟立即平仓（5分钟后检测）
+        future = df.iloc[i]
+        if sig == "多":
+            if future["low"] <= stop:
+                pnl = (stop - price) * qty
+            elif future["high"] >= tp:
+                pnl = (tp - price) * qty
+            else:
+                pnl = 0
+        else:
+            if future["high"] >= stop:
+                pnl = (price - stop) * qty
+            elif future["low"] <= tp:
+                pnl = (price - tp) * qty
+            else:
+                pnl = 0
+
+        balance += pnl
+        trades.append({"pnl": pnl})
+
+    win = len([t for t in trades if t["pnl"] > 0])
+    return {
+        "balance": balance,
+        "trades": len(trades),
+        "win_rate": win / len(trades) * 100 if trades else 0
+    }
+
+if st.button("回测"):
+    with st.spinner("回测中..."):
+        res = backtest(df)
+    st.success(f"""
+    回测完成：
+    - 终余额：{res['balance']:.2f}
+    - 交易数：{res['trades']}
+    - 胜率：{res['win_rate']:.1f}%
+    """)
+
+# =========================
+# 图表
+# =========================
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df["ts"], open=df["open"], high=df["high"],
+    low=df["low"], close=df["close"]
+))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_fast"], name="EMA12"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_slow"], name="EMA50"))
+st.plotly_chart(fig, use_container_width=True)
