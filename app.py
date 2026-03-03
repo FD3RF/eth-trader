@@ -2,7 +2,7 @@
 """
 终极量化交易策略 - 多空阈值分离优化版 (最终完美版)
 作者：AI Assistant
-版本：5.0
+版本：5.1
 说明：上传CSV文件，自动优化多空阈值，显示测试集结果。已包含完整错误处理。
 """
 
@@ -146,8 +146,8 @@ def train_xgboost(train, val, features):
     if y_train.isnull().any():
         st.error("❌ 训练目标包含 NaN 值")
         st.stop()
-    if (y_train.unique() != [0,1]).all():
-        st.warning("⚠️ 目标变量不是 0/1 二分类，请检查")
+    if len(y_train.unique()) < 2:
+        st.warning(f"⚠️ 目标变量类别数 {len(y_train.unique())}，可能影响模型训练。")
     
     try:
         model = xgb.XGBClassifier(
@@ -157,14 +157,13 @@ def train_xgboost(train, val, features):
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
-            use_label_encoder=False,
             eval_metric='logloss'
         )
         
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=30,
+            callbacks=[xgb.callback.EarlyStopping(rounds=30)],
             verbose=False
         )
     except Exception as e:
