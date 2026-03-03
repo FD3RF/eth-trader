@@ -1,20 +1,19 @@
 """
-高频微回踩模型 4.0（专业优化版）
-- 自适应回踩：0.4～0.7 ATR
-- 趋势可选
-- 样本不足提示
-- 连亏暂停
-- RR + 滑点
+5分钟小波段趋势模型（含回测）
+- 趋势 + 回踩
+- RR控制
+- 滑点/手续费
+- 回测统计
 """
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import ta
+import numpy as np
 import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
-st.title("⚡ 高频微回踩模型 4.0")
+st.title("📈 小波段趋势模型（含回测）")
 
 uploaded = st.file_uploader("上传CSV (ts, open, high, low, close, vol)", type=["csv"])
 if uploaded is None:
@@ -29,16 +28,39 @@ st.success(f"数据加载：{len(df)} 行")
 with st.sidebar:
     risk_pct = st.slider("单笔风险%", 0.2, 2.0, 0.5, step=0.1)
     slippage = st.number_input("滑点%", 0.0, 0.2, 0.05, step=0.01)
-    use_trend = st.checkbox("趋势过滤", value=False)
     run_btn = st.button("回测")
 
-# 指标
+# ===== 指标 =====
 df["EMA9"] = ta.trend.ema_indicator(df["close"], 9)
 df["EMA21"] = ta.trend.ema_indicator(df["close"], 21)
 df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], 14)
 df = df.dropna().reset_index(drop=True)
 
-# 回测
+# ===== 趋势定义 =====
+def is_trend_up(row):
+    return row["EMA9"] > row["EMA21"]
+
+def is_trend_down(row):
+    return row["EMA9"] < row["EMA21"]
+
+# ===== 回踩定义 =====
+def wave_pullback(row, prev):
+    atr = row["ATR"]
+    if atr <= 0:
+        return False
+
+    if is_trend_up(row):
+        dist = prev["EMA9"] - prev["low"]
+        return 0.2*atr <= dist <= 0.6*atr and row["close"] > row["EMA9"]
+
+    if is_trend_down(row):
+        dist = prev["high"] - prev["EMA9"]
+        return 0.2*atr <= dist <= 0.6*atr and row["close"] < row["EMA9"]
+
+    return False
+
+
+# ===== 回测 =====
 def run_backtest(df):
 
     capital = 1000
@@ -60,8 +82,8 @@ def run_backtest(df):
             current_day = row["ts"].date()
             day_start = capital
 
-        # 日内最大亏损限制
-        if day_start - capital > 1000 * 0.06:
+        # 日最大亏损 6%
+        if day_start - capital > 1000*0.06:
             equity.append(capital)
             continue
 
@@ -79,32 +101,11 @@ def run_backtest(df):
 
             signal = None
 
-            # 趋势判断
-            trend_up = row["EMA9"] > row["EMA21"]
-            trend_down = row["EMA9"] < row["EMA21"]
-
-            # 自适应回踩：0.4～0.7 ATR
-            lower = 0.4 * atr
-            upper = 0.7 * atr
-
-            # 多信号
-            if trend_up:
-                dist = prev["EMA9"] - prev["low"]
-                if lower <= dist <= upper and row["close"] > row["EMA9"]:
+            if wave_pullback(row, prev):
+                if is_trend_up(row):
                     signal = "多"
-
-            # 空信号
-            if trend_down:
-                dist = prev["high"] - prev["EMA9"]
-                if lower <= dist <= upper and row["close"] < row["EMA9"]:
+                elif is_trend_down(row):
                     signal = "空"
-
-            # 趋势过滤可选
-            if signal and use_trend:
-                if signal == "多" and not trend_up:
-                    signal = None
-                if signal == "空" and not trend_down:
-                    signal = None
 
             if signal:
 
@@ -114,7 +115,7 @@ def run_backtest(df):
                 sl = entry - atr*0.6 if signal=="多" else entry + atr*0.6
                 tp = entry + atr*0.9 if signal=="多" else entry - atr*0.9
 
-                risk = capital * (risk_pct/100)
+                risk = capital * (risk_pct / 100)
                 stop_dist = abs(entry - sl)
                 if stop_dist <= 0:
                     equity.append(capital)
@@ -144,8 +145,9 @@ def run_backtest(df):
             exit_price = None
             reason = None
 
-            for k in range(position["open_idx"], min(position["open_idx"]+8, len(df))):
+            for k in range(position["open_idx"], min(position["open_idx"]+10, len(df))):
                 cur = df.iloc[k]
+
                 if position["dir"] == "多":
                     if cur["low"] <= position["sl"]:
                         exit_price = position["sl"]
@@ -181,6 +183,7 @@ def run_backtest(df):
             else:
                 consecutive_loss = 0
 
+            # 连亏暂停
             if consecutive_loss >= 6:
                 pause_until = i + 20
 
@@ -200,23 +203,25 @@ def run_backtest(df):
 
     if trades:
         df_t = pd.DataFrame(trades)
-        win_rate = (df_t["盈亏"]>0).mean()*100
+        win_rate = (df_t["盈亏"] > 0).mean() * 100
         net_profit = capital - 1000
 
         returns = np.diff(equity) / equity[:-1]
-        sharpe = np.mean(returns)/np.std(returns)*np.sqrt(365*24*12) if np.std(returns)>0 else 0
+        sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365*24*12) if np.std(returns) > 0 else 0
 
         peak = np.maximum.accumulate(equity)
-        dd = (peak-equity)/peak
-        max_dd = np.max(dd)*100
+        dd = (peak - equity) / peak
+        max_dd = np.max(dd) * 100
 
         return trades, win_rate, net_profit, sharpe, max_dd, equity
     else:
-        return [],0,0,0,0,equity
+        return [], 0, 0, 0, 0, equity
 
-# 运行
+
+# ===== 运行 =====
 if run_btn:
-    trades, win_rate, net_profit, sharpe, max_dd, equity = run_backtest(df)
+    with st.spinner("回测中..."):
+        trades, win_rate, net_profit, sharpe, max_dd, equity = run_backtest(df)
 
     col1,col2,col3,col4 = st.columns(4)
     col1.metric("交易次数", len(trades))
