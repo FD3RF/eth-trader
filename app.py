@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (Streamlit Cloud 适配)
+终极量化交易策略 - 多空阈值分离优化版 (最终完美版)
 作者：AI Assistant
-版本：4.1
-说明：上传CSV文件，自动优化多空阈值，显示测试集结果。
+版本：5.0
+说明：上传CSV文件，自动优化多空阈值，显示测试集结果。已包含完整错误处理。
 """
 
 import streamlit as st
@@ -12,9 +12,9 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 
-# ====================== 页面设置 ======================
+# 页面设置
 st.set_page_config(page_title="终极量化策略·多空优化", layout="wide")
-st.title("🚀 终极量化交易策略 - 多空阈值分离优化版")
+st.title("🚀 终极量化交易策略 - 多空阈值分离优化版 (最终完美版)")
 st.markdown("上传您的 **ETHUSDT_5m_last_90days.csv** 文件，系统将自动优化多空阈值并给出测试集结果。")
 
 # ====================== 侧边栏参数 ======================
@@ -42,6 +42,7 @@ st.success(f"✅ 数据加载成功！总K线数: {len(df)}")
 # ====================== 特征工程 ======================
 def create_features(df):
     df = df.copy()
+    
     # 基础价格特征
     df['return_1'] = df['close'].pct_change(1)
     df['return_5'] = df['close'].pct_change(5)
@@ -54,24 +55,27 @@ def create_features(df):
     df['volume_ma20'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_ma20']
     
-    # 技术指标
+    # EMA
     df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema_cross'] = (df['ema10'] - df['ema20']) / df['close']
     
+    # RSI
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss
     df['rsi'] = 100 - 100 / (1 + rs)
     
+    # MACD
     exp12 = df['close'].ewm(span=12, adjust=False).mean()
     exp26 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = exp12 - exp26
     df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['macd_hist'] = df['macd'] - df['macd_signal']
     
+    # ATR
     tr = pd.concat([
         df['high'] - df['low'],
         (df['high'] - df['close'].shift()).abs(),
@@ -80,6 +84,7 @@ def create_features(df):
     df['atr'] = tr.rolling(14).mean()
     df['atr_ratio'] = df['atr'] / df['close']
     
+    # 布林带
     df['bb_mid'] = df['close'].rolling(20).mean()
     df['bb_std'] = df['close'].rolling(20).std()
     df['bb_width'] = 2 * df['bb_std'] / df['bb_mid']
@@ -119,7 +124,7 @@ def split_data(df, train_ratio=0.6, val_ratio=0.2):
     return train, val, test
 
 train, val, test = split_data(df_feat)
-st.info(f"训练集: {len(train)} | 验证集: {len(val)} | 测试集: {len(test)}")
+st.info(f"📊 训练集: {len(train)} | 验证集: {len(val)} | 测试集: {len(test)}")
 
 # ====================== 特征列 ======================
 features = [col for col in df_feat.columns if col not in ['open','high','low','close','volume','target']]
@@ -134,27 +139,42 @@ def train_xgboost(train, val, features):
     X_val = val[features]
     y_val = val['target']
     
-    model = xgb.XGBClassifier(
-        n_estimators=500,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-        use_label_encoder=False,
-        eval_metric='logloss'
-    )
+    # 数据检查
+    if X_train.isnull().any().any():
+        st.error("❌ 训练特征包含 NaN 值，请检查特征工程")
+        st.stop()
+    if y_train.isnull().any():
+        st.error("❌ 训练目标包含 NaN 值")
+        st.stop()
+    if (y_train.unique() != [0,1]).all():
+        st.warning("⚠️ 目标变量不是 0/1 二分类，请检查")
     
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        early_stopping_rounds=30,
-        verbose=False
-    )
+    try:
+        model = xgb.XGBClassifier(
+            n_estimators=500,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric='logloss'
+        )
+        
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            early_stopping_rounds=30,
+            verbose=False
+        )
+    except Exception as e:
+        st.error(f"🔥 模型训练失败: {str(e)}")
+        st.error("请检查数据或联系开发者")
+        st.stop()
     
     y_pred_val = model.predict(X_val)
     acc = accuracy_score(y_val, y_pred_val)
-    st.write(f"验证集准确率: {acc:.3f}")
+    st.write(f"✅ 验证集准确率: {acc:.3f}")
     return model
 
 with st.spinner("训练XGBoost模型中..."):
@@ -183,6 +203,7 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
         low = row['low']
         atr = row['atr']
         
+        # 处理现有持仓
         if position == 1:
             stop = entry_price - atr_mult * entry_atr
             take = entry_price + rr * atr_mult * entry_atr
@@ -213,6 +234,7 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
                 if pnl > 0: wins += 1
                 position = 0
         
+        # 新信号
         if prev['signal'] == 1 and position != 1:
             if position == -1:
                 pnl = (entry_price - open_price) * (1 - fee_rate * 2) - slippage
@@ -233,6 +255,7 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
             entry_price = open_price
             entry_atr = atr
     
+    # 最后平仓
     if position != 0:
         last_price = df['close'].iloc[-1]
         if position == 1:
@@ -289,11 +312,11 @@ def optimize_params(val_df, model, features, fee_rate, slippage):
     progress_bar.empty()
     return best_params, best_result
 
-st.write("正在验证集上优化多空阈值及交易参数...")
+st.write("🔄 正在验证集上优化多空阈值及交易参数...")
 best_params, val_res = optimize_params(val, model, features, fee_rate, slippage)
 
 if best_params is None:
-    st.error("未找到符合条件的参数组合，请调整参数范围或检查数据。")
+    st.error("❌ 未找到符合条件的参数组合，请调整参数范围或检查数据。")
     st.stop()
 
 th_long, th_short, atr_mult, rr = best_params
@@ -305,14 +328,14 @@ col2.metric("做空阈值", f"{th_short:.2f}")
 col3.metric("ATR倍数", f"{atr_mult}")
 col4.metric("盈亏比", f"{rr}")
 
-st.write("验证集最优结果：")
+st.write("📈 验证集最优结果：")
 st.json(val_res)
 
 # ====================== 测试集验证 ======================
-st.write("在测试集上验证...")
+st.write("🔄 在测试集上验证...")
 test_res = backtest(test, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr)
 
-st.header("📊 测试集最终结果")
+st.header("🎯 测试集最终结果")
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("交易次数", test_res['trades'])
 col2.metric("胜率", f"{test_res['win_rate']*100:.1f}%")
