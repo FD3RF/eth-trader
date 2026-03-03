@@ -6,130 +6,123 @@ import requests
 import numpy as np
 from datetime import datetime
 
-# 页面基础配置
-st.set_page_config(layout="wide", page_title="战神 V2600 - 二次确认版")
-st.title("🛡️ ETH 小利润·二次确认共振系统")
+# 环境配置
+st.set_page_config(layout="wide", page_title="战神 V2600 - 最终满意版")
+st.title("🛡️ ETH 小利润·高胜率工程逻辑系统")
 
 # --------------------------
-# 侧边栏参数 (核心工程参数)
+# 侧边栏：核心风控参数
 # --------------------------
 SYMBOL = "ETH-USDT-SWAP"
 with st.sidebar:
-    st.header("⚙️ 核心逻辑参数")
-    adx_threshold = st.slider("ADX 强度 (建议>25)", 15, 35, 28) # 强化趋势过滤
-    atr_sl_mult = 0.6  # 固定小止损
-    atr_tp_mult = 0.8  # 固定小止盈
-    dist_buffer = 0.5  # EMA 支撑缓冲区
+    st.header("⚙️ 核心逻辑对齐")
+    adx_filter = st.slider("ADX 强度 (过滤横盘)", 15, 40, 26)
+    atr_tp_val = st.slider("目标止盈 (ATR倍数)", 0.6, 2.0, 1.1) # 略微拉大以覆盖手续费
+    atr_sl_val = 0.6 # 严格遵守小止损逻辑
+    
     st.divider()
-    enable_confirm = st.checkbox("开启『二次确认』逻辑", value=True) # 核心升级点
-    backtest_mode = st.checkbox("🔍 开启回测分析", value=True)
+    st.info("💡 满意逻辑：15M共振 + 低点抬高 + 突破前高确认 + ATR波动适应")
 
 # --------------------------
-# 数据引擎 (OKX API)
+# 数据处理引擎
 # --------------------------
-def fetch_data(bar="5m", limit=500):
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": bar, "limit": limit}
+@st.cache_data(ttl=5)
+def get_market_data(bar="5m", limit=500):
+    url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={bar}&limit={limit}"
     try:
-        r = requests.get(url, params=params, timeout=5)
-        df = pd.DataFrame(r.json()["data"], columns=["ts","open","high","low","close","vol","volCcy","volCcyQuote","confirm"])
+        r = requests.get(url, timeout=5).json().get("data", [])
+        df = pd.DataFrame(r, columns=["ts","open","high","low","close","vol","volCcy","volCcyQuote","confirm"])
         df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-        for c in ["open","high","low","close"]: df[c] = df[c].astype(float)
+        for c in ["open","high","low","close","vol"]: df[c] = df[c].astype(float)
         return df.sort_values("ts").reset_index(drop=True)
     except: return pd.DataFrame()
 
 # --------------------------
-# 指标与逻辑判定核心
+# 核心策略逻辑
 # --------------------------
-def apply_refined_logic(df, adx_th, buf):
-    # 15分钟趋势共振 (EMA20)
-    df15 = fetch_data("15m", 100)
+def execute_strategy(df5, adx_th, tp_m, sl_m):
+    # 1. 15分钟多周期共振
+    df15 = get_market_data("15m", 100)
     df15["EMA20"] = ta.trend.ema_indicator(df15["close"], window=20)
-    tf15_dir = "多" if df15.iloc[-1]["EMA20"] > df15.iloc[-2]["EMA20"] else "空"
+    tf15_trend = "多" if df15.iloc[-1]["EMA20"] > df15.iloc[-2]["EMA20"] else "空"
+
+    # 2. 5分钟技术形态
+    df5["EMA12"] = ta.trend.ema_indicator(df5["close"], window=12)
+    df5["EMA50"] = ta.trend.ema_indicator(df5["close"], window=50)
+    df5["ADX"] = ta.trend.adx(df5["high"], df5["low"], df5["close"], window=14)
+    df5["ATR"] = ta.volatility.average_true_range(df5["high"], df5["low"], df5["close"], window=14)
     
-    # 5分钟指标计算
-    df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=12)
-    df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=50)
-    df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
-    df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
+    # 结构：局部高低点确认
+    df5["L_min"] = df5["low"].shift(1).rolling(3).min()
+    df5["H_max"] = df5["high"].shift(1).rolling(3).max()
     
-    # 结构识别：过去3根K线极值
-    df["low_min_3"] = df["low"].shift(1).rolling(window=3).min()
-    df["high_max_3"] = df["high"].shift(1).rolling(window=3).max()
-    
-    signals = []
-    # 循环判定 (含二次确认)
-    for i in range(50, len(df)-1):
-        row = df.iloc[i]
-        next_row = df.iloc[i+1] # 确认K线
+    trade_history = []
+    for i in range(50, len(df5)-1):
+        curr = df5.iloc[i]
+        nxt = df5.iloc[i+1] # 二次确认K线
         
-        # 1. 假突破过滤
-        body = abs(row["close"] - row["open"])
-        is_fake = (row["high"] - max(row["close"], row["open"]) > body * 1.5)
+        # 趋势强度过滤
+        strong_trend = curr["ADX"] > adx_th
+        ema_cross = curr["EMA12"] > curr["EMA50"] if tf15_trend == "多" else curr["EMA12"] < curr["EMA50"]
         
-        # 2. 趋势与强度
-        trend_up = row["EMA_fast"] > row["EMA_slow"] and row["ADX"] > adx_th
-        trend_down = row["EMA_fast"] < row["EMA_slow"] and row["ADX"] > adx_th
+        signal = None
+        # 多头逻辑：趋势对齐 + 低点抬高 + 突破上一根高点进场
+        if strong_trend and ema_cross and tf15_trend == "多":
+            if curr["low"] > curr["L_min"] and nxt["close"] > curr["high"]:
+                signal = "多"
         
-        sig = None
-        # 多头二次确认：15m共振 + 低点抬高 + 突破前K高点
-        if trend_up and tf15_dir == "多" and not is_fake:
-            if row["low"] > row["low_min_3"] and row["close"] < (row["EMA_fast"] + row["ATR"] * buf):
-                if not enable_confirm or next_row["close"] > row["high"]: 
-                    sig = "多"
-        
-        # 空头二次确认：15m共振 + 高点降低 + 跌破前K低点
-        elif trend_down and tf15_dir == "空" and not is_fake:
-            if row["high"] < row["high_max_3"] and row["close"] > (row["EMA_fast"] - row["ATR"] * buf):
-                if not enable_confirm or next_row["close"] < row["low"]:
-                    sig = "空"
-        
-        if sig:
-            # 模拟回测：检查未来5根K线
-            entry_p = next_row["close"] if enable_confirm else row["close"]
-            sl_p = entry_p - row["ATR"] * atr_sl_mult if sig == "多" else entry_p + row["ATR"] * atr_sl_mult
-            tp_p = entry_p + row["ATR"] * atr_tp_mult if sig == "多" else entry_p - row["ATR"] * atr_tp_mult
+        # 空头逻辑：趋势对齐 + 高点降低 + 跌破上一根低点进场
+        elif strong_trend and ema_cross and tf15_trend == "空":
+            if curr["high"] < curr["H_max"] and nxt["close"] < curr["low"]:
+                signal = "空"
+                
+        if signal:
+            entry = nxt["close"]
+            sl = entry - curr["ATR"]*sl_m if signal=="多" else entry + curr["ATR"]*sl_m
+            tp = entry + curr["ATR"]*tp_m if signal=="多" else entry - curr["ATR"]*tp_m
             
+            # 回测模拟 (检查未来10根K线)
             res = 0
-            for j in range(i+2, min(i+7, len(df))):
-                f = df.iloc[j]
-                if sig == "多":
-                    if f["low"] <= sl_p: res = -1; break
-                    if f["high"] >= tp_p: res = 1; break
+            for j in range(i+2, min(i+12, len(df5))):
+                future = df5.iloc[j]
+                if signal == "多":
+                    if future["low"] <= sl: res = -1; break
+                    if future["high"] >= tp: res = 1; break
                 else:
-                    if f["high"] >= sl_p: res = -1; break
-                    if f["low"] <= tp_p: res = 1; break
-            signals.append({"ts": next_row["ts"], "sig": sig, "res": res, "price": entry_p})
+                    if future["high"] >= sl: res = -1; break
+                    if future["low"] <= tp: res = 1; break
+            trade_history.append({"时间": nxt["ts"], "方向": signal, "结果": res, "入场价": entry})
             
-    return df, signals, tf15_dir
+    return df5, trade_history, tf15_trend
 
 # --------------------------
-# UI 渲染
+# UI 表现层
 # --------------------------
-df_raw = fetch_data("5m")
+df_raw = get_market_data()
 if not df_raw.empty:
-    df_final, all_sigs, current_tf = apply_refined_logic(df_raw, adx_threshold, dist_buffer)
+    df_plot, history, current_tf = execute_strategy(df_raw, adx_filter, atr_tp_val, atr_sl_val)
     
-    # 状态面板
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("15M 共振方向", current_tf)
-    c2.metric("当前 ADX", f"{df_final.iloc[-1]['ADX']:.1f}")
-    c3.metric("确认模式", "开启" if enable_confirm else "关闭")
+    # 顶部数据看板
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("15M 共振", current_tf)
+    col2.metric("ADX 趋势强度", f"{df_plot.iloc[-1]['ADX']:.1f}")
     
-    # 回测显示
-    if backtest_mode and all_sigs:
-        tdf = pd.DataFrame(all_sigs)
-        wins = len(tdf[tdf["res"] == 1])
-        losses = len(tdf[tdf["res"] == -1])
-        wr = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0
-        c4.metric("回测胜率", f"{wr:.1f}%")
+    if history:
+        h_df = pd.DataFrame(history)
+        valid_trades = h_df[h_df["结果"] != 0]
+        win_rate = (len(valid_trades[valid_trades["结果"] == 1]) / len(valid_trades)) * 100 if not valid_trades.empty else 0
+        col3.metric("模拟胜率", f"{win_rate:.1f}%")
+        col4.metric("捕捉信号", len(h_df))
         
         st.divider()
-        st.subheader("📈 历史信号复盘")
-        st.dataframe(tdf.tail(10), use_container_width=True)
+        st.subheader("📋 最终回测明细")
+        st.dataframe(h_df.tail(10), use_container_width=True)
+    else:
+        st.warning("⚠️ 当前市场波动率或强度不足，系统严格保持空仓观望。")
 
-    # 图表
-    fig = go.Figure(data=[go.Candlestick(x=df_final['ts'], open=df_final['open'], high=df_final['high'], low=df_final['low'], close=df_final['close'], name="K线")])
-    fig.add_trace(go.Scatter(x=df_final['ts'], y=df_final['EMA_fast'], line=dict(color='cyan', width=1), name="EMA12"))
+    # 动态图表 
+    fig = go.Figure(data=[go.Candlestick(x=df_plot['ts'], open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name="ETH-SWAP")])
+    fig.add_trace(go.Scatter(x=df_plot['ts'], y=df_plot['EMA12'], line=dict(color='yellow', width=1.2), name="EMA12"))
+    fig.add_trace(go.Scatter(x=df_plot['ts'], y=df_plot['EMA50'], line=dict(color='orange', width=1.2, dash='dot'), name="EMA50"))
     fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
