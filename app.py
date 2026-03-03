@@ -1,7 +1,7 @@
 """
-小利润交易策略专业版（最终完整版）
+小利润交易策略专业版（最终完整版 + 增强容错）
 - EMA趋势 + ADX过滤 + 结构突破 + 成交量 + 假突破过滤
-- 本地数据缓存 + 增量更新
+- 本地数据缓存 + 增量更新 + 重试机制
 - 模块化回测 + 边际贡献分析
 - 小止损小止盈 + 滑点 + 手续费
 - 专业绩效指标：胜率、盈亏比、夏普、最大回撤
@@ -25,7 +25,7 @@ DATA_DIR = "market_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ==========================
-# 数据层（CSV + 增量更新）
+# 数据层（CSV + 增量更新 + 重试）
 # ==========================
 def get_filename(tf):
     return os.path.join(DATA_DIR, f"{SYMBOL}_{tf}.csv")
@@ -67,7 +67,7 @@ def fetch_all_history(tf, days=365):
     current_end = end
     limit = 1000
     pbar = st.progress(0, text="正在拉取历史数据...")
-    total_batches = days // 3 + 1  # 粗略估计
+    total_batches = days // 3 + 1
     batch_count = 0
 
     while current_end > start:
@@ -89,15 +89,22 @@ def fetch_all_history(tf, days=365):
     return pd.DataFrame()
 
 def update_local_data(tf, days=365):
-    """增量更新本地数据"""
+    """增量更新本地数据（带重试和校验）"""
     local = load_local_data(tf)
     if local.empty:
-        df = fetch_all_history(tf, days)
-        if not df.empty:
-            save_local_data(df, tf)
-        return df
+        # 首次拉取，尝试多次
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            st.info(f"尝试拉取数据 ({attempt+1}/{max_attempts})...")
+            df = fetch_all_history(tf, days)
+            if not df.empty and "ts" in df.columns and len(df) > 0:
+                save_local_data(df, tf)
+                return df
+            time.sleep(2)
+        st.error("多次尝试后仍无法获取有效数据，请检查网络或稍后重试。")
+        return pd.DataFrame()
     else:
-        # 只拉取最新数据
+        # 增量更新
         last_ts = local["ts"].max()
         now = datetime.now()
         new_chunks = []
@@ -156,14 +163,17 @@ with st.sidebar:
 if update_btn:
     with st.spinner("正在更新数据..."):
         df_raw = update_local_data(tf, days=lookback)
-        st.success("数据更新完成")
+        if not df_raw.empty:
+            st.success("数据更新完成")
+        else:
+            st.stop()  # 数据拉取失败，停止执行
 else:
     df_raw = load_local_data(tf)
     if df_raw.empty:
         st.warning("本地无数据，请点击「更新本地数据」")
         st.stop()
 
-# 检查数据完整性
+# 严格检查数据完整性
 if "ts" not in df_raw.columns:
     st.error("数据文件缺少 'ts' 列，可能已损坏，请重新更新数据。")
     st.stop()
