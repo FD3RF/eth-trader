@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-未来收益量化系统（稳定可跑版）
+量化策略稳定实战版
 作者：AI Assistant
 """
 
@@ -11,7 +11,7 @@ import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 st.set_page_config(page_title="量化策略", layout="wide")
-st.title("🚀 未来收益量化系统")
+st.title("🚀 量化策略稳定版")
 
 # =========================
 # 上传
@@ -29,7 +29,6 @@ def load_data(file):
     df = pd.read_csv(file)
     df.columns = [c.lower() for c in df.columns]
 
-    # 时间
     if 'datetime' in df.columns:
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
@@ -65,12 +64,11 @@ for c in ['open','high','low','close']:
         st.write(df.columns.tolist())
         st.stop()
 
-# volume可缺失，填0
 if df['volume'] is None:
     df['volume'] = 0
 
 # =========================
-# 特征生成（关键）
+# 特征
 # =========================
 def make_features(df):
     df = df.copy()
@@ -100,14 +98,13 @@ def make_features(df):
 
     df['trend_align'] = (df['close'] > df['ema20']).astype(int)
 
-    # 标签：未来5根是否上涨
     future = df['close'].pct_change(5).shift(-5)
     df['target'] = (future > 0).astype(int)
 
     df.dropna(inplace=True)
     return df
 
-with st.spinner("特征工程"):
+with st.spinner("特征"):
     df = make_features(df)
 
 st.success("特征完成")
@@ -147,7 +144,7 @@ def train_model(train, val):
     y_val = val['target']
 
     if y_train.nunique() < 2:
-        st.error("标签只有一类")
+        st.error("标签单一")
         st.stop()
 
     model = xgb.XGBClassifier(
@@ -163,7 +160,7 @@ def train_model(train, val):
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
     pred = model.predict(X_val)
-    st.write("验证准确率:", accuracy_score(y_val, pred))
+    st.write("准确率:", accuracy_score(y_val, pred))
     st.write("精确率:", precision_score(y_val, pred, zero_division=0))
     st.write("召回率:", recall_score(y_val, pred, zero_division=0))
     st.write("F1:", f1_score(y_val, pred, zero_division=0))
@@ -174,7 +171,7 @@ with st.spinner("训练"):
     model = train_model(train, val)
 
 # =========================
-# 回测（稳定版）
+# 回测（稳定）
 # =========================
 def backtest(df, probs, th):
     df = df.copy()
@@ -196,7 +193,7 @@ def backtest(df, probs, th):
             entry = price
             position = 1
 
-        # 平仓条件
+        # 平仓
         if position == 1:
             # 止损 1%
             if row['low'] <= entry * 0.99:
