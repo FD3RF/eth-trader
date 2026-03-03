@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-5分钟多空策略（稳定可跑版）
-防 KeyError / AttributeError / 字段不匹配
+5分钟合约多空策略 - 稳定可运行版
+作者：AI Assistant
 """
 
 import streamlit as st
@@ -10,78 +10,78 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-st.set_page_config(page_title="5分钟策略", layout="wide")
-st.title("🚀 5分钟多空策略")
+st.set_page_config(page_title="5分钟合约策略", layout="wide")
+st.title("🚀 5分钟合约多空策略")
 
-# ========== 上传 ==========
+# ============= 上传 =============
 uploaded_file = st.file_uploader("上传 CSV", type=["csv"])
 if uploaded_file is None:
     st.info("上传数据")
     st.stop()
 
-# ========== 加载 ==========
+# ============= 加载 =============
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
     df.columns = [c.lower() for c in df.columns]
 
-    # 时间
+    # 时间处理
     if 'datetime' in df.columns:
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
-    else:
-        df.index = pd.to_datetime(df.index)
-
     df.sort_index(inplace=True)
     return df
 
-with st.spinner("加载中"):
-    df = load_data(uploaded_file)
-
+df = load_data(uploaded_file)
 st.success(f"数据: {len(df)} 行")
 
-# ====== 打印字段（关键）======
-st.write("字段列表：")
-st.write(df.columns)
-
-# ========== 字段对齐 ==========
+# ============= 字段映射（兼容不同列名）============
 def col(df, *names):
     for n in names:
         if n in df.columns:
             return df[n]
     return None
 
-df['open'] = col(df, 'open','Open')
-df['high'] = col(df, 'high','High')
-df['low'] = col(df, 'low','Low')
-df['close'] = col(df, 'close','Close')
-df['volume'] = col(df, 'volume','vol','Volume','tick_volume')
+df['open'] = col(df,'open')
+df['high'] = col(df,'high')
+df['low'] = col(df,'low')
+df['close'] = col(df,'close')
+df['volume'] = col(df,'volume','vol','tick_volume','quote_volume')
 
 for c in ['open','high','low','close']:
     if df[c] is None:
         st.error(f"缺少字段: {c}")
+        st.write(df.columns.tolist())
         st.stop()
 
+# volume 可选
 if df['volume'] is None:
-    df['volume'] = 0
+    df['volume'] = 1
 
-# ========== 特征 ==========
+# ============= 特征工程（轻量）============
 def make_features(df):
     df = df.copy()
 
+    # 趋势
     df['ema20'] = df['close'].ewm(span=20).mean()
+    df['ema_distance'] = (df['close'] - df['ema20']) / df['close']
+
+    # 动量
     df['return_5'] = df['close'].pct_change(5)
     df['return_10'] = df['close'].pct_change(10)
 
+    # RSI简化
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss
     df['rsi'] = 100 - 100 / (1 + rs)
 
+    # 量能
     df['volume_ma20'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_ma20']
 
+    # ATR
     tr = pd.concat([
         df['high'] - df['low'],
         (df['high'] - df['close'].shift()).abs(),
@@ -99,34 +99,27 @@ def make_features(df):
     df.dropna(inplace=True)
     return df
 
-with st.spinner("特征工程"):
-    df = make_features(df)
-
+df = make_features(df)
 st.success("特征完成")
 
-# ========== 分割 ==========
-def split(df):
-    n = len(df)
-    return (
-        df.iloc[:int(n*0.6)],
-        df.iloc[int(n*0.6):int(n*0.8)],
-        df.iloc[int(n*0.8):]
-    )
+# ============= 分割 =============
+n = len(df)
+train = df.iloc[:int(n*0.6)]
+val   = df.iloc[int(n*0.6):int(n*0.8)]
+test  = df.iloc[int(n*0.8):]
 
-train, val, test = split(df)
 st.info(f"训练 {len(train)} | 验证 {len(val)} | 测试 {len(test)}")
 
-feat_cols = [
-    'ema_distance' if 'ema_distance' in df.columns else None,
-    'return_5','return_10','rsi','volume_ratio','atr_ratio','trend_align'
+features = [
+    'ema_distance','return_5','return_10','rsi',
+    'volume_ratio','atr_ratio','trend_align'
 ]
-feat_cols = [c for c in feat_cols if c is not None]
 
-# ========== 模型 ==========
+# ============= 模型 =============
 def train_model(train, val):
-    X_train = train[feat_cols]
+    X_train = train[features]
     y_train = train['target']
-    X_val = val[feat_cols]
+    X_val = val[features]
     y_val = val['target']
 
     if y_train.nunique() < 2:
@@ -134,13 +127,13 @@ def train_model(train, val):
         st.stop()
 
     model = xgb.XGBClassifier(
-        n_estimators=200,
+        n_estimators=300,
         max_depth=4,
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
         eval_metric='logloss',
-        early_stopping_rounds=20
+        early_stopping_rounds=30
     )
 
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
@@ -153,18 +146,12 @@ def train_model(train, val):
 
     return model
 
-with st.spinner("训练"):
-    model = train_model(train, val)
+model = train_model(train, val)
 
-# ========== 回测 ==========
+# ============= 回测（多空简化）============
 def backtest(df, probs, th):
     df = df.copy()
-    probs = np.array(probs)
-    if len(probs) != len(df):
-        probs = np.resize(probs, len(df))
-
     df['prob'] = probs
-    df['signal'] = (df['prob'] >= th).astype(int)
 
     equity = [0]
     position = 0
@@ -173,40 +160,42 @@ def backtest(df, probs, th):
 
     for i in range(1, len(df)):
         row = df.iloc[i]
-        prev = df.iloc[i-1]
         price = row['open']
+        signal = 1 if row['prob'] >= th else 0
 
-        if position == 1 and (row['close'] < row['ema20'] or row['signal'] == 0):
+        # 平仓条件：趋势反转
+        if position == 1 and row['close'] < row['ema20']:
             pnl = price - entry
             trades.append(pnl)
             equity.append(equity[-1] + pnl)
             position = 0
 
-        if prev['signal'] == 1 and position == 0:
+        # 开仓
+        if signal == 1 and position == 0:
             entry = price
             position = 1
 
         equity.append(equity[-1])
 
     return {
-        "total": sum(trades),
-        "win_rate": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
-        "trades": len(trades),
+        "交易": len(trades),
+        "胜率": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
+        "盈利": sum(trades),
         "equity": equity
     }
 
-# ========== 展示 ==========
-test_probs = model.predict_proba(test[feat_cols])[:,1]
-th = np.quantile(test_probs, 0.7)
+# ============= 阈值自适应 =============
+val_probs = model.predict_proba(val[features])[:,1]
+th = np.quantile(val_probs, 0.7)
 
-res = backtest(test, test_probs, th)
+res = backtest(test, model.predict_proba(test[features])[:,1], th)
 
 st.header("回测")
-st.metric("交易", res["trades"])
-st.metric("胜率", f"{res['win_rate']*100:.2f}%")
-st.metric("盈利", f"{res['total']:.2f}")
+st.metric("交易", res["交易"])
+st.metric("胜率", f"{res['胜率']*100:.2f}%")
+st.metric("盈利", f"{res['盈利']:.2f}")
 
-if res["trades"] > 0:
+if res["交易"] > 0:
     st.line_chart(pd.Series(res["equity"]))
 
 st.success("运行完毕")
