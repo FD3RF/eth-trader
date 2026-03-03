@@ -1,10 +1,10 @@
 """
-小利润交易策略完整版（优化版）
-- EMA趋势 + ADX过滤 + 结构突破
+小利润交易策略专业版（最终完整版）
+- EMA趋势 + ADX过滤 + 结构突破 + 成交量 + 假突破过滤
+- 本地数据缓存 + 增量更新
+- 模块化回测 + 边际贡献分析
 - 小止损小止盈 + 滑点 + 手续费
-- 模拟账户 + 回测绩效指标（胜率、盈亏比、夏普、最大回撤）
-- 数据缓存 + 增量更新
-- 模块化对比 + 边际贡献分析
+- 专业绩效指标：胜率、盈亏比、夏普、最大回撤
 """
 
 import streamlit as st
@@ -25,7 +25,7 @@ DATA_DIR = "market_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ==========================
-# 数据层（CSV + 增量）
+# 数据层（CSV + 增量更新）
 # ==========================
 def get_filename(tf):
     return os.path.join(DATA_DIR, f"{SYMBOL}_{tf}.csv")
@@ -67,8 +67,7 @@ def fetch_all_history(tf, days=365):
     current_end = end
     limit = 1000
     pbar = st.progress(0, text="正在拉取历史数据...")
-    # 估算总批次数（粗略）
-    total_batches = days // 3 + 1  # 每批约3天数据
+    total_batches = days // 3 + 1  # 粗略估计
     batch_count = 0
 
     while current_end > start:
@@ -77,11 +76,10 @@ def fetch_all_history(tf, days=365):
         if df_chunk.empty:
             break
         all_data.append(df_chunk)
-        # 更新current_end为这批数据的最早时间
         current_end = df_chunk["ts"].min()
         batch_count += 1
         pbar.progress(min(batch_count / total_batches, 1.0))
-        time.sleep(0.2)  # 礼貌性延迟
+        time.sleep(0.2)
 
     pbar.empty()
     if all_data:
@@ -122,7 +120,7 @@ def update_local_data(tf, days=365):
         return local
 
 # ==========================
-# 策略参数
+# 侧边栏参数
 # ==========================
 with st.sidebar:
     st.header("⚙️ 参数设置")
@@ -164,6 +162,13 @@ else:
     if df_raw.empty:
         st.warning("本地无数据，请点击「更新本地数据」")
         st.stop()
+
+# 检查数据完整性
+if "ts" not in df_raw.columns:
+    st.error("数据文件缺少 'ts' 列，可能已损坏，请重新更新数据。")
+    st.stop()
+
+df_raw["ts"] = pd.to_datetime(df_raw["ts"])  # 确保是datetime类型
 
 # 截取指定天数
 start_date = datetime.now() - timedelta(days=lookback)
@@ -253,8 +258,8 @@ def run_backtest(df, swing_highs, swing_lows, modules):
             if signal == "空" and not trend_down:
                 signal = None
 
-        # ADX过滤（内置）
-        if signal and modules.get("adx", True):  # 默认开启ADX
+        # ADX过滤（始终启用）
+        if signal:
             if row["ADX"] <= adx_thr:
                 signal = None
 
@@ -393,8 +398,7 @@ if run_btn:
         "structure": use_structure,
         "trend": use_trend,
         "volume": use_volume,
-        "fake": use_fake,
-        "adx": True  # ADX始终启用（可改为可选）
+        "fake": use_fake
     }
     with st.spinner("回测进行中..."):
         trades, win_rate, net_profit, sharpe, max_dd, rr, equity_curve, trade_cnt = run_backtest(
@@ -437,7 +441,7 @@ combinations = [
 
 results = []
 for comb in combinations:
-    modules = {**comb, "adx": True}
+    modules = {k: v for k, v in comb.items() if k != "name"}
     t, wr, npnl, shr, mdd, rr, _, cnt = run_backtest(df, swing_highs, swing_lows, modules)
     results.append({
         "组合": comb["name"],
@@ -472,7 +476,7 @@ if not base_row.empty:
     st.dataframe(pd.DataFrame(contrib), use_container_width=True)
 
 # ==========================
-# K线图
+# K线图（最后200根）
 # ==========================
 st.subheader("📉 K线图（最后200根）")
 df_plot = df.tail(200)
@@ -484,7 +488,7 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_fast"], name="EMA快", line=dict(color='yellow')))
 fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_slow"], name="EMA慢", line=dict(color='orange')))
 
-# 绘制结构点（最后部分）
+# 绘制结构点（仅显示最后200根内的）
 swing_highs_plot = [(t, p) for t, p, ct in swing_highs if t >= df_plot['ts'].min()]
 swing_lows_plot = [(t, p) for t, p, ct in swing_lows if t >= df_plot['ts'].min()]
 if swing_highs_plot:
