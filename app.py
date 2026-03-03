@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-5分钟合约多空策略（稳定可跑版）
-功能：
-- 特征工程
-- XGBoost未来上涨分类
-- 多空回测
-- 防空值/字段缺失
+5分钟多空策略（稳定可跑版）
+防 KeyError / AttributeError / 字段不匹配
 """
 
 import streamlit as st
@@ -14,20 +10,16 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-st.set_page_config(page_title="5分钟多空策略", layout="wide")
-st.title("🚀 5分钟合约多空策略")
+st.set_page_config(page_title="5分钟策略", layout="wide")
+st.title("🚀 5分钟多空策略")
 
-# =========================
-# 上传
-# =========================
+# ========== 上传 ==========
 uploaded_file = st.file_uploader("上传 CSV", type=["csv"])
 if uploaded_file is None:
     st.info("上传数据")
     st.stop()
 
-# =========================
-# 加载
-# =========================
+# ========== 加载 ==========
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
@@ -48,41 +40,36 @@ with st.spinner("加载中"):
 
 st.success(f"数据: {len(df)} 行")
 
-# =========================
-# 字段对齐
-# =========================
+# ====== 打印字段（关键）======
+st.write("字段列表：")
+st.write(df.columns)
+
+# ========== 字段对齐 ==========
 def col(df, *names):
     for n in names:
         if n in df.columns:
             return df[n]
     return None
 
-df['open'] = col(df, 'open')
-df['high'] = col(df, 'high')
-df['low'] = col(df, 'low')
-df['close'] = col(df, 'close')
-df['volume'] = col(df, 'volume','vol','tick_volume','quote_volume')
+df['open'] = col(df, 'open','Open')
+df['high'] = col(df, 'high','High')
+df['low'] = col(df, 'low','Low')
+df['close'] = col(df, 'close','Close')
+df['volume'] = col(df, 'volume','vol','Volume','tick_volume')
 
 for c in ['open','high','low','close']:
     if df[c] is None:
         st.error(f"缺少字段: {c}")
-        st.write(df.columns.tolist())
         st.stop()
 
-# volume可缺失，用0填
 if df['volume'] is None:
     df['volume'] = 0
 
-# =========================
-# 特征工程
-# =========================
+# ========== 特征 ==========
 def make_features(df):
     df = df.copy()
 
     df['ema20'] = df['close'].ewm(span=20).mean()
-    df['ema50'] = df['close'].ewm(span=50).mean()
-    df['ema_distance'] = (df['close'] - df['ema20']) / df['close']
-
     df['return_5'] = df['close'].pct_change(5)
     df['return_10'] = df['close'].pct_change(10)
 
@@ -105,7 +92,7 @@ def make_features(df):
 
     df['trend_align'] = (df['close'] > df['ema20']).astype(int)
 
-    # ===== 标签：未来是否上涨 =====
+    # 标签：未来是否上涨
     future = df['close'].pct_change(5).shift(-5)
     df['target'] = (future > 0).astype(int)
 
@@ -117,9 +104,7 @@ with st.spinner("特征工程"):
 
 st.success("特征完成")
 
-# =========================
-# 分割
-# =========================
+# ========== 分割 ==========
 def split(df):
     n = len(df)
     return (
@@ -132,13 +117,12 @@ train, val, test = split(df)
 st.info(f"训练 {len(train)} | 验证 {len(val)} | 测试 {len(test)}")
 
 feat_cols = [
-    'ema_distance','return_5','return_10','rsi',
-    'volume_ratio','atr_ratio','trend_align'
+    'ema_distance' if 'ema_distance' in df.columns else None,
+    'return_5','return_10','rsi','volume_ratio','atr_ratio','trend_align'
 ]
+feat_cols = [c for c in feat_cols if c is not None]
 
-# =========================
-# 模型
-# =========================
+# ========== 模型 ==========
 def train_model(train, val):
     X_train = train[feat_cols]
     y_train = train['target']
@@ -150,13 +134,13 @@ def train_model(train, val):
         st.stop()
 
     model = xgb.XGBClassifier(
-        n_estimators=300,
+        n_estimators=200,
         max_depth=4,
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
         eval_metric='logloss',
-        early_stopping_rounds=30
+        early_stopping_rounds=20
     )
 
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
@@ -172,17 +156,14 @@ def train_model(train, val):
 with st.spinner("训练"):
     model = train_model(train, val)
 
-# =========================
-# 回测（防空值）
-# =========================
+# ========== 回测 ==========
 def backtest(df, probs, th):
     df = df.copy()
-    # 防 numpy array 无 fillna
     probs = np.array(probs)
     if len(probs) != len(df):
         probs = np.resize(probs, len(df))
-    df['prob'] = probs
 
+    df['prob'] = probs
     df['signal'] = (df['prob'] >= th).astype(int)
 
     equity = [0]
@@ -195,14 +176,12 @@ def backtest(df, probs, th):
         prev = df.iloc[i-1]
         price = row['open']
 
-        # 平仓
         if position == 1 and (row['close'] < row['ema20'] or row['signal'] == 0):
             pnl = price - entry
             trades.append(pnl)
             equity.append(equity[-1] + pnl)
             position = 0
 
-        # 开仓
         if prev['signal'] == 1 and position == 0:
             entry = price
             position = 1
@@ -216,9 +195,7 @@ def backtest(df, probs, th):
         "equity": equity
     }
 
-# =========================
-# 回测展示
-# =========================
+# ========== 展示 ==========
 test_probs = model.predict_proba(test[feat_cols])[:,1]
 th = np.quantile(test_probs, 0.7)
 
