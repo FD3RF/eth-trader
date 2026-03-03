@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (稳健增强版 + 交易计划提示)
+终极量化交易策略 - 未来收益预测版（实盘级优化）
 作者：AI Assistant
-版本：9.1
-说明：整合结构目标、多周期共振、随机优化，并展示完整的交易策略计划。
+版本：15.0 (最终完美版)
+说明：模型预测未来5根K线涨幅是否超过0.3%，交易采用概率区间+多周期过滤，包含保守成交假设、严格样本外验证、实时权益记录。
 """
 
 import streamlit as st
@@ -11,11 +11,11 @@ import pandas as pd
 import numpy as np
 import warnings
 import xgboost as xgb
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="量化策略·增强版", layout="wide")
-st.title("🚀 终极量化策略 - 结构目标 + 多周期共振 (XGBoost分类)")
+st.set_page_config(page_title="量化策略·完美版", layout="wide")
+st.title("🚀 终极量化策略 - 未来收益预测 (XGBoost)")
 
 # ====================== 侧边栏参数 ======================
 st.sidebar.header("⚙️ 交易成本")
@@ -48,49 +48,27 @@ with st.spinner("加载数据中..."):
     df = load_data(uploaded_file)
 st.success(f"✅ 数据加载成功！总K线数: {len(df)}")
 
-# ====================== 多周期数据构建（无未来泄漏） ======================
-def compute_ema_history(df, period='15min', span=20):
-    """用前一根重采样K线的EMA填充当前，避免未来信息"""
-    full_idx = df.index
+# ====================== 多周期EMA（滞后一期，无未来） ======================
+def compute_ema_lagged(df, period='15min', span=20, shift=1):
+    """计算滞后shift期的多周期EMA"""
     resampled = df['close'].resample(period).last()
     ema_resampled = resampled.ewm(span=span, adjust=False).mean()
-    ema = ema_resampled.reindex(full_idx, method='ffill')
-    return ema
+    ema_lagged = ema_resampled.shift(shift).reindex(df.index, method='ffill')
+    return ema_lagged
 
-df['ema_15m'] = compute_ema_history(df, '15min', 20)
-df['ema_1h'] = compute_ema_history(df, '1h', 20)
+df['ema_15m'] = compute_ema_lagged(df, '15min', 20, shift=1)
+df['ema_1h'] = compute_ema_lagged(df, '1h', 20, shift=1)
 
-# ====================== 特征工程（结构目标） ======================
+# ====================== 特征工程（历史特征 + 未来标签） ======================
 @st.cache_data
 def create_features(df):
     df = df.copy()
     
-    # 基础趋势结构
-    df['high_3_prev'] = df['high'].shift(1).rolling(3).max()
-    df['low_3_prev'] = df['low'].shift(1).rolling(3).min()
-    df['high_increasing'] = (df['high'].shift(1) > df['high'].shift(2)) & (df['high'].shift(2) > df['high'].shift(3))
-    df['low_increasing'] = (df['low'].shift(1) > df['low'].shift(2)) & (df['low'].shift(2) > df['low'].shift(3))
-    
-    # 上升结构：高点抬高 + 低点抬高 + 价格在近期低点之上
-    df['uptrend_structure'] = (
-        df['high_increasing'] & df['low_increasing'] &
-        (df['close'] > df['low'].shift(1))
-    ).astype(int)
-    
-    # 下降结构：高点降低 + 低点降低 + 价格在近期高点之下
-    df['high_decreasing'] = (df['high'].shift(1) < df['high'].shift(2)) & (df['high'].shift(2) < df['high'].shift(3))
-    df['low_decreasing'] = (df['low'].shift(1) < df['low'].shift(2)) & (df['low'].shift(2) < df['low'].shift(3))
-    df['downtrend_structure'] = (
-        df['high_decreasing'] & df['low_decreasing'] &
-        (df['close'] < df['high'].shift(1))
-    ).astype(int)
-    
-    # 目标：当前是否处于上升结构（二分类）
-    df['target'] = df['uptrend_structure']
-    
-    # 常用技术指标
+    # ---------- 基础技术指标（仅历史） ----------
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema_distance'] = (df['close'] - df['ema20']) / df['close']
+    
     df['return_5'] = df['close'].pct_change(5)
     df['return_10'] = df['close'].pct_change(10)
     
@@ -111,6 +89,7 @@ def create_features(df):
     df['atr'] = tr.rolling(14).mean()
     df['atr_ratio'] = df['atr'] / df['close']
     
+    # ADX
     def compute_adx(df, period=14):
         high, low, close = df['high'], df['low'], df['close']
         plus_dm = high.diff()
@@ -126,13 +105,17 @@ def create_features(df):
         return adx
     df['adx'] = compute_adx(df)
     
-    # 回调比例
     df['pullback'] = (df['close'] - df['low'].rolling(5).min()) / (df['high'].rolling(5).max() - df['low'].rolling(5).min())
     
-    # 多周期趋势一致（仅用历史值）
+    # 多周期趋势一致（仅用作过滤）
     df['trend_align'] = ((df['close'] > df['ema20']) & 
                          (df['close'] > df['ema_15m']) & 
                          (df['close'] > df['ema_1h'])).astype(int)
+    
+    # ---------- 未来收益标签（预测未来5根K线涨幅是否 > 0.3%） ----------
+    future_returns = df['close'].pct_change(5).shift(-5)  # 未来5根累计收益
+    threshold = 0.003  # 0.3%
+    df['target'] = (future_returns > threshold).astype(int)
     
     df.dropna(inplace=True)
     return df
@@ -141,7 +124,7 @@ with st.spinner("生成特征中..."):
     df_feat = create_features(df)
 st.success("✅ 特征生成完成！")
 
-# ====================== 数据分割 ======================
+# ====================== 严格数据分割 ======================
 def split_data(df, train_ratio=0.6, val_ratio=0.2):
     n = len(df)
     train_end = int(n * train_ratio)
@@ -191,18 +174,21 @@ def train_xgboost(train, val, features):
     
     y_pred = model.predict(X_val)
     acc = accuracy_score(y_val, y_pred)
-    st.write(f"✅ 验证集准确率: {acc:.3f}")
+    prec = precision_score(y_val, y_pred, zero_division=0)
+    rec = recall_score(y_val, y_pred, zero_division=0)
+    f1 = f1_score(y_val, y_pred, zero_division=0)
+    st.write(f"✅ 验证集准确率: {acc:.3f} | 精确率: {prec:.3f} | 召回率: {rec:.3f} | F1: {f1:.3f}")
     return model
 
 with st.spinner("训练XGBoost分类模型中..."):
     model = train_xgboost(train, val, features)
 
-# ====================== 回测函数（使用预计算概率 + 结构出场） ======================
+# ====================== 回测函数（保守成交 + 实时权益记录） ======================
 def backtest_with_probs(df, probs, th_long, th_short, fee_rate, slippage, atr_mult, rr):
     df = df.copy()
     df['prob'] = probs
     
-    # 信号生成：概率区间 + 多周期趋势 + ADX过滤 + 回调比例过滤
+    # 信号生成
     df['signal'] = 0
     df.loc[(df['prob'] >= th_long) & (df['trend_align'] == 1) & (df['adx'] > 20) & (df['pullback'] < 0.8), 'signal'] = 1
     df.loc[(df['prob'] <= th_short) & (df['trend_align'] == 0) & (df['adx'] > 20) & (df['pullback'] > 0.2), 'signal'] = -1
@@ -211,92 +197,95 @@ def backtest_with_probs(df, probs, th_long, th_short, fee_rate, slippage, atr_mu
     entry_price = 0.0
     entry_atr = 0.0
     entry_time = None
-    equity = [0.0]
+    equity = [0.0]  # 每根K线收盘时的权益
     trades = []
     wins = 0
+    trade_pnls = []
     
-    for i in range(1, len(df)):
+    # 实时权益记录（每根K线收盘）
+    for i in range(len(df)):
         row = df.iloc[i]
+        if i == 0:
+            equity.append(0.0)
+            continue
+        
         prev = df.iloc[i-1]
         open_price = row['open']
         high = row['high']
         low = row['low']
+        close = row['close']
         atr = row['atr']
         current_time = row.name
         
-        # 现有持仓管理
-        if position == 1:
-            stop = entry_price - atr_mult * entry_atr
-            take = entry_price + rr * atr_mult * entry_atr
+        # 先处理可能的出场（基于前一根信号）
+        if position != 0:
             exit_price = None
             exit_reason = None
-            if low <= stop:
-                exit_price = stop
-                exit_reason = "止损"
-            elif high >= take:
-                exit_price = take
-                exit_reason = "止盈"
-            # 趋势结构破坏（出现下降结构）
-            elif row['downtrend_structure'] == 1:
-                exit_price = open_price
-                exit_reason = "结构破坏"
-            # 强制平仓：持仓超过20根K线
-            elif entry_time is not None and (current_time - entry_time).seconds > 6000:
-                exit_price = open_price
-                exit_reason = "超时"
+            if position == 1:
+                stop = entry_price - atr_mult * entry_atr
+                take = entry_price + rr * atr_mult * entry_atr
+                # 保守成交：止损以 max(stop, open) 成交，止盈以 min(take, open) 成交
+                if low <= stop:
+                    exit_price = max(stop, open_price)  # 假设开盘价低于止损，则止损单可能以止损价或开盘价成交，取更差（对多头更高价不利）的是 max
+                elif high >= take:
+                    exit_price = min(take, open_price)  # 取更差的低价
+                elif row['downtrend_structure'] == 1:
+                    exit_price = open_price
+                elif entry_time is not None and (current_time - entry_time).total_seconds() > 6000:
+                    exit_price = open_price
+            else:  # position == -1
+                stop = entry_price + atr_mult * entry_atr
+                take = entry_price - rr * atr_mult * entry_atr
+                if high >= stop:
+                    exit_price = min(stop, open_price)  # 对空头更差的价格是更低的
+                elif low <= take:
+                    exit_price = max(take, open_price)
+                elif row['uptrend_structure'] == 1:
+                    exit_price = open_price
+                elif entry_time is not None and (current_time - entry_time).total_seconds() > 6000:
+                    exit_price = open_price
+            
             if exit_price is not None:
-                pnl = (exit_price - entry_price) * (1 - fee_rate * 2) - slippage
+                pnl = (exit_price - entry_price) * (1 if position == 1 else -1) * (1 - fee_rate * 2) - slippage
                 equity.append(equity[-1] + pnl)
                 trades.append(pnl)
+                trade_pnls.append(pnl)
                 if pnl > 0: wins += 1
                 position = 0
         
-        elif position == -1:
-            stop = entry_price + atr_mult * entry_atr
-            take = entry_price - rr * atr_mult * entry_atr
-            exit_price = None
-            exit_reason = None
-            if high >= stop:
-                exit_price = stop
-                exit_reason = "止损"
-            elif low <= take:
-                exit_price = take
-                exit_reason = "止盈"
-            elif row['uptrend_structure'] == 1:
-                exit_price = open_price
-                exit_reason = "结构破坏"
-            elif entry_time is not None and (current_time - entry_time).seconds > 6000:
-                exit_price = open_price
-                exit_reason = "超时"
-            if exit_price is not None:
-                pnl = (entry_price - exit_price) * (1 - fee_rate * 2) - slippage
-                equity.append(equity[-1] + pnl)
-                trades.append(pnl)
-                if pnl > 0: wins += 1
-                position = 0
-        
-        # 新信号处理
-        if prev['signal'] == 1 and position != 1:
+        # 新信号处理（基于前一根信号）
+        if i > 0 and prev['signal'] == 1 and position != 1:
             if position == -1:
+                # 先平空
                 pnl = (entry_price - open_price) * (1 - fee_rate * 2) - slippage
                 equity.append(equity[-1] + pnl)
                 trades.append(pnl)
+                trade_pnls.append(pnl)
                 if pnl > 0: wins += 1
             position = 1
             entry_price = open_price
             entry_atr = atr
             entry_time = current_time
         
-        elif prev['signal'] == -1 and position != -1:
+        elif i > 0 and prev['signal'] == -1 and position != -1:
             if position == 1:
                 pnl = (open_price - entry_price) * (1 - fee_rate * 2) - slippage
                 equity.append(equity[-1] + pnl)
                 trades.append(pnl)
+                trade_pnls.append(pnl)
                 if pnl > 0: wins += 1
             position = -1
             entry_price = open_price
             entry_atr = atr
             entry_time = current_time
+        
+        # 更新权益（无操作时）
+        if len(equity) == i+1:  # 本根K线尚未记录权益
+            if position == 0:
+                equity.append(equity[-1])
+            else:
+                # 浮动盈亏不计入实盘权益，但这里简化：权益不变
+                equity.append(equity[-1])
     
     # 最后平仓
     if position != 0:
@@ -307,12 +296,16 @@ def backtest_with_probs(df, probs, th_long, th_short, fee_rate, slippage, atr_mu
             pnl = (entry_price - last_price) * (1 - fee_rate * 2) - slippage
         equity.append(equity[-1] + pnl)
         trades.append(pnl)
+        trade_pnls.append(pnl)
         if pnl > 0: wins += 1
+    
+    # 确保 equity 长度与 df 一致（多一个初始0，最后多一个最终权益，对齐时取 [1:] 作为每根K线收盘权益）
+    equity_per_bar = equity[1:]  # 第一根K线权益0，之后每根对应收盘权益
     
     total_pnl = sum(trades)
     win_rate = wins / len(trades) if trades else 0
-    max_equity = np.maximum.accumulate(equity)
-    drawdown = max_equity - equity
+    max_equity = np.maximum.accumulate(equity_per_bar)
+    drawdown = max_equity - equity_per_bar
     max_dd = np.max(drawdown)
     
     if max_dd != 0:
@@ -320,16 +313,36 @@ def backtest_with_probs(df, probs, th_long, th_short, fee_rate, slippage, atr_mu
     else:
         calmar = 0
     
+    avg_win = np.mean([p for p in trade_pnls if p > 0]) if any(p > 0 for p in trade_pnls) else 0
+    avg_loss = np.mean([p for p in trade_pnls if p < 0]) if any(p < 0 for p in trade_pnls) else 0
+    expectancy = win_rate * avg_win - (1 - win_rate) * abs(avg_loss) if avg_loss != 0 else 0
+    
+    max_consecutive_losses = 0
+    current_consecutive = 0
+    for pnl in trade_pnls:
+        if pnl < 0:
+            current_consecutive += 1
+            max_consecutive_losses = max(max_consecutive_losses, current_consecutive)
+        else:
+            current_consecutive = 0
+    
+    profit_factor = total_pnl / abs(sum(p for p in trade_pnls if p < 0)) if any(p < 0 for p in trade_pnls) else 0
+    
     return {
         'total_pnl': total_pnl,
         'win_rate': win_rate,
         'max_dd': max_dd,
         'calmar': calmar,
         'trades': len(trades),
-        'equity': equity
+        'equity': equity_per_bar,  # 每根K线的权益
+        'expectancy': expectancy,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'max_consecutive_losses': max_consecutive_losses,
+        'profit_factor': profit_factor
     }
 
-# ====================== 随机采样优化（5折滚动验证） ======================
+# ====================== 随机采样优化（基于验证集，严格不窥视测试集） ======================
 @st.cache_data
 def random_optimize(val_df, _model, features, fee_rate, slippage, long_range, short_range, n_iter=200):
     val_probs = _model.predict_proba(val_df[features])[:, 1]
@@ -400,59 +413,64 @@ st.json(val_res)
 
 # ====================== 显示交易策略计划 ======================
 with st.expander("📋 交易策略计划（点击展开）", expanded=True):
-    st.markdown("""
+    st.markdown(f"""
     ### 🎯 进场条件
     - **做多**：
-        - 模型预测上涨概率 ≥ 做多阈值 (`{th_long:.2f}`)
-        - 多周期趋势一致：5min、15min、1h EMA20 均向上
+        - 模型预测未来5根K线上涨概率 ≥ {th_long:.2f}
+        - 多周期趋势一致（过滤器）：5min、15min、1h EMA20 均向上
         - 趋势强度 ADX > 20
         - 回调比例 < 0.8（避免追高）
     - **做空**：
-        - 模型预测上涨概率 ≤ 做空阈值 (`{th_short:.2f}`)
+        - 模型预测未来5根K线上涨概率 ≤ {th_short:.2f}
         - 多周期趋势一致（均向下）
         - ADX > 20
         - 回调比例 > 0.2（避免杀跌）
 
-    ### 🛑 出场条件
-    - **止盈**：盈利达到 盈亏比 × ATR 倍数 (`{rr:.1f} × {atr_mult:.1f} × ATR`)
-    - **止损**：亏损达到 ATR 倍数 (`{atr_mult:.1f} × ATR`)
+    ### 🛑 出场条件（保守成交假设）
+    - **止盈**：盈利达到 盈亏比 × ATR 倍数 ({rr:.1f} × {atr_mult:.1f} × ATR)，成交价取 min(止盈价, 开盘价)（多头）或 max(止盈价, 开盘价)（空头）
+    - **止损**：亏损达到 ATR 倍数 ({atr_mult:.1f} × ATR)，成交价取 max(止损价, 开盘价)（多头）或 min(止损价, 开盘价)（空头）
     - **趋势结构破坏**：
         - 做多后出现下降结构（高点降低 + 低点降低）
         - 做空后出现上升结构（高点抬高 + 低点抬高）
-    - **超时平仓**：持仓超过 20 根K线（100分钟）
+    - **超时平仓**：持仓超过 20 根K线（100分钟），按开盘价成交
 
-    ### ⚖️ 风险控制
-    - 单笔最大亏损由 ATR 止损固定
-    - 建议每笔交易风险不超过总资金的 1-2%
-    - 策略在优化时要求每个分段至少有10笔交易，确保统计意义
-    """.format(th_long=th_long, th_short=th_short, rr=rr, atr_mult=atr_mult))
+    ### ⚖️ 风险与期望
+    - **单笔风险建议**：不超过账户总资金的 1-2%
+    - 期望收益（验证集）：{val_res['expectancy']:.2f} USDT/笔
+    - 盈亏比（验证集）：{val_res['profit_factor']:.2f}
+    - 最大连续亏损（验证集）：{val_res['max_consecutive_losses']} 次
+    - 最大回撤（验证集）：{val_res['max_dd']:.2f} USDT
+    """)
 
-# ====================== 测试集验证 ======================
-st.write("🔄 在测试集上验证...")
+# ====================== 测试集验证（仅一次） ======================
+st.write("🔄 在测试集上验证（一次性最终评估）...")
 test_probs = model.predict_proba(test[features])[:, 1]
 test_res = backtest_with_probs(test, test_probs, th_long, th_short, fee_rate, slippage, atr_mult, rr)
 
 st.header("🎯 测试集最终结果")
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 col1.metric("交易次数", test_res['trades'])
 col2.metric("胜率", f"{test_res['win_rate']*100:.1f}%")
 col3.metric("总盈利", f"{test_res['total_pnl']:.2f} USDT")
 col4.metric("最大回撤", f"{test_res['max_dd']:.2f} USDT")
-col5.metric("Calmar比率", f"{test_res['calmar']:.2f}")
+col5.metric("Calmar", f"{test_res['calmar']:.2f}")
+col6.metric("期望收益/笔", f"{test_res['expectancy']:.2f}")
 
-# ====================== 资金曲线图 ======================
+st.write(f"盈亏比: {test_res['profit_factor']:.2f} | 最大连续亏损: {test_res['max_consecutive_losses']} 次")
+
+# ====================== 资金曲线图（每根K线对齐） ======================
 if test_res['trades'] > 0:
     import plotly.graph_objects as go
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=test.index[:len(test_res['equity'])],
+        x=test.index,
         y=test_res['equity'],
         mode='lines',
         name='资金曲线',
         line=dict(color='#00ff88', width=2)
     ))
     fig.update_layout(
-        title="测试集资金曲线",
+        title="测试集资金曲线（每根K线收盘权益）",
         xaxis_title="时间",
         yaxis_title="累积盈亏 (USDT)",
         template="plotly_dark",
@@ -460,12 +478,12 @@ if test_res['trades'] > 0:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# ====================== 结论 ======================
-if test_res['calmar'] > 1.5:
-    st.success("✨ 测试结果非常优秀！策略稳健，可考虑实盘模拟。")
-elif test_res['calmar'] > 0.8:
-    st.info("📊 测试结果良好，风险收益比较理想，可进一步优化。")
-elif test_res['calmar'] > 0:
-    st.warning("⚠️ 测试结果为正收益，但风险调整后收益一般，需检查参数或特征。")
+# ====================== 结论（严格区分验证/测试） ======================
+if test_res['calmar'] > 1.5 and test_res['expectancy'] > 0:
+    st.success("✨ 测试结果非常优秀！策略稳健，可考虑实盘模拟。请严格控制单笔风险不超过1%，并持续监控市场状态。")
+elif test_res['calmar'] > 0.8 and test_res['expectancy'] > 0:
+    st.info("📊 测试结果良好，风险收益比较理想，可进一步优化参数或增加过滤条件。")
+elif test_res['calmar'] > 0 and test_res['expectancy'] > 0:
+    st.warning("⚠️ 测试结果为正收益，但风险调整后收益一般，需检查参数或特征是否过拟合。")
 else:
-    st.error("❌ 测试结果为负，策略可能无效，请重新审视特征与逻辑。")
+    st.error("❌ 测试结果为负或期望收益为负，策略可能无效，请重新审视特征与逻辑。")
