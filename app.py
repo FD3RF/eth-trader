@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 未来收益预测版（稳定可交易）
-版本：17.0
-作者：AI Assistant
+终极量化策略 - 实战优化版
+版本：18.0
 """
 
 import streamlit as st
@@ -11,14 +10,14 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-st.set_page_config(page_title="量化策略", layout="wide")
-st.title("🚀 未来收益预测量化系统")
+st.set_page_config(page_title="量化系统", layout="wide")
+st.title("🚀 实战级未来收益策略")
 
 # =========================
 # 上传
 # =========================
-uploaded_file = st.file_uploader("上传 CSV", type=["csv"])
-if uploaded_file is None:
+file = st.file_uploader("上传 CSV", type=["csv"])
+if file is None:
     st.info("上传数据")
     st.stop()
 
@@ -26,11 +25,10 @@ if uploaded_file is None:
 # 加载
 # =========================
 @st.cache_data
-def load_data(file):
+def load(file):
     df = pd.read_csv(file)
     df.columns = [c.lower() for c in df.columns]
 
-    # 时间
     if 'datetime' in df.columns:
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
@@ -40,9 +38,7 @@ def load_data(file):
     df.sort_index(inplace=True)
     return df
 
-with st.spinner("加载中"):
-    df = load_data(uploaded_file)
-
+df = load(file)
 st.success(f"数据：{len(df)} 行")
 
 # =========================
@@ -54,11 +50,11 @@ def get(df, *names):
             return df[n]
     return None
 
-df['open'] = get(df, 'open')
-df['high'] = get(df, 'high')
-df['low'] = get(df, 'low')
-df['close'] = get(df, 'close')
-df['volume'] = get(df, 'volume','vol','tick_volume','quote_volume')
+df['open'] = get(df,'open')
+df['high'] = get(df,'high')
+df['low'] = get(df,'low')
+df['close'] = get(df,'close')
+df['volume'] = get(df,'volume','vol','tick_volume','quote_volume')
 
 for c in ['open','high','low','close','volume']:
     if df[c] is None:
@@ -67,17 +63,14 @@ for c in ['open','high','low','close','volume']:
         st.stop()
 
 # =========================
-# 特征
+# 特征与标签（实战级）
 # =========================
-def features(df):
+def build(df):
     df = df.copy()
 
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
-    df['ema_distance'] = (df['close'] - df['ema20']) / df['close']
-
-    df['return_5'] = df['close'].pct_change(5)
-    df['return_10'] = df['close'].pct_change(10)
+    df['trend_align'] = (df['close'] > df['ema50']).astype(int)
 
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -88,26 +81,14 @@ def features(df):
     df['volume_ma20'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_ma20']
 
-    tr = pd.concat([
-        df['high'] - df['low'],
-        (df['high'] - df['close'].shift()).abs(),
-        (df['low'] - df['close'].shift()).abs()
-    ], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14).mean()
-    df['atr_ratio'] = df['atr'] / df['close']
-
-    df['trend_align'] = (df['close'] > df['ema20']).astype(int)
-
-    # ====== 标签：未来5根K线是否上涨 ======
+    # ===== 标签：未来5根K线上涨 > 0.2% =====
     future = df['close'].pct_change(5).shift(-5)
-    df['target'] = (future > 0).astype(int)   # 放宽条件：只要涨
+    df['target'] = (future > 0.002).astype(int)
 
     df.dropna(inplace=True)
     return df
 
-with st.spinner("特征工程"):
-    df = features(df)
-
+df = build(df)
 st.success("特征完成")
 
 # =========================
@@ -117,26 +98,23 @@ def split(df):
     n = len(df)
     return (
         df.iloc[:int(n*0.6)],
-        df.iloc[int(n*0.6):int(n*0.8)],
-        df.iloc[int(n*0.8):]
+        df.iloc[int(n*0.8):],
+        df.iloc[int(n*0.6):int(n*0.8)]
     )
 
-train, val, test = split(df)
+train, test, val = split(df)
 
 st.info(f"训练 {len(train)} | 验证 {len(val)} | 测试 {len(test)}")
 
-feat_cols = [
-    'ema_distance','return_5','return_10','rsi',
-    'volume_ratio','atr_ratio','trend_align'
-]
+feat = ['trend_align','rsi','volume_ratio']
 
 # =========================
 # 模型
 # =========================
-def train_model(train, val):
-    X_train = train[feat_cols]
+def train(train, val):
+    X_train = train[feat]
     y_train = train['target']
-    X_val = val[feat_cols]
+    X_val = val[feat]
     y_val = val['target']
 
     if y_train.nunique() < 2:
@@ -144,7 +122,7 @@ def train_model(train, val):
         st.stop()
 
     model = xgb.XGBClassifier(
-        n_estimators=300,
+        n_estimators=200,
         max_depth=4,
         learning_rate=0.05,
         subsample=0.8,
@@ -163,8 +141,7 @@ def train_model(train, val):
 
     return model
 
-with st.spinner("训练"):
-    model = train_model(train, val)
+model = train(train, val)
 
 # =========================
 # 回测（可交易）
@@ -172,12 +149,12 @@ with st.spinner("训练"):
 def backtest(df, probs, th):
     df = df.copy()
     df['prob'] = probs
-    df['signal'] = (df['prob'] >= th).astype(int)
+    df['signal'] = (df['prob'] >= th) & (df['trend_align'] == 1)
 
     equity = [0]
+    trades = []
     position = 0
     entry = 0
-    trades = []
 
     for i in range(1, len(df)):
         row = df.iloc[i]
@@ -185,31 +162,33 @@ def backtest(df, probs, th):
         price = row['open']
 
         # 平仓
-        if position == 1 and (row['close'] < row['ema20'] or row['signal'] == 0):
+        if position == 1 and (row['close'] < row['ema20'] or not row['signal']):
             pnl = price - entry
             trades.append(pnl)
             equity.append(equity[-1] + pnl)
             position = 0
 
         # 开仓
-        if prev['signal'] == 1 and position == 0:
+        if prev['signal'] and position == 0:
             entry = price
             position = 1
 
         equity.append(equity[-1])
 
     return {
-        "total": sum(trades),
-        "win_rate": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
         "trades": len(trades),
+        "win_rate": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
+        "total": sum(trades),
         "equity": equity
     }
 
-# 验证集回测
-val_probs = model.predict_proba(val[feat_cols])[:,1]
+# =========================
+# 验证与阈值
+# =========================
+val_probs = model.predict_proba(val[feat])[:,1]
 
-# 自适应阈值：取概率70百分位
-th = np.quantile(val_probs, 0.7)
+# 自适应阈值：85百分位
+th = np.quantile(val_probs, 0.85)
 
 res = backtest(val, val_probs, th)
 
@@ -218,7 +197,6 @@ st.metric("交易", res['trades'])
 st.metric("胜率", f"{res['win_rate']*100:.2f}%")
 st.metric("盈利", f"{res['total']:.2f}")
 
-# 曲线
 if res['trades'] > 0:
     st.line_chart(pd.Series(res['equity']))
 
