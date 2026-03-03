@@ -1,8 +1,11 @@
 """
-Streamlit 小利润策略（模拟交易 + 回测）
-可跑版本：OKX 5分钟数据
-资金：模拟 100 USDT
-策略：趋势 + 小回调 + 有利润进场
+小利润策略终极版
+- OKX真实数据
+- 多周期共振
+- 假突破过滤
+- 动态止盈
+- 回测
+- 进场提示
 """
 
 import streamlit as st
@@ -13,226 +16,162 @@ import requests
 import numpy as np
 from datetime import datetime, timedelta
 
-# =========================
-# 配置
-# =========================
-SYMBOL = "ETH-USDT-SWAP"
-INITIAL_BALANCE = 100.0
-ATR_MULT_STOP = 0.6
-ATR_MULT_TP = 0.8
-
 st.set_page_config(layout="wide")
-st.title("📈 小利润策略（模拟 + 回测）")
+st.title("🚀 小利润策略终极版")
 
-# =========================
-# 数据获取
-# =========================
-@st.cache_data(ttl=10)
-def fetch_5m(limit=300):
+SYMBOL = "ETH-USDT-SWAP"
+
+# -------------------------
+# 数据获取（OKX）
+# -------------------------
+def fetch_kline(bar="5m", limit=300):
     url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": "5m", "limit": limit}
-    r = requests.get(url, params=params)
-    data = r.json().get("data", [])
-    df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume","volCcy","volCcyQuote","confirm"])
-    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-    for col in ["open","high","low","close","volume"]:
-        df[col] = df[col].astype(float)
-    return df.sort_values("ts").reset_index(drop=True)
+    params = {"instId": SYMBOL, "bar": bar, "limit": limit}
+    r = requests.get(url, params=params, timeout=5)
+    data = r.json()
+    if data.get("code") == "0":
+        df = pd.DataFrame(data["data"], columns=[
+            "ts","open","high","low","close","volume","volCcy","volCcyQuote","confirm"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+        for c in ["open","high","low","close","volume"]:
+            df[c] = df[c].astype(float)
+        return df.sort_values("ts").reset_index(drop=True)
+    return None
 
-df = fetch_5m()
-if df.empty:
-    st.error("无法获取数据")
+df = fetch_kline()
+if df is None or df.empty:
+    st.error("无法获取OKX数据")
     st.stop()
 
-# =========================
-# 指标
-# =========================
+# -------------------------
+# 多周期数据（15m）
+# -------------------------
+df_15m = fetch_kline("15m", 200)
+if df_15m is not None:
+    df_15m["EMA20"] = ta.trend.ema_indicator(df_15m["close"], window=20)
+    df_15m["ADX"] = ta.trend.adx(df_15m["high"], df_15m["low"], df_15m["close"], window=14)
+
+# -------------------------
+# 指标计算
+# -------------------------
 df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=12)
 df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=50)
 df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
 df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
-df.dropna(inplace=True)
+
+df = df.dropna().reset_index(drop=True)
 latest = df.iloc[-1]
 prev = df.iloc[-2]
 
-# =========================
-# 小利润信号
-# =========================
-def small_profit_signal(latest, prev):
-    trend_up = latest["EMA_fast"] > latest["EMA_slow"] and latest["ADX"] > 20
-    structure_up = latest["low"] > prev["low"]          # 低点抬高
-    pullback = latest["close"] > latest["EMA_fast"]      # 回到快线以上
-    distance = abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * 0.7
+# -------------------------
+# 多周期共振
+# -------------------------
+tf_ok = True
+if df_15m is not None and len(df_15m) > 1:
+    latest_15 = df_15m.iloc[-1]
+    prev_15 = df_15m.iloc[-2]
+    tf_ok = latest_15["EMA20"] > prev_15["EMA20"]
 
-    if trend_up and structure_up and pullback and distance:
-        body = abs(latest["close"] - latest["open"])
-        lower_shadow = min(latest["close"], latest["open"]) - latest["low"]
-        if lower_shadow > body * 1.2 or latest["close"] > latest["open"]:
-            return "多"
+# -------------------------
+# 假突破过滤
+# -------------------------
+def fake_breakout(df):
+    last = df.iloc[-1]
+    body = abs(last["close"] - last["open"])
+    upper_shadow = last["high"] - max(last["close"], last["open"])
+    lower_shadow = min(last["close"], last["open"]) - last["low"]
 
-    trend_down = latest["EMA_fast"] < latest["EMA_slow"] and latest["ADX"] > 20
-    structure_down = latest["high"] < prev["high"]
-    pullback_down = latest["close"] < latest["EMA_fast"]
-    distance_down = abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * 0.7
+    # 假突破特征：影线大、实体小
+    if upper_shadow > body * 2 or lower_shadow > body * 2:
+        return True
+    return False
 
-    if trend_down and structure_down and pullback_down and distance_down:
-        body = abs(latest["close"] - latest["open"])
-        upper_shadow = latest["high"] - max(latest["close"], latest["open"])
-        if upper_shadow > body * 1.2 or latest["close"] < latest["open"]:
-            return "空"
+breakout_fake = fake_breakout(df)
 
-    return None
+# -------------------------
+# 趋势与结构
+# -------------------------
+trend_up = latest["EMA_fast"] > latest["EMA_slow"] and latest["ADX"] > 20
+structure_up = latest["low"] > prev["low"]
+distance_ok = abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * 0.7
 
-signal = small_profit_signal(latest, prev)
+signal = None
+if trend_up and structure_up and distance_ok and tf_ok and not breakout_fake:
+    if latest["close"] > latest["EMA_fast"]:
+        signal = "多"
 
-# =========================
-# 模拟账户
-# =========================
-if "balance" not in st.session_state:
-    st.session_state.balance = INITIAL_BALANCE
-    st.session_state.trades = []
+# -------------------------
+# 动态止损止盈（小利润）
+# -------------------------
+stop_loss = latest["close"] - latest["ATR"] * 0.6
+take_profit = latest["close"] + latest["ATR"] * 0.8
 
-def open_trade(direction, price, atr):
-    if direction == "多":
-        stop = price - atr * ATR_MULT_STOP
-        tp = price + atr * ATR_MULT_TP
-    else:
-        stop = price + atr * ATR_MULT_STOP
-        tp = price - atr * ATR_MULT_TP
+# -------------------------
+# 回测（100模拟）
+# -------------------------
+def backtest(df, days=7):
+    end = df["ts"].max()
+    start = end - timedelta(days=days)
+    data = df[df["ts"] >= start].copy()
 
-    risk = st.session_state.balance * 0.02
-    dist = abs(price - stop)
-    qty = risk / dist if dist > 0 else 0.01
-    qty = max(round(qty, 2), 0.01)
-
-    st.session_state.trades.append({
-        "time": latest["ts"],
-        "dir": direction,
-        "entry": price,
-        "stop": stop,
-        "tp": tp,
-        "qty": qty,
-        "status": "open"
-    })
-
-def close_positions(price):
-    for t in st.session_state.trades:
-        if t["status"] != "open":
-            continue
-        if t["dir"] == "多":
-            if price <= t["stop"]:
-                pnl = (t["stop"] - t["entry"]) * t["qty"]
-                st.session_state.balance += pnl
-                t["status"] = "stop"
-            elif price >= t["tp"]:
-                pnl = (t["tp"] - t["entry"]) * t["qty"]
-                st.session_state.balance += pnl
-                t["status"] = "tp"
-        else:
-            if price >= t["stop"]:
-                pnl = (t["entry"] - t["stop"]) * t["qty"]
-                st.session_state.balance += pnl
-                t["status"] = "stop"
-            elif price <= t["tp"]:
-                pnl = (t["entry"] - t["tp"]) * t["qty"]
-                st.session_state.balance += pnl
-                t["status"] = "tp"
-
-# 平仓检测
-close_positions(latest["close"])
-
-# 开仓
-if signal:
-    open_trade(signal, latest["close"], latest["ATR"])
-
-# =========================
-# 面板
-# =========================
-st.subheader("📊 状态")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("趋势", "多头" if latest["EMA_fast"] > latest["EMA_slow"] else "空头")
-with col2:
-    st.metric("ADX", f"{latest['ADX']:.1f}")
-with col3:
-    st.metric("信号", signal or "无")
-
-st.metric("模拟余额", f"{st.session_state.balance:.2f} USDT")
-
-# =========================
-# 回测（简化）
-# =========================
-def backtest(df):
-    balance = INITIAL_BALANCE
+    balance = 100
     trades = []
 
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i-1]
-        sig = small_profit_signal(row, prev)
-        atr = row["ATR"]
-        price = row["close"]
+    for i in range(1, len(data)):
+        row = data.iloc[i]
+        prev = data.iloc[i-1]
 
-        # 开仓
-        if sig == "多":
-            stop = price - atr * ATR_MULT_STOP
-            tp = price + atr * ATR_MULT_TP
-        elif sig == "空":
-            stop = price + atr * ATR_MULT_STOP
-            tp = price - atr * ATR_MULT_TP
-        else:
-            continue
+        # 信号同上
+        trend = row["EMA_fast"] > row["EMA_slow"] and row["ADX"] > 20
+        structure = row["low"] > prev["low"]
+        distance = abs(row["close"] - row["EMA_fast"]) < row["ATR"] * 0.7
+        if trend and structure and distance:
+            entry = row["close"]
+            stop = entry - row["ATR"] * 0.6
+            tp = entry + row["ATR"] * 0.8
+            qty = balance * 0.02 / abs(entry - stop)
 
-        risk = balance * 0.02
-        dist = abs(price - stop)
-        qty = risk / dist if dist > 0 else 0.01
-        qty = max(round(qty, 2), 0.01)
-
-        # 模拟立即平仓（5分钟后检测）
-        future = df.iloc[i]
-        if sig == "多":
-            if future["low"] <= stop:
-                pnl = (stop - price) * qty
-            elif future["high"] >= tp:
-                pnl = (tp - price) * qty
-            else:
-                pnl = 0
-        else:
-            if future["high"] >= stop:
-                pnl = (price - stop) * qty
-            elif future["low"] <= tp:
-                pnl = (price - tp) * qty
+            # 模拟下一根
+            next_row = data.iloc[i]
+            if next_row["low"] <= stop:
+                pnl = (stop - entry) * qty
+            elif next_row["high"] >= tp:
+                pnl = (tp - entry) * qty
             else:
                 pnl = 0
 
-        balance += pnl
-        trades.append({"pnl": pnl})
+            balance += pnl
+            trades.append(pnl)
 
-    win = len([t for t in trades if t["pnl"] > 0])
-    return {
-        "balance": balance,
-        "trades": len(trades),
-        "win_rate": win / len(trades) * 100 if trades else 0
-    }
+    win_rate = len([t for t in trades if t > 0]) / len(trades) * 100 if trades else 0
+    return balance, win_rate, len(trades)
 
-if st.button("回测"):
-    with st.spinner("回测中..."):
-        res = backtest(df)
-    st.success(f"""
-    回测完成：
-    - 终余额：{res['balance']:.2f}
-    - 交易数：{res['trades']}
-    - 胜率：{res['win_rate']:.1f}%
-    """)
+if st.sidebar.checkbox("回测"):
+    bal, wr, n = backtest(df)
+    st.metric("回测资金", f"{bal:.2f}")
+    st.metric("胜率", f"{wr:.1f}%")
+    st.metric("交易数", n)
 
-# =========================
+# -------------------------
+# UI提示
+# -------------------------
+st.subheader("📡 信号")
+if signal:
+    st.success(f"进场信号：{signal}")
+    st.write(f"止损：{stop_loss:.2f}")
+    st.write(f"止盈：{take_profit:.2f}")
+else:
+    st.info("无信号")
+
+# -------------------------
 # 图表
-# =========================
+# -------------------------
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
     x=df["ts"], open=df["open"], high=df["high"],
-    low=df["low"], close=df["close"]
+    low=df["low"], close=df["close"], name="K线"
 ))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_fast"], name="EMA12"))
-fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_slow"], name="EMA50"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_fast"], name="EMA_fast"))
+fig.add_trace(go.Scatter(x=df["ts"], y=df["EMA_slow"], name="EMA_slow"))
 st.plotly_chart(fig, use_container_width=True)
