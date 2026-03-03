@@ -1,141 +1,28 @@
 """
-小利润交易策略专业版（最终完整版 + 增强容错）
+小利润交易策略专业版（文件上传版）
+- 无需API，直接上传历史K线CSV
 - EMA趋势 + ADX过滤 + 结构突破 + 成交量 + 假突破过滤
-- 本地数据缓存 + 增量更新 + 重试机制
 - 模块化回测 + 边际贡献分析
 - 小止损小止盈 + 滑点 + 手续费
-- 专业绩效指标：胜率、盈亏比、夏普、最大回撤
 """
 
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import ta
-import os
-import time
 import numpy as np
 from datetime import datetime, timedelta
 
-st.set_page_config(layout="wide", page_title="小利润策略·专业版")
-st.title("📈 小利润交易策略（专业版）")
-
-SYMBOL = "ETH-USDT-SWAP"
-DATA_DIR = "market_data"
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# ==========================
-# 数据层（CSV + 增量更新 + 重试）
-# ==========================
-def get_filename(tf):
-    return os.path.join(DATA_DIR, f"{SYMBOL}_{tf}.csv")
-
-def load_local_data(tf):
-    if os.path.exists(get_filename(tf)):
-        return pd.read_csv(get_filename(tf), parse_dates=["ts"])
-    return pd.DataFrame()
-
-def save_local_data(df, tf):
-    df = df.drop_duplicates(subset=["ts"]).sort_values("ts")
-    df.to_csv(get_filename(tf), index=False)
-
-def fetch_okx_chunk(tf, before, limit=1000):
-    """拉取单批K线数据（返回DataFrame或空）"""
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": tf, "limit": limit}
-    if before:
-        params["before"] = before
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json().get("data", [])
-        if not data:
-            return pd.DataFrame()
-        df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close", "vol", "volCcy", "volCcyQuote", "confirm"])
-        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-        for c in ["open", "high", "low", "close", "vol"]:
-            df[c] = df[c].astype(float)
-        return df
-    except Exception as e:
-        st.error(f"请求失败: {e}")
-        return pd.DataFrame()
-
-def fetch_all_history(tf, days=365):
-    """拉取全部历史数据（从当前向前追溯）"""
-    end = datetime.now()
-    start = end - timedelta(days=days)
-    all_data = []
-    current_end = end
-    limit = 1000
-    pbar = st.progress(0, text="正在拉取历史数据...")
-    total_batches = days // 3 + 1
-    batch_count = 0
-
-    while current_end > start:
-        before = int(current_end.timestamp() * 1000)
-        df_chunk = fetch_okx_chunk(tf, before, limit)
-        if df_chunk.empty:
-            break
-        all_data.append(df_chunk)
-        current_end = df_chunk["ts"].min()
-        batch_count += 1
-        pbar.progress(min(batch_count / total_batches, 1.0))
-        time.sleep(0.2)
-
-    pbar.empty()
-    if all_data:
-        full = pd.concat(all_data, ignore_index=True).sort_values("ts").drop_duplicates().reset_index(drop=True)
-        full = full[full["ts"] >= start]
-        return full
-    return pd.DataFrame()
-
-def update_local_data(tf, days=365):
-    """增量更新本地数据（带重试和校验）"""
-    local = load_local_data(tf)
-    if local.empty:
-        # 首次拉取，尝试多次
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            st.info(f"尝试拉取数据 ({attempt+1}/{max_attempts})...")
-            df = fetch_all_history(tf, days)
-            if not df.empty and "ts" in df.columns and len(df) > 0:
-                save_local_data(df, tf)
-                return df
-            time.sleep(2)
-        st.error("多次尝试后仍无法获取有效数据，请检查网络或稍后重试。")
-        return pd.DataFrame()
-    else:
-        # 增量更新
-        last_ts = local["ts"].max()
-        now = datetime.now()
-        new_chunks = []
-        current = now
-        while current > last_ts:
-            before = int(current.timestamp() * 1000)
-            chunk = fetch_okx_chunk(tf, before, 1000)
-            if chunk.empty:
-                break
-            chunk = chunk[chunk["ts"] > last_ts]
-            if not chunk.empty:
-                new_chunks.append(chunk)
-            current = chunk["ts"].min() if not chunk.empty else last_ts
-            time.sleep(0.2)
-        if new_chunks:
-            new_df = pd.concat(new_chunks, ignore_index=True)
-            combined = pd.concat([local, new_df]).drop_duplicates(subset=["ts"]).sort_values("ts")
-            save_local_data(combined, tf)
-            return combined
-        return local
+st.set_page_config(layout="wide", page_title="小利润策略·上传版")
+st.title("📈 小利润交易策略（文件上传版）")
 
 # ==========================
 # 侧边栏参数
 # ==========================
 with st.sidebar:
     st.header("⚙️ 参数设置")
-    tf = st.selectbox("周期", ["5m", "15m"], index=0)
-    days = st.selectbox("回测长度", ["30天", "90天", "180天", "365天"], index=1)
-    days_map = {"30天": 30, "90天": 90, "180天": 180, "365天": 365}
-    lookback = days_map[days]
-
+    tf = st.selectbox("周期（仅用于指标）", ["5m", "15m"], index=0)
+    
     st.divider()
     st.subheader("🧩 模块开关")
     use_structure = st.checkbox("结构突破", value=True)
@@ -154,40 +41,27 @@ with st.sidebar:
     risk_pct = st.slider("单笔风险 %", 0.5, 2.0, 1.0, step=0.1)
     slippage = st.number_input("滑点 %", 0.0, 0.2, 0.05, step=0.01)
 
-    update_btn = st.button("🔄 更新本地数据")
-    run_btn = st.button("🚀 运行回测")
+    st.divider()
+    uploaded_file = st.file_uploader("📂 上传历史K线CSV", type=["csv"])
 
 # ==========================
 # 数据加载
 # ==========================
-if update_btn:
-    with st.spinner("正在更新数据..."):
-        df_raw = update_local_data(tf, days=lookback)
-        if not df_raw.empty:
-            st.success("数据更新完成")
-        else:
-            st.stop()  # 数据拉取失败，停止执行
+if uploaded_file is not None:
+    df_raw = pd.read_csv(uploaded_file, parse_dates=["ts"])
+    st.success(f"文件加载成功，共 {len(df_raw)} 行")
 else:
-    df_raw = load_local_data(tf)
-    if df_raw.empty:
-        st.warning("本地无数据，请点击「更新本地数据」")
-        st.stop()
-
-# 严格检查数据完整性
-if "ts" not in df_raw.columns:
-    st.error("数据文件缺少 'ts' 列，可能已损坏，请重新更新数据。")
+    st.warning("请上传CSV文件（包含列: ts, open, high, low, close, vol）")
     st.stop()
 
-df_raw["ts"] = pd.to_datetime(df_raw["ts"])  # 确保是datetime类型
-
-# 截取指定天数
-start_date = datetime.now() - timedelta(days=lookback)
-df_raw = df_raw[df_raw["ts"] >= start_date].reset_index(drop=True)
-if df_raw.empty:
-    st.error(f"数据不足，请尝试更短周期或更新数据")
+# 检查必填列
+required_cols = ["ts", "open", "high", "low", "close", "vol"]
+if not all(col in df_raw.columns for col in required_cols):
+    st.error(f"CSV必须包含列: {required_cols}")
     st.stop()
 
-st.success(f"数据范围: {df_raw['ts'].min()} 至 {df_raw['ts'].max()} ({len(df_raw)} 根K线)")
+df_raw = df_raw.sort_values("ts").reset_index(drop=True)
+st.write(f"时间范围: {df_raw['ts'].min()} 至 {df_raw['ts'].max()}")
 
 # ==========================
 # 指标计算
@@ -240,7 +114,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         row = df.iloc[i]
         current_time = row['ts']
 
-        # 获取截止当前时间的结构点
         valid_highs = [(t, p) for t, p, ct in swing_highs if ct <= current_time]
         valid_lows = [(t, p) for t, p, ct in swing_lows if ct <= current_time]
         last_high = valid_highs[-1] if valid_highs else None
@@ -251,7 +124,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         bull_struct = prev_low and last_low and last_low[1] > prev_low[1]
         bear_struct = prev_high and last_high and last_high[1] < prev_high[1]
 
-        # 基础信号：结构突破
         signal = None
         if modules["structure"]:
             if bull_struct and last_high and row["close"] > last_high[1]:
@@ -259,7 +131,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
             elif bear_struct and last_low and row["close"] < last_low[1]:
                 signal = "空"
 
-        # 趋势过滤
         if signal and modules["trend"]:
             trend_up = row["EMA_fast"] > row["EMA_slow"]
             trend_down = row["EMA_fast"] < row["EMA_slow"]
@@ -268,25 +139,20 @@ def run_backtest(df, swing_highs, swing_lows, modules):
             if signal == "空" and not trend_down:
                 signal = None
 
-        # ADX过滤（始终启用）
         if signal:
             if row["ADX"] <= adx_thr:
                 signal = None
 
-        # 成交量放大
         if signal and modules["volume"]:
             if row["vol"] <= row["volume_ma"] * vol_mult:
                 signal = None
 
-        # 假突破过滤
         if signal and modules["fake"]:
             if is_fake(row):
                 signal = None
 
-        # 开仓
         if signal and position is None:
             entry_price = df.iloc[i+1]["open"]
-            # 滑点
             if signal == "多":
                 entry_price *= (1 + slippage/100)
                 sl = entry_price - row["ATR"] * sl_mult
@@ -318,7 +184,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
                     "open_time": df.iloc[i+1]["ts"]
                 }
 
-        # 持仓管理
         if position:
             exit_price = None
             reason = None
@@ -346,7 +211,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
                 exit_price = df.iloc[-1]["close"]
                 reason = "时间"
 
-            # 离场滑点
             if position["dir"] == "多":
                 exit_price *= (1 - slippage/100)
             else:
@@ -368,7 +232,6 @@ def run_backtest(df, swing_highs, swing_lows, modules):
 
         equity_curve.append(capital)
 
-    # 绩效计算
     if trades:
         df_t = pd.DataFrame(trades)
         wins = len(df_t[df_t["盈亏"] > 0])
@@ -376,22 +239,16 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         total = wins + losses
         win_rate = wins / total * 100 if total > 0 else 0
         net_profit = capital - 20
-        # 盈亏比
         avg_win = df_t[df_t["盈亏"]>0]["盈亏"].mean() if wins>0 else 0
         avg_loss = abs(df_t[df_t["盈亏"]<0]["盈亏"].mean()) if losses>0 else 0
         rr = avg_win / avg_loss if avg_loss>0 else 0
 
-        # 夏普比率
         if len(equity_curve) > 1:
             returns = np.diff(equity_curve) / equity_curve[:-1]
-            if np.std(returns) > 1e-9:
-                sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365*24*12)
-            else:
-                sharpe = 0
+            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365*24*12) if np.std(returns) > 1e-9 else 0
         else:
             sharpe = 0
 
-        # 最大回撤
         peak = np.maximum.accumulate(equity_curve)
         drawdown = (peak - equity_curve) / peak
         max_dd = np.max(drawdown) * 100
@@ -401,9 +258,9 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         return [], 0, 0, 0, 0, 0, equity_curve, 0
 
 # ==========================
-# 运行回测（当前模块组合）
+# 运行回测
 # ==========================
-if run_btn:
+if st.sidebar.button("🚀 运行回测"):
     modules = {
         "structure": use_structure,
         "trend": use_trend,
@@ -415,7 +272,7 @@ if run_btn:
             df, swing_highs, swing_lows, modules
         )
 
-    st.subheader(f"📊 回测结果 ({days})")
+    st.subheader(f"📊 回测结果")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("交易次数", trade_cnt)
     col2.metric("胜率", f"{win_rate:.1f}%")
@@ -425,7 +282,6 @@ if run_btn:
     col6.metric("最大回撤", f"{max_dd:.2f}%")
 
     if trades:
-        # 资金曲线
         fig_eq = go.Figure()
         times = df['ts'].iloc[:len(equity_curve)]
         fig_eq.add_trace(go.Scatter(x=times, y=equity_curve, mode='lines', name='资金曲线'))
@@ -486,7 +342,7 @@ if not base_row.empty:
     st.dataframe(pd.DataFrame(contrib), use_container_width=True)
 
 # ==========================
-# K线图（最后200根）
+# K线图
 # ==========================
 st.subheader("📉 K线图（最后200根）")
 df_plot = df.tail(200)
@@ -498,7 +354,6 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_fast"], name="EMA快", line=dict(color='yellow')))
 fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["EMA_slow"], name="EMA慢", line=dict(color='orange')))
 
-# 绘制结构点（仅显示最后200根内的）
 swing_highs_plot = [(t, p) for t, p, ct in swing_highs if t >= df_plot['ts'].min()]
 swing_lows_plot = [(t, p) for t, p, ct in swing_lows if t >= df_plot['ts'].min()]
 if swing_highs_plot:
