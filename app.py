@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (滚动交叉验证+LightGBM+稳健优化)
+终极量化交易策略 - 多空阈值分离优化版 (滚动交叉验证 + XGBoost)
 作者：AI Assistant
-版本：8.0
+版本：8.1 (兼容XGBoost)
 说明：上传ETHUSDT_5m数据，系统自动优化多空阈值，输出测试集结果。
       包含滚动验证、增强特征、趋势过滤、强制平仓等机制，有效防止过拟合。
 """
@@ -11,12 +11,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import warnings
-import lightgbm as lgb
+import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="量化策略·稳健优化版", layout="wide")
-st.title("🚀 终极量化策略 - 滚动交叉验证版 (稳健盈利)")
+st.title("🚀 终极量化策略 - 滚动交叉验证版 (XGBoost)")
 
 # ====================== 侧边栏参数 ======================
 st.sidebar.header("⚙️ 交易成本")
@@ -165,40 +165,78 @@ st.info(f"📊 训练集: {len(train)} | 验证集: {len(val)} | 测试集: {len
 # ====================== 特征列 ======================
 features = [col for col in df_feat.columns if col not in ['open','high','low','close','volume','target','trend']]
 
-# ====================== 训练LightGBM回归模型 ======================
-def train_lightgbm(train, val, features):
+# ====================== 训练XGBoost回归模型（自适应早停） ======================
+def train_xgboost(train, val, features):
     X_train = train[features]
     y_train = train['target']
     X_val = val[features]
     y_val = val['target']
     
-    model = lgb.LGBMRegressor(
-        n_estimators=1000,
-        max_depth=5,
-        learning_rate=0.01,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        random_state=42,
-        verbose=-1
-    )
+    model = None
+    try:
+        # 尝试使用 early_stopping_rounds (新版本XGBoost)
+        model = xgb.XGBRegressor(
+            n_estimators=1000,
+            max_depth=5,
+            learning_rate=0.01,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=42,
+            early_stopping_rounds=50,
+            eval_metric='rmse'
+        )
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
+        st.info("✅ 使用 early_stopping_rounds 训练成功")
+    except TypeError:
+        try:
+            # 尝试使用 callbacks (xgboost 2.x 推荐)
+            model = xgb.XGBRegressor(
+                n_estimators=1000,
+                max_depth=5,
+                learning_rate=0.01,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.1,
+                reg_lambda=0.1,
+                random_state=42,
+                eval_metric='rmse'
+            )
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                callbacks=[xgb.callback.EarlyStopping(rounds=50)],
+                verbose=False
+            )
+            st.info("✅ 使用 callbacks 训练成功")
+        except (TypeError, AttributeError):
+            # 降级为固定迭代次数
+            st.warning("⚠️ 当前XGBoost版本不支持早停，将使用固定迭代次数训练。")
+            model = xgb.XGBRegressor(
+                n_estimators=200,  # 适当减少
+                max_depth=5,
+                learning_rate=0.01,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.1,
+                reg_lambda=0.1,
+                random_state=42
+            )
+            model.fit(X_train, y_train)
+            st.info("✅ 使用固定迭代次数训练成功")
     
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]
-    )
-    
-    # 输出验证集RMSE
     y_pred = model.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, y_pred))
     st.write(f"✅ 验证集 RMSE: {rmse:.6f}")
-    
     return model
 
-with st.spinner("训练LightGBM回归模型中..."):
-    model = train_lightgbm(train, val, features)
+with st.spinner("训练XGBoost回归模型中..."):
+    model = train_xgboost(train, val, features)
 
 # ====================== 回测函数（增加趋势过滤、强制平仓） ======================
 def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr):
