@@ -1,7 +1,11 @@
 """
-5分钟趋势合约系统（实时版）- 性能优化版
+5分钟趋势合约系统（优化版）- 进一步性能优化 + 信号频率调整
 策略：EMA趋势 + ADX强度 + ATR自适应回调 + K线确认 + 结构支撑阻力
-优化：API缓存延长、指标计算缓存、轻量默认参数
+优化：
+  1. 指标计算频率降低至15秒一次
+  2. 缓存分离，UI只读
+  3. 定期清理session_state
+  4. 参数调优（ADX阈值降至22，回调倍数放宽至0.7）
 """
 
 import streamlit as st
@@ -17,7 +21,7 @@ import numpy as np
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(layout="wide")
-st.title("📈 5分钟趋势合约系统（优化版）")
+st.title("📈 5分钟趋势合约系统（极速优化版）")
 
 SYMBOL = "ETH-USDT-SWAP"
 CACHE_FILE_5M = "market_data_5m_cache.csv"
@@ -29,15 +33,15 @@ ACCOUNT_FILE = "account.json"
 st_autorefresh(interval=5000, key="refresh")
 
 # ==========================
-# 侧边栏参数（默认值优化）
+# 侧边栏参数（调整默认值以增加信号频率）
 # ==========================
 st.sidebar.header("⚙️ 策略参数")
-adx_threshold = st.sidebar.slider("ADX趋势阈值", 20, 40, 25, help="ADX大于此值才认为有趋势")
-ema_period_fast = st.sidebar.slider("快线EMA周期", 10, 30, 12, help="原20，优化为12")  # 原20→12
-ema_period_slow = st.sidebar.slider("慢线EMA周期", 30, 100, 50, help="原60，优化为50")  # 原60→50
+adx_threshold = st.sidebar.slider("ADX趋势阈值", 20, 40, 22, help="原25→22，降低以捕捉更多趋势")  # 降低阈值
+ema_period_fast = st.sidebar.slider("快线EMA周期", 10, 30, 12)
+ema_period_slow = st.sidebar.slider("慢线EMA周期", 30, 100, 50)
 atr_period = st.sidebar.slider("ATR周期", 7, 30, 14)
-lookback_sr = st.sidebar.slider("支撑/阻力周期（根K线）", 10, 50, 15, help="原20，优化为15")  # 原20→15
-callback_atr_mult = st.sidebar.slider("回调距离（ATR倍数）", 0.3, 1.0, 0.5, step=0.1, help="价格距离EMA20的最大ATR倍数")
+lookback_sr = st.sidebar.slider("支撑/阻力周期（根K线）", 10, 50, 15)
+callback_atr_mult = st.sidebar.slider("回调距离（ATR倍数）", 0.3, 1.0, 0.7, step=0.1, help="原0.5→0.7，放宽回调条件")  # 放宽倍数
 risk_reward = st.sidebar.slider("盈亏比", 1.0, 3.0, 2.0, step=0.1)
 risk_percent = st.sidebar.slider("单笔风险 (%)", 1.0, 5.0, 2.0, step=0.5)
 initial_balance = st.sidebar.number_input("初始资金 (USDT)", value=100.0, step=10.0)
@@ -54,9 +58,9 @@ if st.sidebar.button("🔄 强制刷新数据"):
     st.rerun()
 
 # ==========================
-# 数据获取（缓存时间延长）
+# 数据获取（缓存时间延长至60秒）
 # ==========================
-@st.cache_data(ttl=30)  # 原3秒→30秒，大幅减少API调用
+@st.cache_data(ttl=60)  # 原30秒→60秒，进一步减少API调用
 def fetch_okx_candles(bar="5m", limit=300):
     url = "https://www.okx.com/api/v5/market/candles"
     params = {"instId": SYMBOL, "bar": bar, "limit": limit}
@@ -117,7 +121,7 @@ def get_15m_data():
         else:
             return pd.DataFrame()
 
-@st.cache_data(ttl=2)  # 实时价格缓存2秒，足够实时
+@st.cache_data(ttl=2)  # 实时价格缓存2秒
 def get_ticker():
     """获取实时最新价"""
     url = f"https://www.okx.com/api/v5/market/ticker?instId={SYMBOL}"
@@ -131,7 +135,7 @@ def get_ticker():
     return None
 
 # ==========================
-# 数据加载与缓存计算
+# 数据加载与缓存计算（控制计算频率）
 # ==========================
 df_5m = get_5m_data()
 if df_5m.empty:
@@ -145,17 +149,14 @@ if df_15m.empty and use_tf_filter:
 
 real_price = get_ticker()
 
-# 获取最新K线时间戳，用于判断数据是否更新
-latest_ts = df_5m["ts"].iloc[-1]
+# 初始化session_state中的时间戳控制
+if "last_calc_time" not in st.session_state:
+    st.session_state.last_calc_time = 0
 
-# 初始化session_state中的缓存变量
-if "cached_df" not in st.session_state:
-    st.session_state.cached_df = None
-    st.session_state.cached_ts = None
-
-# 只有当数据时间戳变化时，才重新计算指标
-if st.session_state.cached_ts != latest_ts:
-    # 数据更新，重新计算
+current_time = time.time()
+# 每隔15秒才重新计算指标（即使数据有更新）
+if current_time - st.session_state.last_calc_time > 15:
+    # 执行指标计算
     df = df_5m.copy()
     df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=ema_period_fast)
     df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_period_slow)
@@ -171,41 +172,47 @@ if st.session_state.cached_ts != latest_ts:
     df["trend_down_streak"] = df["trend_down_confirm"].rolling(trend_confirm_bars).sum() == trend_confirm_bars
     df = df.dropna().reset_index(drop=True)
 
-    # 缓存结果
+    # 缓存计算结果
     st.session_state.cached_df = df
-    st.session_state.cached_ts = latest_ts
-else:
-    # 数据未变，直接使用缓存
-    df = st.session_state.cached_df
+    st.session_state.last_calc_time = current_time
 
-# 确保df不为空
+    # 同时缓存15分钟数据（如果需要）
+    if use_tf_filter and not df_15m.empty:
+        df_15m_calc = df_15m.copy()
+        df_15m_calc["EMA20"] = ta.trend.ema_indicator(df_15m_calc["close"], window=20)
+        df_15m_calc = df_15m_calc.dropna().reset_index(drop=True)
+        st.session_state.cached_15m = df_15m_calc
+else:
+    # 使用缓存的数据
+    df = st.session_state.get("cached_df", None)
+    if df is None:
+        # 如果缓存为空（首次运行），强制计算一次
+        st.rerun()
+
+# 确保df存在
 if df is None or df.empty:
-    st.error("指标计算失败")
+    st.error("指标计算失败，请稍后重试")
     st.stop()
 
 latest = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else latest
 
 # ==========================
-# 15分钟EMA计算（单独缓存）
+# 15分钟EMA方向判断（使用缓存）
 # ==========================
 tf_ok = True
 if use_tf_filter and not df_15m.empty:
-    if "cached_15m_ema" not in st.session_state or st.session_state.cached_15m_ts != df_15m["ts"].iloc[-1]:
-        df_15m["EMA20"] = ta.trend.ema_indicator(df_15m["close"], window=20)
-        df_15m = df_15m.dropna().reset_index(drop=True)
-        st.session_state.cached_15m = df_15m
-        st.session_state.cached_15m_ts = df_15m["ts"].iloc[-1]
-    else:
-        df_15m = st.session_state.cached_15m
-
-    if len(df_15m) > 1:
-        latest_15m = df_15m.iloc[-1]
-        prev_15m = df_15m.iloc[-2]
-        if latest["trend_up_streak"]:
-            tf_ok = latest_15m["EMA20"] > prev_15m["EMA20"]
-        elif latest["trend_down_streak"]:
-            tf_ok = latest_15m["EMA20"] < prev_15m["EMA20"]
+    if "cached_15m" in st.session_state:
+        df_15m_calc = st.session_state.cached_15m
+        if len(df_15m_calc) > 1:
+            latest_15m = df_15m_calc.iloc[-1]
+            prev_15m = df_15m_calc.iloc[-2]
+            if latest["trend_up_streak"]:
+                tf_ok = latest_15m["EMA20"] > prev_15m["EMA20"]
+            elif latest["trend_down_streak"]:
+                tf_ok = latest_15m["EMA20"] < prev_15m["EMA20"]
+        else:
+            tf_ok = False
     else:
         tf_ok = False
 
@@ -219,7 +226,7 @@ elif latest["trend_down_streak"] and latest["ADX"] > adx_threshold and tf_ok:
     trend = "空"
 
 # ==========================
-# 回调入场信号
+# 回调入场信号（使用放宽的参数）
 # ==========================
 signal = None
 if trend == "多":
@@ -240,7 +247,7 @@ elif trend == "空":
             signal = "空"
 
 # ==========================
-# 信号持久化（不变）
+# 信号持久化（限制历史长度，避免内存过大）
 # ==========================
 def load_signal_history():
     if os.path.exists(SIGNAL_HISTORY_FILE):
@@ -252,6 +259,9 @@ def load_signal_history():
     return []
 
 def save_signal_history(history):
+    # 只保留最近100条
+    if len(history) > 100:
+        history = history[-100:]
     serializable = []
     for item in history:
         copy = item.copy()
@@ -273,12 +283,13 @@ if signal:
             "ema_fast": latest["EMA_fast"],
             "atr": latest["ATR"]
         })
-        if len(st.session_state.signal_history) > 50:
-            st.session_state.signal_history = st.session_state.signal_history[-50:]
+        # 限制内存中的历史长度
+        if len(st.session_state.signal_history) > 100:
+            st.session_state.signal_history = st.session_state.signal_history[-100:]
         save_signal_history(st.session_state.signal_history)
 
 # ==========================
-# 模拟账户（持久化）
+# 模拟账户（持久化）- 保持不变，但增加交易记录清理
 # ==========================
 class TradingAccount:
     def __init__(self, initial_balance):
@@ -297,6 +308,9 @@ class TradingAccount:
             self.reset()
 
     def save(self):
+        # 清理过期交易记录（保留最近50笔）
+        if len(self.trades) > 50:
+            self.trades = self.trades[-50:]
         data = {
             'balance': self.balance,
             'position': self.position,
@@ -424,7 +438,7 @@ if account.position:
         st.sidebar.info(f"📌 平仓: {reason}, 盈亏: {net:+.2f} USDT")
 
 # ==========================
-# 胜率统计（不变）
+# 胜率统计
 # ==========================
 def calculate_performance(trades):
     if not trades:
@@ -449,7 +463,7 @@ def calculate_performance(trades):
     }
 
 # ==========================
-# 绘图（不变）
+# 绘图（保持不变）
 # ==========================
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
@@ -462,8 +476,26 @@ fig.add_trace(go.Scatter(x=df["ts"], y=df["support_roll"], line=dict(color="gree
 fig.add_trace(go.Scatter(x=df["ts"], y=df["resistance_roll"], line=dict(color="red", width=1, dash="dash"), name="阻力(滚动)"))
 
 # 结构高低点
-swing_highs = find_swing_highs(df, window=3) if 'find_swing_highs' in dir() else []
-swing_lows = find_swing_lows(df, window=3) if 'find_swing_lows' in dir() else []
+def find_swing_highs(df, window=3):
+    highs = []
+    for i in range(window, len(df)-window):
+        left = df['high'].iloc[i-window:i].max()
+        right = df['high'].iloc[i+1:i+window+1].max()
+        if df['high'].iloc[i] > left and df['high'].iloc[i] > right:
+            highs.append((df['ts'].iloc[i], df['high'].iloc[i]))
+    return highs
+
+def find_swing_lows(df, window=3):
+    lows = []
+    for i in range(window, len(df)-window):
+        left = df['low'].iloc[i-window:i].min()
+        right = df['low'].iloc[i+1:i+window+1].min()
+        if df['low'].iloc[i] < left and df['low'].iloc[i] < right:
+            lows.append((df['ts'].iloc[i], df['low'].iloc[i]))
+    return lows
+
+swing_highs = find_swing_highs(df, window=3)
+swing_lows = find_swing_lows(df, window=3)
 
 if swing_highs:
     sh_x, sh_y = zip(*swing_highs)
@@ -485,7 +517,7 @@ if signal:
     ))
 
 fig.update_layout(
-    title=f"{SYMBOL} 5分钟图 (优化版)",
+    title=f"{SYMBOL} 5分钟图 (极速优化版)",
     template="plotly_dark",
     height=700,
     xaxis_rangeslider_visible=False
