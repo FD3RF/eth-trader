@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (最终完美版)
+终极量化交易策略 - 多空阈值分离优化版
 作者：AI Assistant
-版本：5.1
-说明：上传CSV文件，自动优化多空阈值，显示测试集结果。已包含完整错误处理。
+版本：6.0（最终完美版）
+说明：上传ETHUSDT_5m数据，自动优化多空阈值，输出测试集结果。
+      包含完备的错误处理、数据校验和性能优化。
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import warnings
+import time
 warnings.filterwarnings('ignore')
 
-# 页面设置
+# ====================== 页面配置 ======================
 st.set_page_config(page_title="终极量化策略·多空优化", layout="wide")
 st.title("🚀 终极量化交易策略 - 多空阈值分离优化版 (最终完美版)")
 st.markdown("上传您的 **ETHUSDT_5m_last_90days.csv** 文件，系统将自动优化多空阈值并给出测试集结果。")
@@ -22,6 +24,12 @@ st.sidebar.header("⚙️ 交易成本设置")
 fee_rate = st.sidebar.number_input("双向手续费率 (例如0.0004)", value=0.0004, format="%.4f")
 slippage = st.sidebar.number_input("滑点 (USDT)", value=0.5, step=0.1)
 
+st.sidebar.header("🎛️ 优化参数范围")
+long_th_min = st.sidebar.slider("做多阈值最小值", 0.5, 0.7, 0.5, 0.05)
+long_th_max = st.sidebar.slider("做多阈值最大值", 0.55, 0.8, 0.75, 0.05)
+short_th_min = st.sidebar.slider("做空阈值最小值", 0.2, 0.4, 0.2, 0.05)
+short_th_max = st.sidebar.slider("做空阈值最大值", 0.25, 0.5, 0.45, 0.05)
+
 # ====================== 文件上传 ======================
 uploaded_file = st.file_uploader("选择 CSV 文件", type=["csv"])
 if uploaded_file is None:
@@ -29,17 +37,21 @@ if uploaded_file is None:
     st.stop()
 
 # ====================== 数据加载 ======================
-with st.spinner("加载数据中..."):
-    df = pd.read_csv(uploaded_file)
+@st.cache_data
+def load_data(file):
+    df = pd.read_csv(file)
     df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
     df.set_index('datetime', inplace=True)
     df.sort_index(inplace=True)
     df.rename(columns={'vol':'volume'}, inplace=True)
-    df = df[['open','high','low','close','volume']]
+    return df[['open','high','low','close','volume']]
 
+with st.spinner("加载数据中..."):
+    df = load_data(uploaded_file)
 st.success(f"✅ 数据加载成功！总K线数: {len(df)}")
 
 # ====================== 特征工程 ======================
+@st.cache_data
 def create_features(df):
     df = df.copy()
     
@@ -139,7 +151,7 @@ def train_xgboost(train, val, features):
     X_val = val[features]
     y_val = val['target']
     
-    # 数据检查
+    # 数据完整性检查
     if X_train.isnull().any().any():
         st.error("❌ 训练特征包含 NaN 值，请检查特征工程")
         st.stop()
@@ -147,7 +159,8 @@ def train_xgboost(train, val, features):
         st.error("❌ 训练目标包含 NaN 值")
         st.stop()
     if len(y_train.unique()) < 2:
-        st.warning(f"⚠️ 目标变量类别数 {len(y_train.unique())}，可能影响模型训练。")
+        st.error("❌ 目标变量只有一个类别，模型无法训练。请检查特征或调整目标定义。")
+        st.stop()
     
     try:
         model = xgb.XGBClassifier(
@@ -159,11 +172,10 @@ def train_xgboost(train, val, features):
             random_state=42,
             eval_metric='logloss'
         )
-        
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            callbacks=[xgb.callback.EarlyStopping(rounds=30)],
+            early_stopping_rounds=30,
             verbose=False
         )
     except Exception as e:
@@ -181,6 +193,9 @@ with st.spinner("训练XGBoost模型中..."):
 
 # ====================== 回测函数 ======================
 def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr):
+    """
+    回测核心逻辑，返回绩效指标
+    """
     df = df.copy()
     df['prob'] = model.predict_proba(df[features])[:, 1]
     df['signal'] = 0
@@ -202,7 +217,7 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
         low = row['low']
         atr = row['atr']
         
-        # 处理现有持仓
+        # 现有持仓管理
         if position == 1:
             stop = entry_price - atr_mult * entry_atr
             take = entry_price + rr * atr_mult * entry_atr
@@ -233,7 +248,7 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
                 if pnl > 0: wins += 1
                 position = 0
         
-        # 新信号
+        # 新信号处理（使用上一根K线的信号）
         if prev['signal'] == 1 and position != 1:
             if position == -1:
                 pnl = (entry_price - open_price) * (1 - fee_rate * 2) - slippage
@@ -277,18 +292,19 @@ def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mul
         'win_rate': win_rate,
         'max_dd': max_dd,
         'sharpe': sharpe,
-        'trades': len(trades)
+        'trades': len(trades),
+        'equity': equity
     }
 
 # ====================== 多空阈值联合优化 ======================
 @st.cache_data
-def optimize_params(val_df, model, features, fee_rate, slippage):
+def optimize_params(val_df, model, features, fee_rate, slippage, long_range, short_range):
     best_sharpe = -999
     best_params = None
     best_result = None
     
-    long_ths = np.arange(0.5, 0.8, 0.05)
-    short_ths = np.arange(0.2, 0.5, 0.05)
+    long_ths = np.arange(long_range[0], long_range[1] + 0.01, 0.05)
+    short_ths = np.arange(short_range[0], short_range[1] + 0.01, 0.05)
     atr_mults = [1.0, 1.5, 2.0]
     rrs = [1.5, 2.0, 2.5, 3.0]
     
@@ -311,8 +327,11 @@ def optimize_params(val_df, model, features, fee_rate, slippage):
     progress_bar.empty()
     return best_params, best_result
 
+long_range = (long_th_min, long_th_max)
+short_range = (short_th_min, short_th_max)
+
 st.write("🔄 正在验证集上优化多空阈值及交易参数...")
-best_params, val_res = optimize_params(val, model, features, fee_rate, slippage)
+best_params, val_res = optimize_params(val, model, features, fee_rate, slippage, long_range, short_range)
 
 if best_params is None:
     st.error("❌ 未找到符合条件的参数组合，请调整参数范围或检查数据。")
@@ -342,6 +361,27 @@ col3.metric("总盈利", f"{test_res['total_pnl']:.2f} USDT")
 col4.metric("最大回撤", f"{test_res['max_dd']:.2f} USDT")
 col5.metric("夏普比率", f"{test_res['sharpe']:.2f}")
 
+# ====================== 资金曲线图 ======================
+if test_res['trades'] > 0:
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=test.index[:len(test_res['equity'])],
+        y=test_res['equity'],
+        mode='lines',
+        name='资金曲线',
+        line=dict(color='#00ff88', width=2)
+    ))
+    fig.update_layout(
+        title="测试集资金曲线",
+        xaxis_title="时间",
+        yaxis_title="累积盈亏 (USDT)",
+        template="plotly_dark",
+        height=400
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# ====================== 结论 ======================
 if test_res['sharpe'] > 1.0:
     st.success("✨ 测试结果优秀！可以考虑进一步优化或实盘模拟。")
 elif test_res['sharpe'] > 0:
