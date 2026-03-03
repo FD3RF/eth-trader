@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-5分钟合约多空策略（稳定版）
+5分钟合约多空策略（稳定可跑版）
 """
 
 import streamlit as st
@@ -66,7 +66,7 @@ for c in ['open','high','low','close','volume']:
 def features(df):
     df = df.copy()
 
-    # 多周期趋势
+    # 趋势
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['trend_up'] = (df['ema20'] > df['ema50'])
@@ -94,7 +94,7 @@ def features(df):
 
     df['adx'] = adx(df)
 
-    # 标签：未来5根是否上涨
+    # 标签：未来是否上涨
     future = df['close'].pct_change(5).shift(-5)
     df['target'] = (future > 0).astype(int)
 
@@ -152,7 +152,7 @@ def backtest(df, probs, th):
     df = df.copy()
     df['prob'] = pd.Series(probs, index=df.index).fillna(0.5)
 
-    # 多空信号
+    # 多空信号（趋势+强度）
     df['long'] = (df['prob'] >= th) & (df['trend_up']) & (df['adx'] > 18)
     df['short'] = (df['prob'] < (1-th)) & (~df['trend_up']) & (df['adx'] > 18)
 
@@ -166,25 +166,26 @@ def backtest(df, probs, th):
         prev = df.iloc[i-1]
         price = row['open']
 
-        # 平仓
+        # ===== 平多 =====
         if position == 1 and (row['close'] < row['ema20']):
             pnl = price - entry
             trades.append(pnl)
             equity.append(equity[-1] + pnl)
             position = 0
 
+        # ===== 平空 =====
         if position == -1 and (row['close'] > row['ema20']):
             pnl = entry - price
             trades.append(pnl)
             equity.append(equity[-1] + pnl)
             position = 0
 
-        # 开多
+        # ===== 开多 =====
         if prev['long'] and position == 0:
             entry = price
             position = 1
 
-        # 开空
+        # ===== 开空 =====
         if prev['short'] and position == 0:
             entry = price
             position = -1
@@ -199,7 +200,7 @@ def backtest(df, probs, th):
     }
 
 # =========================
-# 执行
+# 执行回测
 # =========================
 probs = model.predict_proba(test[feat_cols])[:,1]
 
