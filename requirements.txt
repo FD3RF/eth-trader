@@ -5,3 +5,4 @@ plotly
 requests
 numpy
 streamlit-autorefresh
+ts
