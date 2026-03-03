@@ -1,9 +1,11 @@
 """
-5分钟小波段趋势模型（含回测）
-- 趋势 + 回踩
+双向趋势策略（多空） + 回测
+- EMA趋势
+- ADX过滤
+- 回踩入场
 - RR控制
 - 滑点/手续费
-- 回测统计
+- 绩效指标
 """
 
 import streamlit as st
@@ -13,7 +15,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
-st.title("📈 小波段趋势模型（含回测）")
+st.title("📈 双向趋势策略（多空）回测版")
 
 uploaded = st.file_uploader("上传CSV (ts, open, high, low, close, vol)", type=["csv"])
 if uploaded is None:
@@ -30,47 +32,55 @@ with st.sidebar:
     slippage = st.number_input("滑点%", 0.0, 0.2, 0.05, step=0.01)
     run_btn = st.button("回测")
 
-# ===== 指标 =====
+# =========================
+# 指标
+# =========================
 df["EMA9"] = ta.trend.ema_indicator(df["close"], 9)
 df["EMA21"] = ta.trend.ema_indicator(df["close"], 21)
+df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], 14)
 df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], 14)
+df["volume_ma"] = df["vol"].rolling(20).mean()
 df = df.dropna().reset_index(drop=True)
 
-# ===== 趋势定义 =====
-def is_trend_up(row):
+# =========================
+# 趋势与回踩
+# =========================
+def trend_up(row):
     return row["EMA9"] > row["EMA21"]
 
-def is_trend_down(row):
+def trend_down(row):
     return row["EMA9"] < row["EMA21"]
 
-# ===== 回踩定义 =====
-def wave_pullback(row, prev):
+def pullback(row, prev):
     atr = row["ATR"]
     if atr <= 0:
         return False
 
-    if is_trend_up(row):
+    # 做多回踩：价格低于EMA但未深跌
+    if trend_up(row):
         dist = prev["EMA9"] - prev["low"]
-        return 0.2*atr <= dist <= 0.6*atr and row["close"] > row["EMA9"]
+        return 0.15*atr <= dist <= 0.7*atr and row["close"] > row["EMA9"]
 
-    if is_trend_down(row):
+    # 做空回踩：价格高于EMA但未深涨
+    if trend_down(row):
         dist = prev["high"] - prev["EMA9"]
-        return 0.2*atr <= dist <= 0.6*atr and row["close"] < row["EMA9"]
+        return 0.15*atr <= dist <= 0.7*atr and row["close"] < row["EMA9"]
 
     return False
 
-
-# ===== 回测 =====
-def run_backtest(df):
+# =========================
+# 回测引擎
+# =========================
+def backtest(df):
 
     capital = 1000
     equity = [capital]
     trades = []
     position = None
-    consecutive_loss = 0
-    pause_until = -1
     day_start = capital
     current_day = None
+    consecutive_loss = 0
+    pause_until = -1
 
     for i in range(30, len(df)-1):
 
@@ -87,24 +97,20 @@ def run_backtest(df):
             equity.append(capital)
             continue
 
+        # 连亏暂停
         if i < pause_until:
             equity.append(capital)
             continue
 
-        atr = row["ATR"]
-        if atr <= 0:
-            equity.append(capital)
-            continue
-
-        # ===== 开仓 =====
         if position is None:
 
             signal = None
 
-            if wave_pullback(row, prev):
-                if is_trend_up(row):
+            if pullback(row, prev):
+
+                if trend_up(row) and row["ADX"] > 18:
                     signal = "多"
-                elif is_trend_down(row):
+                elif trend_down(row) and row["ADX"] > 18:
                     signal = "空"
 
             if signal:
@@ -112,10 +118,10 @@ def run_backtest(df):
                 entry = df.iloc[i+1]["open"]
                 entry *= (1 + slippage/100) if signal=="多" else (1 - slippage/100)
 
-                sl = entry - atr*0.6 if signal=="多" else entry + atr*0.6
-                tp = entry + atr*0.9 if signal=="多" else entry - atr*0.9
+                sl = entry - row["ATR"]*0.6 if signal=="多" else entry + row["ATR"]*0.6
+                tp = entry + row["ATR"]*1.2 if signal=="多" else entry - row["ATR"]*1.2
 
-                risk = capital * (risk_pct / 100)
+                risk = capital * (risk_pct/100)
                 stop_dist = abs(entry - sl)
                 if stop_dist <= 0:
                     equity.append(capital)
@@ -126,9 +132,9 @@ def run_backtest(df):
                 if qty < 0.01:
                     qty = 0.01
 
-                fee_open = entry * qty * 0.0005
-                if capital > fee_open:
-                    capital -= fee_open
+                fee = entry * qty * 0.0005
+                if capital > fee:
+                    capital -= fee
                     position = {
                         "dir": signal,
                         "entry": entry,
@@ -139,7 +145,7 @@ def run_backtest(df):
                         "open_time": df.iloc[i+1]["ts"]
                     }
 
-        # ===== 持仓 =====
+        # 持仓管理
         if position:
 
             exit_price = None
@@ -174,8 +180,8 @@ def run_backtest(df):
             exit_price *= (1 - slippage/100) if position["dir"]=="多" else (1 + slippage/100)
 
             pnl = (exit_price - position["entry"]) * position["qty"] if position["dir"]=="多" else (position["entry"]-exit_price)*position["qty"]
-            fee_close = exit_price * position["qty"] * 0.0005
-            net = pnl - fee_close
+            fee = exit_price * position["qty"] * 0.0005
+            net = pnl - fee
             capital += net
 
             if net < 0:
@@ -201,6 +207,7 @@ def run_backtest(df):
         if capital < 500:
             break
 
+    # ===== 绩效 =====
     if trades:
         df_t = pd.DataFrame(trades)
         win_rate = (df_t["盈亏"] > 0).mean() * 100
@@ -217,11 +224,12 @@ def run_backtest(df):
     else:
         return [], 0, 0, 0, 0, equity
 
-
-# ===== 运行 =====
+# =========================
+# 运行
+# =========================
 if run_btn:
     with st.spinner("回测中..."):
-        trades, win_rate, net_profit, sharpe, max_dd, equity = run_backtest(df)
+        trades, win_rate, net_profit, sharpe, max_dd, equity = backtest(df)
 
     col1,col2,col3,col4 = st.columns(4)
     col1.metric("交易次数", len(trades))
@@ -229,7 +237,7 @@ if run_btn:
     col3.metric("净利润", f"{net_profit:.2f}")
     col4.metric("最大回撤", f"{max_dd:.2f}%")
 
-    if len(equity)>1:
+    if len(equity) > 1:
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df["ts"].iloc[:len(equity)], y=equity))
         st.plotly_chart(fig, use_container_width=True)
