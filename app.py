@@ -1,137 +1,281 @@
 """
-5分钟趋势合约系统（最终完美版）
-策略：EMA趋势 + ADX强度 + ATR自适应回调 + K线确认 + 结构支撑阻力
-优化：极致性能、智能计算触发、多时间框架验证、账户持久化、信号历史、自动内存管理
+5分钟趋势合约系统（生产级最终完美版）
+- 异步数据线程 + 心跳监控 + 自动重启
+- 回测模块：夏普比率、最大回撤
+- 模拟账户 + 信号历史 + 实时UI
+- 日志轮转 + 文件备份 + 防空
 """
 
 import streamlit as st
 import pandas as pd
 import ta
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import time
 import os
 import json
 import numpy as np
+import threading
+import logging
+from logging.handlers import RotatingFileHandler
+import shutil
 from streamlit_autorefresh import st_autorefresh
 
+# --------------------------
+# 日志配置
+# --------------------------
+log_handler = RotatingFileHandler(
+    'error.log', maxBytes=5 * 1024 * 1024, backupCount=3
+)
+logging.basicConfig(
+    handlers=[log_handler],
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 st.set_page_config(layout="wide")
-st.title("📈 5分钟趋势合约系统（最终完美版）")
+st.title("📈 5分钟趋势合约系统（生产级最终完美版）")
 
 SYMBOL = "ETH-USDT-SWAP"
 CACHE_FILE_5M = "market_data_5m_cache.csv"
 CACHE_FILE_15M = "market_data_15m_cache.csv"
 SIGNAL_HISTORY_FILE = "signal_history.json"
 ACCOUNT_FILE = "account.json"
+BACKUP_DIR = "backup"
 
-# 自动刷新（每5秒，仅UI刷新）
 st_autorefresh(interval=5000, key="refresh")
 
-# ==========================
+# --------------------------
+# 文件备份与截断
+# --------------------------
+def ensure_backup_dir():
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+
+def trim_file(file_path, max_items=200):
+    if not os.path.exists(file_path):
+        return
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        if len(data) > max_items:
+            data = data[-max_items:]
+            with open(file_path, 'w') as f:
+                json.dump(data, f, indent=2)
+    except Exception:
+        logging.exception(f"截断失败: {file_path}")
+
+def daily_backup():
+    ensure_backup_dir()
+    today = datetime.now().strftime("%Y%m%d")
+    for f in [SIGNAL_HISTORY_FILE, ACCOUNT_FILE, CACHE_FILE_5M, CACHE_FILE_15M]:
+        if os.path.exists(f):
+            shutil.copy(f, os.path.join(BACKUP_DIR, f"{today}_{f}"))
+
+if "last_backup_day" not in st.session_state:
+    st.session_state.last_backup_day = datetime.now().day
+
+if datetime.now().day != st.session_state.last_backup_day:
+    daily_backup()
+    st.session_state.last_backup_day = datetime.now().day
+
+trim_file(SIGNAL_HISTORY_FILE, 500)
+trim_file(ACCOUNT_FILE, 100)
+
+# --------------------------
+# 异步数据获取线程（带心跳）
+# --------------------------
+class DataFetcher:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._5m_data = None
+        self._15m_data = None
+        self._ticker = None
+        self._stop = threading.Event()
+        self.fail_count = 0
+        self.last_heartbeat = time.time()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        logging.info("数据线程启动")
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                start = time.time()
+
+                data_5m = self._fetch_okx("5m", 300)
+                if data_5m:
+                    df = self._to_df(data_5m)
+                    df.to_csv(CACHE_FILE_5M, index=False)
+                    with self.lock:
+                        self._5m_data = df
+
+                data_15m = self._fetch_okx("15m", 100)
+                if data_15m:
+                    df = self._to_df(data_15m)
+                    df.to_csv(CACHE_FILE_15M, index=False)
+                    with self.lock:
+                        self._15m_data = df
+
+                ticker = self._fetch_ticker()
+                if ticker is not None:
+                    with self.lock:
+                        self._ticker = ticker
+
+                self.fail_count = 0
+                self.last_heartbeat = time.time()
+
+                if time.time() - start > 10:
+                    logging.warning("数据获取超时")
+
+            except Exception:
+                self.fail_count += 1
+                logging.exception("DataFetcher异常")
+                if self.fail_count > 5:
+                    logging.error("连续失败超过5次，停止线程")
+                    self._stop.set()
+
+            for _ in range(5):
+                if self._stop.is_set():
+                    break
+                time.sleep(1)
+
+    def _to_df(self, data):
+        df = pd.DataFrame(data, columns=[
+            "ts", "open", "high", "low", "close", "volume",
+            "volCcy", "volCcyQuote", "confirm"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        return df.sort_values("ts").reset_index(drop=True)
+
+    def _fetch_okx(self, bar, limit):
+        url = "https://www.okx.com/api/v5/market/candles"
+        params = {"instId": SYMBOL, "bar": bar, "limit": limit}
+        for attempt in range(3):
+            try:
+                r = requests.get(url, timeout=5, params=params)
+                if r.status_code == 200:
+                    j = r.json()
+                    return j.get("data")
+            except:
+                time.sleep(2 ** attempt)
+        return None
+
+    def _fetch_ticker(self):
+        url = f"https://www.okx.com/api/v5/market/ticker?instId={SYMBOL}"
+        try:
+            r = requests.get(url, timeout=3)
+            data = r.json()
+            if data.get("code") == "0":
+                return float(data["data"][0]["last"])
+        except:
+            return None
+
+    def stop(self):
+        self._stop.set()
+        logging.info("数据线程停止")
+
+    def is_alive(self):
+        return self.thread.is_alive() and not self._stop.is_set()
+
+    def get_5m(self):
+        with self.lock:
+            return self._5m_data.copy() if self._5m_data is not None else None
+
+    def get_15m(self):
+        with self.lock:
+            return self._15m_data.copy() if self._15m_data is not None else None
+
+    def get_ticker(self):
+        with self.lock:
+            return self._ticker
+
+
+# 初始化或重启数据线程
+def init_fetcher():
+    if "fetcher" not in st.session_state or not st.session_state.fetcher.is_alive():
+        st.session_state.fetcher = DataFetcher()
+
+init_fetcher()
+fetcher = st.session_state.fetcher
+
+# 心跳冷却 + 自动重启
+if "last_restart" not in st.session_state:
+    st.session_state.last_restart = 0
+
+if time.time() - fetcher.last_heartbeat > 30:
+    if time.time() - st.session_state.last_restart > 60:
+        st.sidebar.warning("数据线程无响应，正在自动重启...")
+        fetcher.stop()
+        time.sleep(1)
+        st.session_state.fetcher = DataFetcher()
+        st.session_state.last_restart = time.time()
+        st.rerun()
+
+# --------------------------
+# 从fetcher获取数据
+# --------------------------
+df_5m = fetcher.get_5m()
+if df_5m is None or df_5m.empty:
+    if os.path.exists(CACHE_FILE_5M):
+        df_5m = pd.read_csv(CACHE_FILE_5M, parse_dates=["ts"])
+    else:
+        st.error("无法获取5分钟数据")
+        st.stop()
+
+df_15m = fetcher.get_15m()
+real_price = fetcher.get_ticker()
+
+# --------------------------
 # 侧边栏参数
-# ==========================
+# --------------------------
 st.sidebar.header("⚙️ 策略参数")
-adx_threshold = st.sidebar.slider("ADX趋势阈值", 20, 40, 22, help="ADX大于此值才认为有趋势")
+adx_threshold = st.sidebar.slider("ADX趋势阈值", 20, 40, 22)
 ema_period_fast = st.sidebar.slider("快线EMA周期", 10, 30, 12)
 ema_period_slow = st.sidebar.slider("慢线EMA周期", 30, 100, 50)
 atr_period = st.sidebar.slider("ATR周期", 7, 30, 14)
 lookback_sr = st.sidebar.slider("支撑/阻力周期（根K线）", 10, 50, 15)
-callback_atr_mult = st.sidebar.slider("回调距离（ATR倍数）", 0.3, 1.0, 0.7, step=0.1, help="价格距离EMA20的最大ATR倍数")
+callback_atr_mult = st.sidebar.slider("回调距离（ATR倍数）", 0.3, 1.0, 0.7, step=0.1)
 risk_reward = st.sidebar.slider("盈亏比", 1.0, 3.0, 2.0, step=0.1)
 risk_percent = st.sidebar.slider("单笔风险 (%)", 1.0, 5.0, 2.0, step=0.5)
 initial_balance = st.sidebar.number_input("初始资金 (USDT)", value=100.0, step=10.0)
+use_tf_filter = st.sidebar.checkbox("启用15分钟EMA验证", value=True)
 
-# 多时间框架验证开关
-use_tf_filter = st.sidebar.checkbox("启用15分钟EMA验证", value=True, help="要求15分钟EMA方向与主趋势一致")
+# 回测模式开关
+backtest_mode = st.sidebar.checkbox("🔍 回测模式", value=False)
+if backtest_mode:
+    days_back = st.sidebar.slider("回测天数", 1, 30, 7)
 
-# 趋势持续确认周期
-trend_confirm_bars = 3
-
-# 手动刷新按钮
-if st.sidebar.button("🔄 强制刷新数据"):
-    st.cache_data.clear()
+# 线程状态显示
+st.sidebar.divider()
+st.sidebar.write("📡 **数据线程状态**")
+st.sidebar.write(f"心跳: {datetime.fromtimestamp(fetcher.last_heartbeat).strftime('%H:%M:%S')}")
+st.sidebar.write(f"失败计数: {fetcher.fail_count}")
+if not fetcher.is_alive():
+    st.sidebar.error("线程已停止")
+if st.sidebar.button("🔄 手动重启线程"):
+    fetcher.stop()
+    time.sleep(1)
+    st.session_state.fetcher = DataFetcher()
     st.rerun()
 
-# ==========================
-# 数据获取（极致缓存）
-# ==========================
-@st.cache_data(ttl=120)  # 2分钟缓存
-def fetch_okx_candles(bar="5m", limit=300):
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": SYMBOL, "bar": bar, "limit": limit}
-    for attempt in range(3):
-        try:
-            r = requests.get(url, timeout=5, params=params)
-            if r.status_code == 200:
-                j = r.json()
-                if "data" in j:
-                    return j["data"]
-            time.sleep(2 ** attempt)
-        except:
-            time.sleep(2 ** attempt)
-    return None
+# 查看错误日志
+if st.sidebar.button("📋 查看错误日志"):
+    if os.path.exists("error.log"):
+        with open("error.log", "r") as f:
+            logs = f.readlines()[-10:]
+            st.sidebar.code("".join(logs))
+    else:
+        st.sidebar.info("无错误日志")
 
-def get_5m_data():
-    data = fetch_okx_candles("5m", 300)
-    if data:
-        df = pd.DataFrame(data, columns=[
-            "ts", "open", "high", "low", "close", "volume",
-            "volCcy", "volCcyQuote", "confirm"
-        ])
-        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        df = df.sort_values("ts").reset_index(drop=True)
-        df.to_csv(CACHE_FILE_5M, index=False)
-        return df
-    elif os.path.exists(CACHE_FILE_5M):
-        return pd.read_csv(CACHE_FILE_5M, parse_dates=["ts"])
-    return pd.DataFrame()
+trend_confirm_bars = 3
 
-def get_15m_data():
-    data = fetch_okx_candles("15m", 100)
-    if data:
-        df = pd.DataFrame(data, columns=[
-            "ts", "open", "high", "low", "close", "volume",
-            "volCcy", "volCcyQuote", "confirm"
-        ])
-        df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        df = df.sort_values("ts").reset_index(drop=True)
-        df.to_csv(CACHE_FILE_15M, index=False)
-        return df
-    elif os.path.exists(CACHE_FILE_15M):
-        return pd.read_csv(CACHE_FILE_15M, parse_dates=["ts"])
-    return pd.DataFrame()
-
-@st.cache_data(ttl=2)
-def get_ticker():
-    url = f"https://www.okx.com/api/v5/market/ticker?instId={SYMBOL}"
-    try:
-        r = requests.get(url, timeout=3)
-        data = r.json()
-        if data.get("code") == "0":
-            return float(data["data"][0]["last"])
-    except:
-        pass
-    return None
-
-# ==========================
-# 数据加载
-# ==========================
-df_5m = get_5m_data()
-if df_5m.empty:
-    st.error("无法获取5分钟数据")
-    st.stop()
-
-df_15m = get_15m_data() if use_tf_filter else pd.DataFrame()
-real_price = get_ticker()
-
-# ==========================
-# 初始化缓存控制变量
-# ==========================
+# --------------------------
+# 指标计算与缓存（版本控制）
+# --------------------------
 if "last_calc_time" not in st.session_state:
     st.session_state.last_calc_time = 0
     st.session_state.last_params = None
@@ -139,25 +283,24 @@ if "last_calc_time" not in st.session_state:
     st.session_state.cached_df = None
     st.session_state.cached_15m = None
 
-# 当前参数快照
 current_params = (
     adx_threshold, ema_period_fast, ema_period_slow, atr_period,
     lookback_sr, callback_atr_mult, risk_reward, risk_percent,
     use_tf_filter, trend_confirm_bars
 )
 
-latest_ts = df_5m["ts"].iloc[-1]
+latest_ts = df_5m["ts"].iloc[-1] if not df_5m.empty else None
 
-# 判断是否需要重新计算
 need_recalc = False
 now = time.time()
-if (now - st.session_state.last_calc_time > 30) or \
-   (st.session_state.last_ts != latest_ts) or \
-   (st.session_state.last_params != current_params):
+if st.session_state.last_params != current_params:
+    need_recalc = True
+elif latest_ts and st.session_state.last_ts != latest_ts:
+    need_recalc = True
+elif now - st.session_state.last_calc_time > 30:
     need_recalc = True
 
 if need_recalc:
-    # 重新计算5分钟指标
     df = df_5m.copy()
     df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=ema_period_fast)
     df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_period_slow)
@@ -174,8 +317,7 @@ if need_recalc:
     df = df.dropna().reset_index(drop=True)
     st.session_state.cached_df = df
 
-    # 重新计算15分钟EMA
-    if use_tf_filter and not df_15m.empty:
+    if use_tf_filter and df_15m is not None and not df_15m.empty:
         df_15m_calc = df_15m.copy()
         df_15m_calc["EMA20"] = ta.trend.ema_indicator(df_15m_calc["close"], window=20)
         df_15m_calc = df_15m_calc.dropna().reset_index(drop=True)
@@ -183,23 +325,21 @@ if need_recalc:
     else:
         st.session_state.cached_15m = None
 
-    # 更新缓存控制变量
     st.session_state.last_calc_time = now
     st.session_state.last_params = current_params
     st.session_state.last_ts = latest_ts
-else:
-    df = st.session_state.cached_df
 
-if df is None:
+df = st.session_state.cached_df
+if df is None or df.empty:
     st.error("指标计算失败")
     st.stop()
 
 latest = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else latest
 
-# ==========================
+# --------------------------
 # 15分钟EMA方向判断
-# ==========================
+# --------------------------
 tf_ok = True
 if use_tf_filter and st.session_state.cached_15m is not None:
     df_15m_calc = st.session_state.cached_15m
@@ -215,48 +355,225 @@ if use_tf_filter and st.session_state.cached_15m is not None:
     else:
         tf_ok = False
 
-# ==========================
-# 趋势与信号判断
-# ==========================
-trend = None
-if latest["trend_up_streak"] and latest["ADX"] > adx_threshold and tf_ok:
-    trend = "多"
-elif latest["trend_down_streak"] and latest["ADX"] > adx_threshold and tf_ok:
-    trend = "空"
+# --------------------------
+# 信号计算函数
+# --------------------------
+def calc_signal_from_row(latest, prev, params):
+    trend = None
+    if latest["trend_up_streak"] and latest["ADX"] > params['adx_threshold'] and params['tf_ok']:
+        trend = "多"
+    elif latest["trend_down_streak"] and latest["ADX"] > params['adx_threshold'] and params['tf_ok']:
+        trend = "空"
 
-signal = None
-if trend == "多":
-    if latest["close"] > latest["EMA_slow"] and \
-       abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * callback_atr_mult and \
-       prev["close"] < prev["EMA_fast"]:
-        body = abs(latest["close"] - latest["open"])
-        lower_shadow = min(latest["close"], latest["open"]) - latest["low"]
-        if lower_shadow > body * 1.5 or latest["close"] > latest["open"]:
-            signal = "多"
-elif trend == "空":
-    if latest["close"] < latest["EMA_slow"] and \
-       abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * callback_atr_mult and \
-       prev["close"] > prev["EMA_fast"]:
-        body = abs(latest["close"] - latest["open"])
-        upper_shadow = latest["high"] - max(latest["close"], latest["open"])
-        if upper_shadow > body * 1.5 or latest["close"] < latest["open"]:
-            signal = "空"
+    signal = None
+    if trend == "多":
+        if latest["close"] > latest["EMA_slow"] and \
+           abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * params['callback_atr_mult'] and \
+           prev["close"] < prev["EMA_fast"]:
+            body = abs(latest["close"] - latest["open"])
+            lower_shadow = min(latest["close"], latest["open"]) - latest["low"]
+            if lower_shadow > body * 1.5 or latest["close"] > latest["open"]:
+                signal = "多"
+    elif trend == "空":
+        if latest["close"] < latest["EMA_slow"] and \
+           abs(latest["close"] - latest["EMA_fast"]) < latest["ATR"] * params['callback_atr_mult'] and \
+           prev["close"] > prev["EMA_fast"]:
+            body = abs(latest["close"] - latest["open"])
+            upper_shadow = latest["high"] - max(latest["close"], latest["open"])
+            if upper_shadow > body * 1.5 or latest["close"] < latest["open"]:
+                signal = "空"
+    return signal, trend
 
-# ==========================
-# 信号持久化与内存管理
-# ==========================
+# 实时信号
+signal_params = {
+    'adx_threshold': adx_threshold,
+    'callback_atr_mult': callback_atr_mult,
+    'tf_ok': tf_ok
+}
+signal, trend = calc_signal_from_row(latest, prev, signal_params)
+
+# --------------------------
+# 回测模块（独立分支）
+# --------------------------
+def run_backtest(df_full, days, params):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    df_backtest = df_full[df_full["ts"] >= start_date].copy().reset_index(drop=True)
+    if len(df_backtest) < 50:
+        return None
+
+    class BacktestAccount:
+        def __init__(self, initial):
+            self.balance = initial
+            self.position = None
+            self.trades = []
+            self.equity_curve = []
+
+        def step(self, row, signal):
+            self.equity_curve.append(self.balance)
+            if self.position:
+                entry = self.position['entry']
+                stop = self.position['stop']
+                tp = self.position['tp']
+                qty = self.position['qty']
+                direction = self.position['direction']
+                if direction == "多":
+                    if row['low'] <= stop:
+                        close_price = stop
+                        pnl = (close_price - entry) * qty
+                        self.balance += pnl
+                        self.trades.append({'entry': entry, 'exit': close_price, 'pnl': pnl, 'reason': '止损'})
+                        self.position = None
+                    elif row['high'] >= tp:
+                        close_price = tp
+                        pnl = (close_price - entry) * qty
+                        self.balance += pnl
+                        self.trades.append({'entry': entry, 'exit': close_price, 'pnl': pnl, 'reason': '止盈'})
+                        self.position = None
+                else:
+                    if row['high'] >= stop:
+                        close_price = stop
+                        pnl = (entry - close_price) * qty
+                        self.balance += pnl
+                        self.trades.append({'entry': entry, 'exit': close_price, 'pnl': pnl, 'reason': '止损'})
+                        self.position = None
+                    elif row['low'] <= tp:
+                        close_price = tp
+                        pnl = (entry - close_price) * qty
+                        self.balance += pnl
+                        self.trades.append({'entry': entry, 'exit': close_price, 'pnl': pnl, 'reason': '止盈'})
+                        self.position = None
+
+            if signal and not self.position:
+                atr = row['ATR']
+                if signal == "多":
+                    stop = row['close'] - atr * 1.5
+                    tp = row['close'] + (row['close'] - stop) * risk_reward
+                else:
+                    stop = row['close'] + atr * 1.5
+                    tp = row['close'] - (stop - row['close']) * risk_reward
+                risk_amount = self.balance * (risk_percent / 100)
+                stop_dist = abs(row['close'] - stop)
+                if stop_dist > 0:
+                    qty = risk_amount / stop_dist
+                    qty = round(qty / 0.01) * 0.01
+                    if qty < 0.01:
+                        qty = 0.01
+                    self.position = {
+                        'direction': signal,
+                        'entry': row['close'],
+                        'qty': qty,
+                        'stop': stop,
+                        'tp': tp
+                    }
+
+    bt_account = BacktestAccount(initial_balance)
+    for i in range(1, len(df_backtest)):
+        row = df_backtest.iloc[i]
+        prev_row = df_backtest.iloc[i-1]
+        sig_params = {
+            'adx_threshold': adx_threshold,
+            'callback_atr_mult': callback_atr_mult,
+            'tf_ok': True  # 回测简化，忽略多时间框架
+        }
+        sig, _ = calc_signal_from_row(row, prev_row, sig_params)
+        bt_account.step(row, sig)
+
+    if bt_account.position:
+        last_row = df_backtest.iloc[-1]
+        entry = bt_account.position['entry']
+        qty = bt_account.position['qty']
+        direction = bt_account.position['direction']
+        if direction == "多":
+            pnl = (last_row['close'] - entry) * qty
+        else:
+            pnl = (entry - last_row['close']) * qty
+        bt_account.balance += pnl
+        bt_account.trades.append({'entry': entry, 'exit': last_row['close'], 'pnl': pnl, 'reason': '平仓'})
+        bt_account.position = None
+
+    # 绩效指标
+    trades_df = pd.DataFrame(bt_account.trades)
+    wins = len(trades_df[trades_df['pnl'] > 0]) if not trades_df.empty else 0
+    losses = len(trades_df[trades_df['pnl'] < 0]) if not trades_df.empty else 0
+    total = wins + losses
+    win_rate = wins / total * 100 if total > 0 else 0
+    net_pnl = bt_account.balance - initial_balance
+
+    # 夏普比率
+    if len(bt_account.equity_curve) > 1:
+        returns = np.diff(bt_account.equity_curve) / bt_account.equity_curve[:-1]
+        if np.std(returns) > 0:
+            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365 * 24 * 12)  # 5分钟K线年化
+        else:
+            sharpe = 0
+    else:
+        sharpe = 0
+
+    # 最大回撤
+    peak = np.maximum.accumulate(bt_account.equity_curve)
+    drawdown = np.where(peak > 0, (peak - bt_account.equity_curve) / peak, 0)
+    max_drawdown = np.max(drawdown) * 100 if len(drawdown) > 0 else 0
+
+    return {
+        'initial': initial_balance,
+        'final': bt_account.balance,
+        'total_trades': total,
+        'wins': wins,
+        'losses': losses,
+        'win_rate': win_rate,
+        'net_pnl': net_pnl,
+        'sharpe': sharpe,
+        'max_drawdown': max_drawdown,
+        'trades': bt_account.trades
+    }
+
+if backtest_mode:
+    st.subheader("📊 回测结果")
+    with st.spinner("回测进行中..."):
+        result = run_backtest(df, days_back, {})
+    if result:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("初始资金", f"{result['initial']:.2f}")
+        with col2:
+            st.metric("最终资金", f"{result['final']:.2f}")
+        with col3:
+            st.metric("总交易", result['total_trades'])
+        with col4:
+            st.metric("胜率", f"{result['win_rate']:.1f}%")
+        col5, col6, col7 = st.columns(3)
+        with col5:
+            st.metric("净盈亏", f"{result['net_pnl']:+.2f}")
+        with col6:
+            st.metric("夏普比率", f"{result['sharpe']:.2f}")
+        with col7:
+            st.metric("最大回撤", f"{result['max_drawdown']:.2f}%")
+        if result['trades']:
+            st.dataframe(pd.DataFrame(result['trades']).tail(10))
+    else:
+        st.warning("回测数据不足，请减小天数")
+    st.stop()
+
+# --------------------------
+# 实时模式：信号持久化与模拟账户
+# --------------------------
 def load_signal_history():
     if os.path.exists(SIGNAL_HISTORY_FILE):
-        with open(SIGNAL_HISTORY_FILE, 'r') as f:
-            data = json.load(f)
-            for item in data:
-                item['time'] = datetime.fromisoformat(item['time'])
-            return data
+        try:
+            with open(SIGNAL_HISTORY_FILE, 'r') as f:
+                data = json.load(f)
+                for item in data:
+                    item['time'] = datetime.fromisoformat(item['time'])
+                return data
+        except:
+            logging.exception("信号历史文件损坏，重置")
+            return []
     return []
 
 def save_signal_history(history):
-    if len(history) > 100:
-        history = history[-100:]
+    if len(history) > 500:
+        history = history[-500:]
     serializable = []
     for item in history:
         copy = item.copy()
@@ -278,45 +595,52 @@ if signal:
             "ema_fast": latest["EMA_fast"],
             "atr": latest["ATR"]
         })
-        if len(st.session_state.signal_history) > 100:
-            st.session_state.signal_history = st.session_state.signal_history[-100:]
         save_signal_history(st.session_state.signal_history)
+        logging.info(f"新信号: {signal} @ {latest['close']}")
 
-# ==========================
-# 模拟账户（持久化）
-# ==========================
+# --------------------------
+# 线程安全模拟账户
+# --------------------------
 class TradingAccount:
     def __init__(self, initial_balance):
         self.initial = initial_balance
         self.file = ACCOUNT_FILE
+        self.lock = threading.Lock()
         self.load()
 
     def load(self):
         if os.path.exists(self.file):
-            with open(self.file, 'r') as f:
-                data = json.load(f)
-                self.balance = data.get('balance', self.initial)
-                self.position = data.get('position', None)
-                self.trades = data.get('trades', [])
+            with self.lock:
+                try:
+                    with open(self.file, 'r') as f:
+                        data = json.load(f)
+                        self.balance = data.get('balance', self.initial)
+                        self.position = data.get('position', None)
+                        self.trades = data.get('trades', [])
+                except:
+                    logging.exception("账户文件损坏，重置")
+                    self.reset()
         else:
             self.reset()
 
     def save(self):
-        if len(self.trades) > 50:
-            self.trades = self.trades[-50:]
-        data = {
-            'balance': self.balance,
-            'position': self.position,
-            'trades': self.trades
-        }
-        with open(self.file, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        if len(self.trades) > 100:
+            self.trades = self.trades[-100:]
+        with self.lock:
+            data = {
+                'balance': self.balance,
+                'position': self.position,
+                'trades': self.trades
+            }
+            with open(self.file, 'w') as f:
+                json.dump(data, f, indent=2, default=str)
 
     def reset(self):
         self.balance = self.initial
         self.position = None
         self.trades = []
         self.save()
+        logging.info("账户重置")
 
     def can_open(self):
         return self.position is None
@@ -353,6 +677,7 @@ class TradingAccount:
             'open_time': datetime.now().isoformat()
         }
         self.save()
+        logging.info(f"开仓 {direction} @ {price}, 数量 {qty}")
         return True, "开仓成功"
 
     def check_stop_take(self, current_price):
@@ -396,6 +721,7 @@ class TradingAccount:
         })
         self.position = None
         self.save()
+        logging.info(f"平仓 {reason}, 盈亏 {net_pnl:.2f}")
         return reason, net_pnl
 
     def get_equity(self, current_price):
@@ -423,9 +749,9 @@ if account.position:
         reason, net = result
         st.sidebar.info(f"📌 平仓: {reason}, 盈亏: {net:+.2f} USDT")
 
-# ==========================
-# 胜率统计函数
-# ==========================
+# --------------------------
+# 胜率统计
+# --------------------------
 def calculate_performance(trades):
     if not trades:
         return {}
@@ -444,9 +770,9 @@ def calculate_performance(trades):
         'net_pnl_total': df_t['net_pnl'].sum()
     }
 
-# ==========================
+# --------------------------
 # 绘图
-# ==========================
+# --------------------------
 def find_swing_highs(df, window=3):
     highs = []
     for i in range(window, len(df)-window):
@@ -503,9 +829,9 @@ fig.update_layout(
 )
 st.plotly_chart(fig, width='stretch')
 
-# ==========================
+# --------------------------
 # 状态面板
-# ==========================
+# --------------------------
 st.subheader("📊 当前状态")
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
@@ -533,9 +859,9 @@ else:
 
 st.caption(f"数据更新于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# ==========================
+# --------------------------
 # 账户面板
-# ==========================
+# --------------------------
 st.subheader("💰 模拟账户")
 col_acc1, col_acc2, col_acc3 = st.columns(3)
 with col_acc1:
@@ -557,9 +883,9 @@ if st.button("重置账户"):
     account.reset()
     st.rerun()
 
-# ==========================
+# --------------------------
 # 信号历史与绩效
-# ==========================
+# --------------------------
 st.subheader("📜 信号历史")
 if st.session_state.signal_history:
     hist_df = pd.DataFrame(st.session_state.signal_history)
@@ -583,3 +909,7 @@ if account.trades:
     st.dataframe(pd.DataFrame(account.trades).tail(10)[['open_time', 'direction', 'entry', 'close_price', 'reason', 'net_pnl']])
 else:
     st.info("暂无交易记录")
+
+# 程序退出时停止数据线程
+import atexit
+atexit.register(lambda: st.session_state.fetcher.stop() if "fetcher" in st.session_state else None)
