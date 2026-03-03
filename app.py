@@ -1,426 +1,198 @@
 # -*- coding: utf-8 -*-
 """
-终极量化交易策略 - 多空阈值分离优化版 (最终完美版，自适应XGBoost版本)
-作者：AI Assistant
-版本：7.0
-说明：上传ETHUSDT_5m数据，自动优化多空阈值，输出测试集结果。
-      包含完备的错误处理、数据校验、性能优化和XGBoost版本自适应。
+ETH 100x AI 模型训练脚本（优化版）
+功能：
+- 从 OKX 获取历史K线数据
+- 计算多种技术指标
+- 定义合理标签（未来N根K线涨幅）
+- 使用时间序列交叉验证
+- 超参数网格搜索优化
+- 保存最佳模型及特征列表
 """
 
-import streamlit as st
+import ccxt
 import pandas as pd
 import numpy as np
+import pandas_ta as ta
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import joblib
 import warnings
-import time
 warnings.filterwarnings('ignore')
 
-# ====================== 页面配置 ======================
-st.set_page_config(page_title="终极量化策略·多空优化", layout="wide")
-st.title("🚀 终极量化交易策略 - 多空阈值分离优化版 (最终完美版)")
-st.markdown("上传您的 **ETHUSDT_5m_last_90days.csv** 文件，系统将自动优化多空阈值并给出测试集结果。")
+# =============================
+# 配置参数
+# =============================
+SYMBOL = "ETH/USDT-SWAP"          # OKX 永续合约
+TIMEFRAME = "5m"                  # K线周期
+LIMIT = 10000                      # 获取的 K 线数量（建议至少10000，约1个月数据）
+TEST_SIZE = 0.2                    # 测试集比例（用于最终评估）
+RANDOM_STATE = 42
+MODEL_FILE = "eth_ai_model.pkl"
+FEATURE_FILE = "eth_ai_features.pkl"
 
-# ====================== 侧边栏参数 ======================
-st.sidebar.header("⚙️ 交易成本设置")
-fee_rate = st.sidebar.number_input("双向手续费率 (例如0.0004)", value=0.0004, format="%.4f")
-slippage = st.sidebar.number_input("滑点 (USDT)", value=0.5, step=0.1)
+# 标签定义：预测未来 N 根 K 线涨幅是否超过 THRESHOLD
+N_FUTURE = 6                       # 未来6根K线
+THRESHOLD = 0.01                    # 涨幅阈值 1%
 
-st.sidebar.header("🎛️ 优化参数范围")
-long_th_min = st.sidebar.slider("做多阈值最小值", 0.5, 0.7, 0.5, 0.05)
-long_th_max = st.sidebar.slider("做多阈值最大值", 0.55, 0.8, 0.75, 0.05)
-short_th_min = st.sidebar.slider("做空阈值最小值", 0.2, 0.4, 0.2, 0.05)
-short_th_max = st.sidebar.slider("做空阈值最大值", 0.25, 0.5, 0.45, 0.05)
+# 特征列表
+FEATURES = [
+    'rsi', 'ma20', 'ma60', 'macd', 'macd_signal',
+    'atr_pct', 'adx', 'bb_upper', 'bb_lower', 'bb_width',
+    'volume_ratio', 'ema20', 'ema50'
+]
 
-# ====================== 文件上传 ======================
-uploaded_file = st.file_uploader("选择 CSV 文件", type=["csv"])
-if uploaded_file is None:
-    st.info("请先上传文件")
-    st.stop()
+# =============================
+# 初始化交易所（OKX）
+# =============================
+print("初始化 OKX 交易所...")
+exchange = ccxt.okx({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'swap'},
+})
+# 如果使用代理，取消注释
+# exchange.proxies = {'http': 'http://your-proxy', 'https': 'https://your-proxy'}
 
-# ====================== 数据加载 ======================
-@st.cache_data
-def load_data(file):
-    df = pd.read_csv(file)
-    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
-    df.set_index('datetime', inplace=True)
-    df.sort_index(inplace=True)
-    df.rename(columns={'vol':'volume'}, inplace=True)
-    return df[['open','high','low','close','volume']]
+# =============================
+# 获取历史数据
+# =============================
+print(f"获取 {SYMBOL} 最近 {LIMIT} 根 {TIMEFRAME} K线...")
+ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LIMIT)
+df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+df.set_index('timestamp', inplace=True)
+print(f"成功获取 {len(df)} 条数据")
 
-with st.spinner("加载数据中..."):
-    df = load_data(uploaded_file)
-st.success(f"✅ 数据加载成功！总K线数: {len(df)}")
+# =============================
+# 计算技术指标
+# =============================
+print("计算技术指标...")
 
-# ====================== 特征工程 ======================
-@st.cache_data
-def create_features(df):
-    df = df.copy()
-    
-    # 基础价格特征
-    df['return_1'] = df['close'].pct_change(1)
-    df['return_5'] = df['close'].pct_change(5)
-    df['return_10'] = df['close'].pct_change(10)
-    df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
-    df['close_position'] = (df['close'] - df['low']) / (df['high'] - df['low'])
-    
-    # 成交量特征
-    df['volume_ma5'] = df['volume'].rolling(5).mean()
-    df['volume_ma20'] = df['volume'].rolling(20).mean()
-    df['volume_ratio'] = df['volume'] / df['volume_ma20']
-    
-    # EMA
-    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['ema_cross'] = (df['ema10'] - df['ema20']) / df['close']
-    
-    # RSI
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - 100 / (1 + rs)
-    
-    # MACD
-    exp12 = df['close'].ewm(span=12, adjust=False).mean()
-    exp26 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp12 - exp26
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    
-    # ATR
-    tr = pd.concat([
-        df['high'] - df['low'],
-        (df['high'] - df['close'].shift()).abs(),
-        (df['low'] - df['close'].shift()).abs()
-    ], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14).mean()
-    df['atr_ratio'] = df['atr'] / df['close']
-    
-    # 布林带
-    df['bb_mid'] = df['close'].rolling(20).mean()
-    df['bb_std'] = df['close'].rolling(20).std()
-    df['bb_width'] = 2 * df['bb_std'] / df['bb_mid']
-    df['bb_position'] = (df['close'] - df['bb_mid']) / (2 * df['bb_std'])
-    
-    # 滞后特征
-    for lag in [1,2,3]:
-        df[f'close_lag{lag}'] = df['close'].shift(lag)
-        df[f'volume_lag{lag}'] = df['volume'].shift(lag)
-        df[f'rsi_lag{lag}'] = df['rsi'].shift(lag)
-        df[f'atr_lag{lag}'] = df['atr'].shift(lag)
-    
-    # 滚动统计
-    for window in [5,10,20]:
-        df[f'close_max_{window}'] = df['close'].rolling(window).max()
-        df[f'close_min_{window}'] = df['close'].rolling(window).min()
-        df[f'close_std_{window}'] = df['close'].rolling(window).std()
-    
-    # 目标变量：预测未来5根K线是否上涨
-    df['target'] = (df['close'].shift(-5) > df['close']).astype(int)
-    
-    df.dropna(inplace=True)
-    return df
+# 基础指标
+df['rsi'] = ta.rsi(df['close'], length=14)
+df['ma20'] = ta.sma(df['close'], length=20)
+df['ma60'] = ta.sma(df['close'], length=60)
+df['ema20'] = ta.ema(df['close'], length=20)
+df['ema50'] = ta.ema(df['close'], length=50)
 
-with st.spinner("生成特征中..."):
-    df_feat = create_features(df)
-st.success("✅ 特征生成完成！")
+# MACD
+macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+df['macd'] = macd['MACD_12_26_9']
+df['macd_signal'] = macd['MACDs_12_26_9']
+df['macd_hist'] = macd['MACDh_12_26_9']
 
-# ====================== 数据分割 ======================
-def split_data(df, train_ratio=0.6, val_ratio=0.2):
-    n = len(df)
-    train_end = int(n * train_ratio)
-    val_end = int(n * (train_ratio + val_ratio))
-    train = df.iloc[:train_end].copy()
-    val = df.iloc[train_end:val_end].copy()
-    test = df.iloc[val_end:].copy()
-    return train, val, test
+# ATR
+df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+df['atr_pct'] = df['atr'] / df['close'] * 100
 
-train, val, test = split_data(df_feat)
-st.info(f"📊 训练集: {len(train)} | 验证集: {len(val)} | 测试集: {len(test)}")
+# ADX
+adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+df['adx'] = adx['ADX_14']
 
-# ====================== 特征列 ======================
-features = [col for col in df_feat.columns if col not in ['open','high','low','close','volume','target']]
+# 布林带
+bb = ta.bbands(df['close'], length=20, std=2)
+df['bb_upper'] = bb['BBU_20_2.0']
+df['bb_lower'] = bb['BBL_20_2.0']
+df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
 
-# ====================== 训练XGBoost（自适应版本） ======================
-import xgboost as xgb
-from sklearn.metrics import accuracy_score
+# 成交量比率
+df['volume_ma20'] = df['volume'].rolling(20).mean()
+df['volume_ratio'] = df['volume'] / df['volume_ma20']
 
-def train_xgboost(train, val, features):
-    X_train = train[features]
-    y_train = train['target']
-    X_val = val[features]
-    y_val = val['target']
-    
-    # 数据完整性检查
-    if X_train.isnull().any().any():
-        st.error("❌ 训练特征包含 NaN 值，请检查特征工程")
-        st.stop()
-    if y_train.isnull().any():
-        st.error("❌ 训练目标包含 NaN 值")
-        st.stop()
-    if len(y_train.unique()) < 2:
-        st.error("❌ 目标变量只有一个类别，模型无法训练。请检查特征或调整目标定义。")
-        st.stop()
-    
-    model = None
-    # 尝试多种训练方式以适应不同XGBoost版本
-    try:
-        # 方式1: 使用 early_stopping_rounds (xgboost 1.x 和部分2.x)
-        model = xgb.XGBClassifier(
-            n_estimators=500,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            eval_metric='logloss'
-        )
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            early_stopping_rounds=30,
-            verbose=False
-        )
-        st.info("✅ 使用 early_stopping_rounds 训练成功")
-    except TypeError:
-        try:
-            # 方式2: 使用 callbacks (xgboost 2.x 推荐)
-            model = xgb.XGBClassifier(
-                n_estimators=500,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42,
-                eval_metric='logloss'
-            )
-            model.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                callbacks=[xgb.callback.EarlyStopping(rounds=30)],
-                verbose=False
-            )
-            st.info("✅ 使用 callbacks 训练成功")
-        except (TypeError, AttributeError):
-            # 方式3: 不带早停，使用固定迭代次数
-            st.warning("⚠️ 当前XGBoost版本不支持早停，将使用固定迭代次数训练（可能较慢但兼容）。")
-            model = xgb.XGBClassifier(
-                n_estimators=200,  # 适当减少
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42
-            )
-            model.fit(X_train, y_train)
-            st.info("✅ 使用固定迭代次数训练成功")
-    except Exception as e:
-        st.error(f"🔥 模型训练失败: {str(e)}")
-        st.error("请检查数据或联系开发者")
-        st.stop()
-    
-    y_pred_val = model.predict(X_val)
-    acc = accuracy_score(y_val, y_pred_val)
-    st.write(f"✅ 验证集准确率: {acc:.3f}")
-    return model
+# =============================
+# 生成标签：未来 N 根 K 线涨幅是否超过阈值
+# =============================
+df['future_return'] = (df['close'].shift(-N_FUTURE) - df['close']) / df['close']
+df['target'] = (df['future_return'] > THRESHOLD).astype(int)
 
-with st.spinner("训练XGBoost模型中..."):
-    model = train_xgboost(train, val, features)
+# 删除 NaN 行
+df.dropna(inplace=True)
+print(f"清洗后数据量：{len(df)} 条")
+print(f"正样本比例: {df['target'].mean():.2%}")
 
-# ====================== 回测函数 ======================
-def backtest(df, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr):
-    """
-    回测核心逻辑，返回绩效指标
-    """
-    df = df.copy()
-    df['prob'] = model.predict_proba(df[features])[:, 1]
-    df['signal'] = 0
-    df.loc[df['prob'] >= th_long, 'signal'] = 1
-    df.loc[df['prob'] <= th_short, 'signal'] = -1
-    
-    position = 0
-    entry_price = 0.0
-    entry_atr = 0.0
-    equity = [0.0]
-    trades = []
-    wins = 0
-    
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i-1]
-        open_price = row['open']
-        high = row['high']
-        low = row['low']
-        atr = row['atr']
-        
-        # 现有持仓管理
-        if position == 1:
-            stop = entry_price - atr_mult * entry_atr
-            take = entry_price + rr * atr_mult * entry_atr
-            exit_price = None
-            if low <= stop:
-                exit_price = stop
-            elif high >= take:
-                exit_price = take
-            if exit_price is not None:
-                pnl = (exit_price - entry_price) * (1 - fee_rate * 2) - slippage
-                equity.append(equity[-1] + pnl)
-                trades.append(pnl)
-                if pnl > 0: wins += 1
-                position = 0
-        
-        elif position == -1:
-            stop = entry_price + atr_mult * entry_atr
-            take = entry_price - rr * atr_mult * entry_atr
-            exit_price = None
-            if high >= stop:
-                exit_price = stop
-            elif low <= take:
-                exit_price = take
-            if exit_price is not None:
-                pnl = (entry_price - exit_price) * (1 - fee_rate * 2) - slippage
-                equity.append(equity[-1] + pnl)
-                trades.append(pnl)
-                if pnl > 0: wins += 1
-                position = 0
-        
-        # 新信号处理（使用上一根K线的信号）
-        if prev['signal'] == 1 and position != 1:
-            if position == -1:
-                pnl = (entry_price - open_price) * (1 - fee_rate * 2) - slippage
-                equity.append(equity[-1] + pnl)
-                trades.append(pnl)
-                if pnl > 0: wins += 1
-            position = 1
-            entry_price = open_price
-            entry_atr = atr
-        
-        elif prev['signal'] == -1 and position != -1:
-            if position == 1:
-                pnl = (open_price - entry_price) * (1 - fee_rate * 2) - slippage
-                equity.append(equity[-1] + pnl)
-                trades.append(pnl)
-                if pnl > 0: wins += 1
-            position = -1
-            entry_price = open_price
-            entry_atr = atr
-    
-    # 最后平仓
-    if position != 0:
-        last_price = df['close'].iloc[-1]
-        if position == 1:
-            pnl = (last_price - entry_price) * (1 - fee_rate * 2) - slippage
-        else:
-            pnl = (entry_price - last_price) * (1 - fee_rate * 2) - slippage
-        equity.append(equity[-1] + pnl)
-        trades.append(pnl)
-        if pnl > 0: wins += 1
-    
-    total_pnl = sum(trades)
-    win_rate = wins / len(trades) if trades else 0
-    max_equity = np.maximum.accumulate(equity)
-    drawdown = max_equity - equity
-    max_dd = np.max(drawdown)
-    sharpe = np.mean(trades) / np.std(trades) * np.sqrt(365*24*60/5) if len(trades)>1 and np.std(trades)!=0 else 0
-    
-    return {
-        'total_pnl': total_pnl,
-        'win_rate': win_rate,
-        'max_dd': max_dd,
-        'sharpe': sharpe,
-        'trades': len(trades),
-        'equity': equity
-    }
+# =============================
+# 准备特征和标签
+# =============================
+X = df[FEATURES]
+y = df['target']
+print(f"特征矩阵形状: {X.shape}")
 
-# ====================== 多空阈值联合优化 ======================
-@st.cache_data
-def optimize_params(val_df, model, features, fee_rate, slippage, long_range, short_range):
-    best_sharpe = -999
-    best_params = None
-    best_result = None
-    
-    long_ths = np.arange(long_range[0], long_range[1] + 0.01, 0.05)
-    short_ths = np.arange(short_range[0], short_range[1] + 0.01, 0.05)
-    atr_mults = [1.0, 1.5, 2.0]
-    rrs = [1.5, 2.0, 2.5, 3.0]
-    
-    total = len(long_ths) * len(short_ths) * len(atr_mults) * len(rrs)
-    progress_bar = st.progress(0, text="优化参数中...")
-    count = 0
-    
-    for th_l in long_ths:
-        for th_s in short_ths:
-            for atr in atr_mults:
-                for rr in rrs:
-                    res = backtest(val_df, model, features, th_l, th_s, fee_rate, slippage, atr, rr)
-                    if res['sharpe'] > best_sharpe and res['trades'] >= 20:
-                        best_sharpe = res['sharpe']
-                        best_params = (th_l, th_s, atr, rr)
-                        best_result = res
-                    count += 1
-                    progress_bar.progress(count / total)
-    
-    progress_bar.empty()
-    return best_params, best_result
+# =============================
+# 时间序列交叉验证
+# =============================
+tscv = TimeSeriesSplit(n_splits=5)
+print("使用时间序列交叉验证 (5折)")
 
-long_range = (long_th_min, long_th_max)
-short_range = (short_th_min, short_th_max)
+# =============================
+# 超参数网格搜索
+# =============================
+param_grid = {
+    'n_estimators': [100, 200, 300],
+    'learning_rate': [0.05, 0.1, 0.2],
+    'max_depth': [3, 5, 7],
+    'min_samples_split': [10, 20],
+    'min_samples_leaf': [5, 10]
+}
 
-st.write("🔄 正在验证集上优化多空阈值及交易参数...")
-best_params, val_res = optimize_params(val, model, features, fee_rate, slippage, long_range, short_range)
+base_model = GradientBoostingClassifier(random_state=RANDOM_STATE)
 
-if best_params is None:
-    st.error("❌ 未找到符合条件的参数组合，请调整参数范围或检查数据。")
-    st.stop()
+grid_search = GridSearchCV(
+    estimator=base_model,
+    param_grid=param_grid,
+    cv=tscv,
+    scoring='roc_auc',
+    n_jobs=-1,
+    verbose=1
+)
 
-th_long, th_short, atr_mult, rr = best_params
+print("开始网格搜索...")
+grid_search.fit(X, y)
 
-st.success("✅ 验证集优化完成！")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("做多阈值", f"{th_long:.2f}")
-col2.metric("做空阈值", f"{th_short:.2f}")
-col3.metric("ATR倍数", f"{atr_mult}")
-col4.metric("盈亏比", f"{rr}")
+best_model = grid_search.best_estimator_
+print(f"最佳参数: {grid_search.best_params_}")
+print(f"最佳交叉验证 AUC: {grid_search.best_score_:.4f}")
 
-st.write("📈 验证集最优结果：")
-st.json(val_res)
+# =============================
+# 在最终测试集上评估（按时间顺序的最后20%）
+# =============================
+split_idx = int(len(X) * (1 - TEST_SIZE))
+X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-# ====================== 测试集验证 ======================
-st.write("🔄 在测试集上验证...")
-test_res = backtest(test, model, features, th_long, th_short, fee_rate, slippage, atr_mult, rr)
+# 用最佳参数重新训练（或者直接用grid_search.best_estimator_已经在整个数据集上训练过）
+# 这里重新训练以便准确评估测试集
+final_model = GradientBoostingClassifier(**grid_search.best_params_, random_state=RANDOM_STATE)
+final_model.fit(X_train, y_train)
 
-st.header("🎯 测试集最终结果")
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("交易次数", test_res['trades'])
-col2.metric("胜率", f"{test_res['win_rate']*100:.1f}%")
-col3.metric("总盈利", f"{test_res['total_pnl']:.2f} USDT")
-col4.metric("最大回撤", f"{test_res['max_dd']:.2f} USDT")
-col5.metric("夏普比率", f"{test_res['sharpe']:.2f}")
+y_pred = final_model.predict(X_test)
+y_proba = final_model.predict_proba(X_test)[:, 1]
 
-# ====================== 资金曲线图 ======================
-if test_res['trades'] > 0:
-    import plotly.graph_objects as go
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=test.index[:len(test_res['equity'])],
-        y=test_res['equity'],
-        mode='lines',
-        name='资金曲线',
-        line=dict(color='#00ff88', width=2)
-    ))
-    fig.update_layout(
-        title="测试集资金曲线",
-        xaxis_title="时间",
-        yaxis_title="累积盈亏 (USDT)",
-        template="plotly_dark",
-        height=400
-    )
-    st.plotly_chart(fig, use_container_width=True)
+print("\n========== 测试集评估 ==========")
+print(f"准确率: {accuracy_score(y_test, y_pred):.4f}")
+print("分类报告:")
+print(classification_report(y_test, y_pred, target_names=['下跌', '上涨']))
+print("混淆矩阵:")
+print(confusion_matrix(y_test, y_pred))
 
-# ====================== 结论 ======================
-if test_res['sharpe'] > 1.0:
-    st.success("✨ 测试结果优秀！可以考虑进一步优化或实盘模拟。")
-elif test_res['sharpe'] > 0:
-    st.info("📊 测试结果为正收益，但稳定性一般。可尝试调整特征或参数范围。")
-else:
-    st.warning("⚠️ 测试结果为负，策略可能无效。请检查特征或逻辑。")
+# =============================
+# 特征重要性
+# =============================
+importance = pd.DataFrame({
+    'feature': FEATURES,
+    'importance': final_model.feature_importances_
+}).sort_values('importance', ascending=False)
+print("\n特征重要性:")
+print(importance)
+
+# =============================
+# 保存模型和特征列表
+# =============================
+joblib.dump(final_model, MODEL_FILE)
+joblib.dump(FEATURES, FEATURE_FILE)
+print(f"模型已保存至 {MODEL_FILE}")
+print(f"特征列表已保存至 {FEATURE_FILE}")
+
+# 可选：保存预处理参数（如均值、标准差）以便在预测时使用
+# 但本模型不需要标准化，因为树模型对尺度不敏感
+print("训练完成！")
