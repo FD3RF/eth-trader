@@ -1,7 +1,7 @@
 """
-小利润交易策略专业版（文件上传版）- 修复结构点检测函数
-- 自动转换毫秒时间戳
-- 正确的结构点检测
+小利润交易策略专业版（文件上传版）- 带自动参数优化
+- 手动回测 + 自动网格搜索
+- 记录所有组合绩效并显示最优结果
 """
 
 import streamlit as st
@@ -10,12 +10,14 @@ import plotly.graph_objects as go
 import ta
 import numpy as np
 from datetime import datetime, timedelta
+import itertools
+import time
 
-st.set_page_config(layout="wide", page_title="小利润策略·修复版")
-st.title("📈 小利润交易策略（修复版）")
+st.set_page_config(layout="wide", page_title="小利润策略·自动优化版")
+st.title("📈 小利润交易策略（自动优化版）")
 
 with st.sidebar:
-    st.header("⚙️ 参数设置")
+    st.header("⚙️ 手动回测参数")
     use_structure = st.checkbox("结构突破", value=True)
     use_trend = st.checkbox("趋势过滤", value=False)
     use_volume = st.checkbox("成交量放大", value=False)
@@ -31,6 +33,29 @@ with st.sidebar:
     tp_mult = st.number_input("止盈ATR倍数", 0.6, 2.0, 0.9, step=0.1)
     risk_pct = st.slider("单笔风险 %", 0.5, 2.0, 1.0, step=0.1)
     slippage = st.number_input("滑点 %", 0.0, 0.2, 0.05, step=0.01)
+
+    st.divider()
+    st.header("🤖 自动参数优化")
+    optimize = st.checkbox("启用自动优化")
+    if optimize:
+        st.info("选择要优化的参数范围（其他参数使用当前侧边栏值）")
+        opt_adx = st.checkbox("优化ADX阈值", value=True)
+        opt_sl = st.checkbox("优化止损倍数", value=True)
+        opt_tp = st.checkbox("优化止盈倍数", value=True)
+        opt_vol = st.checkbox("优化放量倍数", value=True)
+        opt_modules = st.checkbox("优化模块开关（趋势/成交量/假突破）", value=False)
+
+        adx_range = st.slider("ADX范围", 15, 35, (18, 28), step=1, disabled=not opt_adx)
+        sl_range = st.slider("止损倍数范围", 0.4, 1.5, (0.6, 1.2), step=0.1, disabled=not opt_sl)
+        tp_range = st.slider("止盈倍数范围", 0.8, 2.5, (1.0, 2.0), step=0.1, disabled=not opt_tp)
+        vol_range = st.slider("放量倍数范围", 1.0, 2.5, (1.2, 1.8), step=0.1, disabled=not opt_vol)
+
+        max_combos = st.number_input("最大组合数（过多会慢）", 10, 200, 50, step=10)
+        if st.button("🚀 开始优化"):
+            st.session_state['optimize'] = True
+    else:
+        if 'optimize' in st.session_state:
+            del st.session_state['optimize']
 
     uploaded_file = st.file_uploader("📂 上传CSV (包含列: ts, open, high, low, close, vol)", type=["csv"])
 
@@ -57,37 +82,30 @@ else:
     st.stop()
 
 # ==========================
-# 指标计算
+# 指标计算（依赖固定参数，优化时会重新计算）
 # ==========================
-df = df_raw.copy()
-df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=ema_fast)
-df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_slow)
-df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
-df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=10)
-df["volume_ma"] = df["vol"].rolling(window=20).mean()
-df = df.dropna().reset_index(drop=True)
+def prepare_data(df_raw, ema_fast, ema_slow):
+    df = df_raw.copy()
+    df["EMA_fast"] = ta.trend.ema_indicator(df["close"], window=ema_fast)
+    df["EMA_slow"] = ta.trend.ema_indicator(df["close"], window=ema_slow)
+    df["ADX"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
+    df["ATR"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=10)
+    df["volume_ma"] = df["vol"].rolling(window=20).mean()
+    return df.dropna().reset_index(drop=True)
 
-# ==========================
-# 结构点检测（延迟确认）- 修复版本
-# ==========================
+# 结构点检测（仅依赖数据，与参数无关）
 def find_swing_points(df, window=3):
     highs, lows = [], []
     for i in range(window, len(df)-window):
-        # 检测高点
         if df['high'].iloc[i] == max(df['high'].iloc[i-window:i+window+1]):
             confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
             highs.append((df['ts'].iloc[i], df['high'].iloc[i], confirm_time))
-        # 检测低点
         if df['low'].iloc[i] == min(df['low'].iloc[i-window:i+window+1]):
             confirm_time = df['ts'].iloc[i] + timedelta(minutes=5*window)
             lows.append((df['ts'].iloc[i], df['low'].iloc[i], confirm_time))
     return highs, lows
 
-swing_highs, swing_lows = find_swing_points(df, window=3)
-
-# ==========================
-# 假突破检测
-# ==========================
+# 假突破检测（与参数无关）
 def is_fake(row):
     body = abs(row["close"] - row["open"])
     if body == 0:
@@ -96,10 +114,8 @@ def is_fake(row):
     lower = min(row["close"], row["open"]) - row["low"]
     return upper > body * 1.5 or lower > body * 1.5
 
-# ==========================
-# 回测引擎（模块化）
-# ==========================
-def run_backtest(df, swing_highs, swing_lows, modules):
+# 回测引擎（参数化）
+def run_backtest(df, swing_highs, swing_lows, modules, adx_thr, vol_mult, sl_mult, tp_mult, risk_pct, slippage):
     capital = 20.0
     position = None
     trades = []
@@ -252,9 +268,15 @@ def run_backtest(df, swing_highs, swing_lows, modules):
         return [], 0, 0, 0, 0, 0, equity_curve, 0
 
 # ==========================
-# 运行回测
+# 数据准备（固定EMA参数，其他在回测中传入）
 # ==========================
-if st.sidebar.button("🚀 运行回测"):
+df_base = prepare_data(df_raw, ema_fast, ema_slow)
+swing_highs, swing_lows = find_swing_points(df_base, window=3)
+
+# ==========================
+# 手动回测
+# ==========================
+if st.sidebar.button("🚀 运行手动回测"):
     modules = {
         "structure": use_structure,
         "trend": use_trend,
@@ -263,10 +285,10 @@ if st.sidebar.button("🚀 运行回测"):
     }
     with st.spinner("回测进行中..."):
         trades, win_rate, net_profit, sharpe, max_dd, rr, equity_curve, trade_cnt = run_backtest(
-            df, swing_highs, swing_lows, modules
+            df_base, swing_highs, swing_lows, modules, adx_thr, vol_mult, sl_mult, tp_mult, risk_pct, slippage
         )
 
-    st.subheader("📊 回测结果")
+    st.subheader("📊 手动回测结果")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("交易次数", trade_cnt)
     col2.metric("胜率", f"{win_rate:.1f}%")
@@ -277,7 +299,7 @@ if st.sidebar.button("🚀 运行回测"):
 
     if trades:
         fig_eq = go.Figure()
-        times = df['ts'].iloc[:len(equity_curve)]
+        times = df_base['ts'].iloc[:len(equity_curve)]
         fig_eq.add_trace(go.Scatter(x=times, y=equity_curve, mode='lines', name='资金曲线'))
         fig_eq.update_layout(title="资金曲线", height=400)
         st.plotly_chart(fig_eq, use_container_width=True)
@@ -287,7 +309,85 @@ if st.sidebar.button("🚀 运行回测"):
         st.info("该组合下无交易")
 
 # ==========================
-# 模块组合对比
+# 自动优化
+# ==========================
+if 'optimize' in st.session_state and st.session_state.get('optimize'):
+    st.subheader("🤖 参数优化进行中...")
+    # 生成参数网格
+    adx_values = list(range(adx_range[0], adx_range[1]+1)) if opt_adx else [adx_thr]
+    sl_values = [round(x, 1) for x in np.arange(sl_range[0], sl_range[1]+0.1, 0.1)] if opt_sl else [sl_mult]
+    tp_values = [round(x, 1) for x in np.arange(tp_range[0], tp_range[1]+0.1, 0.1)] if opt_tp else [tp_mult]
+    vol_values = [round(x, 1) for x in np.arange(vol_range[0], vol_range[1]+0.1, 0.1)] if opt_vol else [vol_mult]
+
+    # 模块开关组合
+    if opt_modules:
+        module_combos = [
+            {"trend": t, "volume": v, "fake": f}
+            for t in [False, True]
+            for v in [False, True]
+            for f in [False, True]
+        ]
+    else:
+        module_combos = [{"trend": use_trend, "volume": use_volume, "fake": use_fake}]
+
+    all_combos = list(itertools.product(adx_values, sl_values, tp_values, vol_values, module_combos))
+    total_combos = len(all_combos)
+    if total_combos > max_combos:
+        st.warning(f"组合数 {total_combos} 超过最大限制 {max_combos}，将随机采样 {max_combos} 组")
+        indices = np.random.choice(total_combos, max_combos, replace=False)
+        all_combos = [all_combos[i] for i in indices]
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    results = []
+
+    for idx, (adx, sl, tp, vol, mods) in enumerate(all_combos):
+        status_text.text(f"测试组合 {idx+1}/{len(all_combos)}: ADX={adx}, SL={sl}, TP={tp}, VOL={vol}, 模块={mods}")
+        modules = {
+            "structure": True,  # 结构突破始终开启
+            "trend": mods["trend"],
+            "volume": mods["volume"],
+            "fake": mods["fake"]
+        }
+        _, win_rate, net_profit, sharpe, max_dd, rr, _, trade_cnt = run_backtest(
+            df_base, swing_highs, swing_lows, modules, adx, vol, sl, tp, risk_pct, slippage
+        )
+        results.append({
+            "ADX": adx,
+            "止损倍数": sl,
+            "止盈倍数": tp,
+            "放量倍数": vol,
+            "趋势过滤": mods["trend"],
+            "成交量": mods["volume"],
+            "假突破": mods["fake"],
+            "交易次数": trade_cnt,
+            "胜率%": round(win_rate, 1),
+            "净利润": round(net_profit, 2),
+            "盈亏比": round(rr, 2),
+            "夏普": round(sharpe, 2),
+            "最大回撤%": round(max_dd, 2)
+        })
+        progress_bar.progress((idx+1)/len(all_combos))
+
+    df_results = pd.DataFrame(results)
+    # 按夏普比率排序（可改为按净利润）
+    df_results = df_results.sort_values("夏普", ascending=False).reset_index(drop=True)
+
+    st.subheader("🏆 优化结果 TOP10")
+    st.dataframe(df_results.head(10), use_container_width=True)
+
+    # 最佳参数
+    best = df_results.iloc[0]
+    st.success(f"最佳组合: ADX={best['ADX']}, 止损={best['止损倍数']}, 止盈={best['止盈倍数']}, 放量={best['放量倍数']}, 趋势={best['趋势过滤']}, 成交量={best['成交量']}, 假突破={best['假突破']}")
+    st.metric("夏普比率", best["夏普"])
+    st.metric("净利润", best["净利润"])
+    st.metric("胜率", f"{best['胜率%']}%")
+
+    # 清空优化状态，避免重复运行
+    del st.session_state['optimize']
+
+# ==========================
+# 模块组合对比（始终显示）
 # ==========================
 st.divider()
 st.subheader("📈 模块组合对比分析")
@@ -299,11 +399,13 @@ combinations = [
     {"name": "+假突破过滤", "structure": True, "trend": True, "volume": True, "fake": True},
 ]
 
-results = []
+results_comp = []
 for comb in combinations:
     modules = {k: v for k, v in comb.items() if k != "name"}
-    t, wr, npnl, shr, mdd, rr, _, cnt = run_backtest(df, swing_highs, swing_lows, modules)
-    results.append({
+    t, wr, npnl, shr, mdd, rr, _, cnt = run_backtest(
+        df_base, swing_highs, swing_lows, modules, adx_thr, vol_mult, sl_mult, tp_mult, risk_pct, slippage
+    )
+    results_comp.append({
         "组合": comb["name"],
         "交易次数": cnt,
         "胜率%": round(wr, 1),
@@ -313,9 +415,10 @@ for comb in combinations:
         "最大回撤%": round(mdd, 2)
     })
 
-df_comp = pd.DataFrame(results)
+df_comp = pd.DataFrame(results_comp)
 st.dataframe(df_comp, use_container_width=True)
 
+# 边际贡献分析
 base_row = df_comp[df_comp["组合"] == "仅结构突破"]
 if not base_row.empty:
     base_profit = base_row["净利润"].values[0]
@@ -338,7 +441,7 @@ if not base_row.empty:
 # K线图
 # ==========================
 st.subheader("📉 K线图（最后200根）")
-df_plot = df.tail(200)
+df_plot = df_base.tail(200)
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
     x=df_plot["ts"], open=df_plot["open"], high=df_plot["high"],
