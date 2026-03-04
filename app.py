@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纯K线形态策略回测（看涨/看跌吞没） - 修复KeyError版
+纯K线形态策略回测（看涨/看跌吞没） - 修复显示错误版
 """
 
 import streamlit as st
@@ -151,7 +151,7 @@ def backtest_engulfing(df):
         "胜率": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
         "盈利": sum(trades),
         "equity": equity,
-        "trades": trades   # 新增这一行，用于显示交易明细
+        "trades": trades
     }
 
 # ====== 运行回测（使用全部数据，不分割） ======
@@ -174,9 +174,15 @@ else:
 # ====== 显示最近几笔交易示例 ======
 if result["交易次数"] > 0:
     st.subheader("交易明细（最近5笔）")
-    # 简单显示最后5笔交易的盈亏
+    # 取最后5笔交易
+    last_n = 5
+    trades_list = result["trades"][-last_n:]
+    # 生成对应的交易序号（从1开始计数的自然序号）
+    start_idx = max(1, len(result["trades"]) - last_n + 1)
+    trade_indices = list(range(start_idx, len(result["trades"]) + 1))
+    # 如果不足5笔，按实际长度显示
     last_trades = pd.DataFrame({
-        "交易序号": range(len(result["equity"])-len(result["trades"]), len(result["equity"])),
-        "盈亏": result["trades"][-5:]
+        "交易序号": trade_indices,
+        "盈亏": trades_list
     })
     st.dataframe(last_trades)
