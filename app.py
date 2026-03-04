@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（终极修复版）
+纸交易模拟（终极版：参数扫描 + 自动推荐）
 功能：
 - 支持手续费与滑点模拟
 - 可调参数：突破周期、盈亏比、最小持有K线、实体强度阈值、成交量均线周期、突破阈值
 - 可选样本外测试（训练/测试集划分）
 - 参数自动扫描：一次性测试多组参数组合，汇总对比结果
+- 自动推荐：根据您的偏好（平衡、优先交易数、优先夏普比率、优先胜率）计算综合得分，显示前三名最优组合
 - 全面统计指标（最大回撤、夏普比率、盈亏比、连续亏损等）
 - 权益曲线与回撤可视化（纯Streamlit实现）
 - 适配 CSV 文件列名：ts, open, high, low, close, vol
@@ -16,8 +17,8 @@ import pandas as pd
 import numpy as np
 from itertools import product
 
-st.set_page_config(page_title="纸交易模拟(参数扫描)", layout="wide")
-st.title("📈 纸交易模拟（终极修复版：参数自动扫描）")
+st.set_page_config(page_title="纸交易模拟(参数扫描+自动推荐)", layout="wide")
+st.title("📈 纸交易模拟（终极版：参数扫描 + 自动推荐）")
 
 # ==================== 侧边栏参数设置 ====================
 st.sidebar.header("📌 策略参数（单次运行）")
@@ -336,11 +337,59 @@ if enable_scan and run_scan:
         result_df = pd.DataFrame(scan_results)
         st.dataframe(result_df)
 
-        st.subheader("📊 按交易数排序")
-        st.dataframe(result_df.sort_values('交易数', ascending=False))
+        # ==================== 自动推荐功能 ====================
+        st.subheader("🎯 自动参数推荐")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            recommend_strategy = st.radio(
+                "推荐偏好",
+                options=["平衡", "优先交易数", "优先夏普比率", "优先胜率"],
+                index=0,
+                help="选择后系统将根据权重计算综合得分，并显示排名前三的参数组合"
+            )
+        with col2:
+            # 定义权重
+            if recommend_strategy == "优先交易数":
+                w_trades, w_sharpe, w_winrate, w_drawdown = 0.5, 0.2, 0.2, -0.1
+            elif recommend_strategy == "优先夏普比率":
+                w_trades, w_sharpe, w_winrate, w_drawdown = 0.2, 0.5, 0.2, -0.1
+            elif recommend_strategy == "优先胜率":
+                w_trades, w_sharpe, w_winrate, w_drawdown = 0.2, 0.2, 0.5, -0.1
+            else:  # 平衡
+                w_trades, w_sharpe, w_winrate, w_drawdown = 0.3, 0.3, 0.3, -0.1
 
-        st.subheader("📊 按夏普比率排序")
-        st.dataframe(result_df.sort_values('夏普比率', ascending=False))
+            # 计算综合得分（归一化后加权）
+            df_norm = result_df.copy()
+            # 归一化正向指标（越大越好）
+            for col in ['交易数', '胜率', '夏普比率']:
+                min_val = df_norm[col].min()
+                max_val = df_norm[col].max()
+                df_norm[col + '_norm'] = (df_norm[col] - min_val) / (max_val - min_val + 1e-9)
+            # 最大回撤取负（越小越好）
+            min_dd = df_norm['最大回撤'].min()
+            max_dd = df_norm['最大回撤'].max()
+            df_norm['最大回撤_norm'] = 1 - (df_norm['最大回撤'] - min_dd) / (max_dd - min_dd + 1e-9)
+
+            # 加权综合得分
+            df_norm['综合得分'] = (w_trades * df_norm['交易数_norm'] +
+                                  w_sharpe * df_norm['夏普比率_norm'] +
+                                  w_winrate * df_norm['胜率_norm'] +
+                                  w_drawdown * df_norm['最大回撤_norm'])
+
+            # 选取前三名
+            top3 = df_norm.nlargest(3, '综合得分')[
+                ['body_threshold', 'vol_ma_period', 'break_threshold',
+                 '交易数', '胜率', '夏普比率', '最大回撤', '综合得分']
+            ]
+            # 格式化显示
+            st.dataframe(
+                top3.style.format({
+                    '胜率': '{:.2f}%',
+                    '夏普比率': '{:.3f}',
+                    '最大回撤': '{:.2f}%',
+                    '综合得分': '{:.3f}'
+                })
+            )
 
         # 下载按钮
         csv = result_df.to_csv(index=False).encode('utf-8')
@@ -456,4 +505,4 @@ else:
             st.line_chart(equity_df[['权益', '峰值']])
             st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（终极修复版）")
+st.success("模拟完成（终极版：参数扫描 + 自动推荐）")
