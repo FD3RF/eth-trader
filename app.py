@@ -1,34 +1,116 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟版（纯K）
-用于实盘验证，不下单
+实盘框架（模板）
+纯K信号 + 风控 + 下单接口（需你接API）
+不含任何交易所凭据
 """
 
-import streamlit as st
-import pandas as pd
+import time
 import numpy as np
+import pandas as pd
 
-st.set_page_config(page_title="纸交易模拟", layout="wide")
-st.title("🚀 纸交易模拟（实盘验证）")
+# ================================
+# 风控参数
+# ================================
+RISK_PER_TRADE = 0.01   # 单笔风险 1%
+RR = 2.5                # 盈亏比
+MIN_HOLD = 3             # 最小持仓K线
 
-file = st.file_uploader("上传 CSV", type=["csv"])
-if file is None:
-    st.stop()
+# ================================
+# 信号生成（纯K）
+# ================================
+def generate_signal(df):
+    row = df.iloc[-1]
+    strong_body = row['body_ratio'] > 0.35
 
-df = pd.read_csv(file)
-df.columns = [c.lower() for c in df.columns]
+    if (row['close'] > row['high_max']) and strong_body and (row['close'] > row['open']):
+        return 1  # 多
+    if (row['close'] < row['low_min']) and strong_body and (row['close'] < row['open']):
+        return -1 # 空
+    return 0
 
-df['open'] = df['open']
-df['high'] = df['high']
-df['low'] = df['low']
-df['close'] = df['close']
-df['volume'] = df['vol']
+# ================================
+# 仓位计算（动态）
+# ================================
+def calc_position_size(capital, atr):
+    return (capital * RISK_PER_TRADE) / (atr * 2 + 1e-9)
 
-st.write(f"数据行: {len(df)}")
+# ================================
+# 模拟下单接口（需替换为实盘API）
+# ================================
+def place_order(side, size):
+    """
+    side: 'buy' 或 'sell'
+    size: 下单数量
+    """
+    print(f"[ORDER] side={side}, size={size}")
+    # 这里接你的交易所API
+    return True
 
-# =========================
-# 纯K特征
-# =========================
+def close_position():
+    print("[CLOSE] 平仓")
+    return True
+
+# ================================
+# 实盘循环（伪框架）
+# ================================
+def trading_loop(api, capital=10000):
+    """
+    api: 你自己的行情/数据接口
+    """
+    position = 0
+    entry = 0
+    hold = 0
+
+    while True:
+        df = api.get_latest()  # 你需实现：获取最新K线DataFrame
+        df = build_features(df)
+
+        signal = generate_signal(df)
+        row = df.iloc[-1]
+        atr = row['atr']
+
+        if position != 0:
+            hold += 1
+        else:
+            hold = 0
+
+        # ===== 平仓逻辑 =====
+        if position == 1:
+            stop = entry - atr * 1.5
+            take = entry + (entry - stop) * RR
+
+            if row['low'] <= stop or (hold >= MIN_HOLD and signal == -1):
+                close_position()
+                position = 0
+
+        if position == -1:
+            stop = entry + atr * 1.5
+            take = entry - (stop - entry) * RR
+
+            if row['high'] >= stop or (hold >= MIN_HOLD and signal == 1):
+                close_position()
+                position = 0
+
+        # ===== 开仓 =====
+        if position == 0 and signal != 0:
+            size = calc_position_size(capital, atr)
+
+            if signal == 1:
+                place_order('buy', size)
+                entry = row['close']
+                position = 1
+
+            elif signal == -1:
+                place_order('sell', size)
+                entry = row['close']
+                position = -1
+
+        time.sleep(1)  # 控制频率
+
+# ================================
+# 纯K特征构建
+# ================================
 def build_features(df):
     df = df.copy()
     lookback = 20
@@ -40,112 +122,33 @@ def build_features(df):
     df['range'] = df['high'] - df['low']
     df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
 
+    tr = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - df['close'].shift()).abs(),
+        (df['low'] - df['close'].shift()).abs()
+    ], axis=1).max(axis=1)
+
+    df['atr'] = tr.rolling(14).mean()
     df.dropna(inplace=True)
     return df
 
-df = build_features(df)
+# ================================
+# 使用说明
+# ================================
+"""
+使用步骤：
 
-# =========================
-# 模拟交易记录
-# =========================
-records = []
+1. 实现行情接口：
+   api.get_latest() -> 返回 DataFrame（含 open/high/low/close/vol）
 
-def simulate(df):
-    position = 0
-    entry = 0
-    hold = 0
-    rr = 2.5
-    min_hold = 3
+2. 实现下单接口：
+   place_order / close_position 接入交易所 API
 
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        price = row['open']
-        high = row['high']
-        low = row['low']
+3. 小资金测试：
+   先用模拟账户
 
-        if position != 0:
-            hold += 1
-        else:
-            hold = 0
+4. 风控：
+   单笔 1%
+"""
 
-        strong_body = row['body_ratio'] > 0.35
-
-        # 信号
-        signal = 0
-        if (row['close'] > row['high_max']) and strong_body and (row['close'] > row['open']):
-            signal = 1
-        elif (row['close'] < row['low_min']) and strong_body and (row['close'] < row['open']):
-            signal = -1
-
-        # 平多
-        if position == 1:
-            stop = entry - (row['range'] * 0.5)
-            take = entry + (entry - stop) * rr
-
-            if low <= stop:
-                records.append({"pnl": stop - entry})
-                position = 0
-
-            elif high >= take:
-                records.append({"pnl": take - entry})
-                position = 0
-
-            elif hold >= min_hold and signal == -1:
-                records.append({"pnl": price - entry})
-                position = 0
-
-        # 平空
-        if position == -1:
-            stop = entry + (row['range'] * 0.5)
-            take = entry - (stop - entry) * rr
-
-            if high >= stop:
-                records.append({"pnl": entry - stop})
-                position = 0
-
-            elif low <= take:
-                records.append({"pnl": entry - take})
-                position = 0
-
-            elif hold >= min_hold and signal == 1:
-                records.append({"pnl": entry - price})
-                position = 0
-
-        # 开仓
-        if position == 0:
-            if signal == 1:
-                entry = price
-                position = 1
-            elif signal == -1:
-                entry = price
-                position = -1
-
-    return records
-
-# =========================
-# 执行模拟
-# =========================
-records = simulate(df)
-
-# =========================
-# 统计
-# =========================
-st.header("模拟结果")
-
-if records:
-    df_rec = pd.DataFrame(records)
-    st.write(df_rec)
-
-    st.metric("交易数", len(df_rec))
-    st.metric("胜率", f"{(df_rec['pnl'] > 0).mean() * 100:.2f}%")
-    st.metric("总盈利", df_rec['pnl'].sum())
-    st.metric("平均单笔", df_rec['pnl'].mean())
-    st.metric("最大盈利", df_rec['pnl'].max())
-    st.metric("最大亏损", df_rec['pnl'].min())
-
-    st.line_chart(df_rec['pnl'].cumsum())
-
-else:
-    st.write("无交易记录")
-
-st.success("模拟完成（纸交易）")
+print("实盘框架加载完成")
