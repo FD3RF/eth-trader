@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-5分钟合约：K线突破 + 成交量 + 回调进场（稳定版）
-作者：AI
+稳定版：K线突破 + 成交量确认 + 回调进场
+可回测，可跑Streamlit
 """
 
 import streamlit as st
@@ -9,18 +9,21 @@ import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("🚀 稳定版：突破+回调+成交量")
+st.title("🚀 稳定策略：突破 + 回调 + 成交量")
 
+# ==============================
 # 上传
+# ==============================
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
+# ==============================
 # 加载
+# ==============================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
-# 字段兼容
 def col(df, *names):
     for n in names:
         if n in df.columns:
@@ -41,33 +44,41 @@ for c in ['open','high','low','close','volume']:
 
 df = df.dropna().reset_index(drop=True)
 
-# ====== 策略参数 ======
-lookback = 20                 # 突破周期
-volume_mult = 2.0             # 放量倍数
-pullback_ratio = 0.5          # 回调比例
-stop_loss_pct = 0.01          # 单笔止损 1%
-rr = 2.0                      # 盈亏比
+# ==============================
+# 参数（可调）
+# ==============================
+lookback = 20            # 突破周期
+volume_mult = 2.0        # 放量倍数
+pullback_ratio = 0.5      # 回调比例（越小越严格）
+stop_loss_pct = 0.01      # 单笔止损 1%
+rr = 2.0                  # 盈亏比（仅参考）
 
-# ====== 特征 ======
+# ==============================
+# 特征
+# ==============================
 df['high_max'] = df['high'].rolling(lookback).max()
 df['low_min'] = df['low'].rolling(lookback).min()
 df['volume_ma'] = df['volume'].rolling(lookback).mean()
 
-# ====== 信号 ======
+# ==============================
+# 信号
+# ==============================
 df['break_up'] = df['close'] > df['high_max'].shift(1)
 df['break_down'] = df['close'] < df['low_min'].shift(1)
 
 df['volume_ok'] = df['volume'] > df['volume_ma'] * volume_mult
 
-# 回调条件：价格回踩不超过突破幅度的一半
+# 回调：回踩不超过突破幅度一半
 df['pullback_ok'] = (
-    (df['close'] >= df['high_max'].shift(1) * (1 - pullback_ratio * 0.01))
+    df['close'] >= df['high_max'].shift(1) * (1 - pullback_ratio * 0.01)
 )
 
 df['long_signal'] = df['break_up'] & df['volume_ok'] & df['pullback_ok']
 df['short_signal'] = df['break_down'] & df['volume_ok']
 
-# ====== 回测 ======
+# ==============================
+# 回测
+# ==============================
 def backtest(df):
     equity = [0]
     trades = []
@@ -78,26 +89,17 @@ def backtest(df):
         row = df.iloc[i]
         price = row['open']
 
-        # 平仓条件
+        # 平多
         if position == 1:
-            if row['close'] < entry * (1 - stop_loss_pct):
-                pnl = price - entry
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                position = 0
-            elif row['short_signal']:
+            if row['close'] < entry * (1 - stop_loss_pct) or row['short_signal']:
                 pnl = price - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
 
+        # 平空
         elif position == -1:
-            if row['close'] > entry * (1 + stop_loss_pct):
-                pnl = entry - price
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                position = 0
-            elif row['long_signal']:
+            if row['close'] > entry * (1 + stop_loss_pct) or row['long_signal']:
                 pnl = entry - price
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
@@ -119,10 +121,10 @@ def backtest(df):
         "equity": equity
     }
 
-# ====== 执行 ======
+# ==============================
+# 执行
+# ==============================
 res = backtest(df)
-
-# 统计
 trades = res['trades']
 equity = res['equity']
 
