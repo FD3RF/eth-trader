@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
-"""
-结构突破 + 回踩确认 回测系统
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 突破回踩确认 回测")
+st.title("📈 趋势过滤 + 突破 回测")
 
 uploaded = st.file_uploader("上传 CSV", type=["csv"])
 if uploaded is None:
@@ -32,69 +28,65 @@ for col in required:
         st.error(f"缺少字段: {col}")
         st.stop()
 
+if 'volume' not in df.columns:
+    df['volume'] = df['vol']
+
 st.success(f"数据行数: {len(df)}")
 
+# 参数
 rr = st.slider("盈亏比", 1.0, 4.0, 2.0, 0.5)
+
+# 趋势
+df['ema50'] = df['close'].ewm(span=50).mean()
+df['ema200'] = df['close'].ewm(span=200).mean()
+
+# ATR
+df['tr'] = np.maximum(
+    df['high'] - df['low'],
+    np.maximum(
+        abs(df['high'] - df['close'].shift()),
+        abs(df['low'] - df['close'].shift())
+    )
+)
+df['atr'] = df['tr'].rolling(14).mean()
+
+# 成交量
+df['vol_ma20'] = df['volume'].rolling(20).mean()
 
 trades = []
 equity = [0]
 
-for i in range(5, len(df)-5):
+for i in range(200, len(df)-1):
 
     prev = df.iloc[i-1]
     curr = df.iloc[i]
 
-    # 发生突破
+    trend = curr['ema50'] > curr['ema200']
+
     breakout = curr['high'] > prev['high']
+    bullish = curr['close'] > curr['open']
+    vol_ok = curr['volume'] > curr['vol_ma20']
 
-    if breakout:
+    if trend and breakout and bullish and vol_ok:
 
-        breakout_level = prev['high']
+        entry = df.iloc[i+1]['open']
+        stop = entry - curr['atr'] * 1.5
+        target = entry + (entry - stop) * rr
 
-        # 等后面3根回踩
-        for j in range(i+1, i+4):
+        for j in range(i+1, len(df)):
 
-            if j >= len(df)-1:
+            future = df.iloc[j]
+
+            if future['low'] <= stop:
+                pnl = stop - entry
+                trades.append(pnl)
+                equity.append(equity[-1] + pnl)
                 break
 
-            candle = df.iloc[j]
-
-            # 回踩接近前高
-            pullback = abs(candle['low'] - breakout_level) / breakout_level < 0.002
-
-            # 回踩不破前低
-            valid = candle['low'] > prev['low']
-
-            bullish = candle['close'] > candle['open']
-
-            if pullback and valid and bullish:
-
-                entry = df.iloc[j+1]['open']
-                stop = candle['low']
-                risk = entry - stop
-
-                if risk <= 0:
-                    break
-
-                target = entry + risk * rr
-
-                # 持仓
-                for k in range(j+1, len(df)):
-
-                    future = df.iloc[k]
-
-                    if future['low'] <= stop:
-                        pnl = stop - entry
-                        trades.append(pnl)
-                        equity.append(equity[-1] + pnl)
-                        break
-
-                    if future['high'] >= target:
-                        pnl = target - entry
-                        trades.append(pnl)
-                        equity.append(equity[-1] + pnl)
-                        break
-
+            if future['high'] >= target:
+                pnl = target - entry
+                trades.append(pnl)
+                equity.append(equity[-1] + pnl)
                 break
 
 if len(trades) == 0:
