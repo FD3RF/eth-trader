@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（优化版）
+纸交易模拟（优化版，无matplotlib依赖）
 功能：
 - 支持手续费与滑点模拟
 - 计算最大回撤、夏普比率等风控指标
 - 可选样本外测试（训练/测试集划分）
-- 权益曲线与回撤可视化
+- 权益曲线与回撤可视化（纯Streamlit实现）
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy import stats
 
 st.set_page_config(page_title="纸交易模拟(优化版)", layout="wide")
@@ -227,7 +226,6 @@ if enable_oos:
                                             apply_costs, rr_ratio, min_hold, break_threshold)
     if len(train_records) > 0:
         st.dataframe(train_records)
-        # 统计函数稍后定义，先调用
     else:
         st.write("训练集无交易记录。")
 
@@ -350,10 +348,15 @@ else:
 
     st.subheader("权益曲线与回撤")
     if len(equity) > 0:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(equity.index, equity.values, label='权益')
-        ax.fill_between(equity.index, equity.values, equity.cummax(), alpha=0.3, color='red', label='回撤')
-        ax.legend()
-        st.pyplot(fig)
+        # 准备数据
+        equity_df = pd.DataFrame({
+            '权益': equity.values,
+            '峰值': np.maximum.accumulate(equity.values),
+            '回撤': (np.maximum.accumulate(equity.values) - equity.values)
+        }, index=equity.index)
+        # 显示权益曲线
+        st.line_chart(equity_df[['权益', '峰值']])
+        # 显示回撤面积图（用 area_chart 模拟）
+        st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（优化版）")
+st.success("模拟完成（优化版，无matplotlib依赖）")
