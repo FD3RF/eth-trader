@@ -1,32 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-实战级 5分钟多空策略
-核心：
-- K线突破
-- 成交量放量
-- 多周期趋势
-- ATR动态止损
-- 风控
+终极优化版：突破 + 放量 + 多周期 + ATR止损 + 风控
+更实盘友好
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="实战策略", layout="wide")
-st.title("🚀 实战级多空策略（更稳）")
+st.set_page_config(page_title="终极优化策略", layout="wide")
+st.title("🚀 终极优化策略（更稳）")
 
+# =========================
+# 上传
+# =========================
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
 # =========================
-# 加载数据（兼容字段）
+# 加载
 # =========================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
-# 字段映射
+# 字段映射（你的数据）
 df['open'] = df['open']
 df['high'] = df['high']
 df['low'] = df['low']
@@ -73,7 +71,7 @@ df.dropna(inplace=True)
 # =========================
 df['signal'] = 0
 
-# 多头：
+# 多头：突破前高 + 放量 + 顺势
 df.loc[
     (df['close'] > df['high_max']) &
     (df['volume'] > df['vol_threshold']) &
@@ -81,7 +79,7 @@ df.loc[
     'signal'
 ] = 1
 
-# 空头：
+# 空头：跌破前低 + 放量 + 顺势
 df.loc[
     (df['close'] < df['low_min']) &
     (df['volume'] > df['vol_threshold']) &
@@ -90,7 +88,7 @@ df.loc[
 ] = -1
 
 # =========================
-# 回测（真实止损止盈）
+# 回测（实盘友好）
 # =========================
 def backtest(df):
     equity = [0]
@@ -98,29 +96,30 @@ def backtest(df):
     position = 0
     entry = 0
 
-    stop_pct = 0.01  # 基础止损 1%
-    rr = 2.0         # 盈亏比
+    # 风控参数
+    risk_pct = 0.01      # 单笔风险 1%
+    rr = 2.0             # 盈亏比
+    capital = 10000      # 假设资金
 
     for i in range(1, len(df)):
         row = df.iloc[i]
-        prev = df.iloc[i-1]
         price = row['open']
         high = row['high']
         low = row['low']
 
         # ========== 平多 ==========
         if position == 1:
-            stop_loss = entry * (1 - stop_pct)
-            take_profit = entry + (entry - stop_loss) * rr
+            stop = entry - row['atr'] * 1.5
+            take = entry + (entry - stop) * rr
 
-            if low <= stop_loss:
-                pnl = stop_loss - entry
+            if low <= stop:
+                pnl = stop - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
 
-            elif high >= take_profit:
-                pnl = take_profit - entry
+            elif high >= take:
+                pnl = take - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
@@ -133,17 +132,17 @@ def backtest(df):
 
         # ========== 平空 ==========
         if position == -1:
-            stop_loss = entry * (1 + stop_pct)
-            take_profit = entry - (stop_loss - entry) * rr
+            stop = entry + row['atr'] * 1.5
+            take = entry - (stop - entry) * rr
 
-            if high >= stop_loss:
-                pnl = entry - stop_loss
+            if high >= stop:
+                pnl = entry - stop
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
 
-            elif low <= take_profit:
-                pnl = entry - take_profit
+            elif low <= take:
+                pnl = entry - take
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
