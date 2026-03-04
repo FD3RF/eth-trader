@@ -1,137 +1,106 @@
 # -*- coding: utf-8 -*-
 """
-纯K突破 + 放量策略（字段兼容版）
+稳定终极版：突破 + 放量 + 多周期 + 风控
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="纯K突破策略", layout="wide")
-st.title("📈 纯K突破 + 放量 策略")
+st.set_page_config(page_title="终极优化策略", layout="wide")
+st.title("🚀 终极优化策略")
 
 # 上传
-uploaded_file = st.file_uploader("上传 CSV", type=["csv"])
-if uploaded_file is None:
-    st.info("上传数据")
+file = st.file_uploader("上传 CSV", type=["csv"])
+if file is None:
     st.stop()
 
-# ================================
-# 加载 + 字段兼容
-# ================================
-@st.cache_data
-def load_data(file):
-    df = pd.read_csv(file)
-    df.columns = [c.lower() for c in df.columns]
-    return df
-
-df = load_data(uploaded_file)
+# 加载
+df = pd.read_csv(file)
+df.columns = [c.lower() for c in df.columns]
 st.write(f"数据行数: {len(df)}")
 st.write("字段:", df.columns.tolist())
 
-# ================================
-# 字段映射（自动）
-# ================================
-def get_col(df, *names):
-    for n in names:
-        if n in df.columns:
-            return df[n]
-    return None
+# 字段映射
+df['open'] = df['open']
+df['high'] = df['high']
+df['low'] = df['low']
+df['close'] = df['close']
+df['volume'] = df['vol']
 
-df['open'] = get_col(df, 'open')
-df['high'] = get_col(df, 'high')
-df['low'] = get_col(df, 'low')
-df['close'] = get_col(df, 'close')
+# 多周期趋势
+df['ema20'] = df['close'].ewm(span=20).mean()
+df['ema50'] = df['close'].ewm(span=50).mean()
 
-# 成交量字段可能是：
-df['volume'] = get_col(df, 'volume', 'vol', 'volum', 'amount', 'qty')
+df['trend_up'] = df['ema20'] > df['ema50']
+df['trend_down'] = df['ema20'] < df['ema50']
 
-for c in ['open','high','low','close']:
-    if df[c] is None:
-        st.error(f"缺少字段: {c}")
-        st.stop()
+# 特征：突破 + 放量
+lookback = 20
+vol_mult = 1.5
+stop_pct = 0.01
 
-# 成交量非必须（如果没有，后续放量逻辑自动关闭）
-has_volume = df['volume'] is not None
-
-# ================================
-# 参数
-# ================================
-st.sidebar.header("策略参数")
-
-lookback = st.sidebar.slider("突破周期(前高/前低)", 5, 50, 20)
-vol_mult = st.sidebar.slider("放量倍数", 1.0, 3.0, 1.5) if has_volume else None
-rr = st.sidebar.slider("盈亏比", 1.0, 4.0, 2.0)
-
-# ================================
-# 特征：前高前低 + 放量（可选）
-# ================================
 df['high_max'] = df['high'].rolling(lookback).max().shift(1)
 df['low_min'] = df['low'].rolling(lookback).min().shift(1)
-
-if has_volume:
-    df['vol_ma'] = df['volume'].rolling(lookback).mean().shift(1)
-
-# 信号
-df['signal'] = 0
-
-# 多头：突破前高
-if has_volume:
-    df.loc[
-        (df['close'] > df['high_max']) &
-        (df['volume'] > df['vol_ma'] * vol_mult),
-        'signal'
-    ] = 1
-else:
-    df.loc[df['close'] > df['high_max'], 'signal'] = 1
-
-# 空头：跌破前低
-if has_volume:
-    df.loc[
-        (df['close'] < df['low_min']) &
-        (df['volume'] > df['vol_ma'] * vol_mult),
-        'signal'
-    ] = -1
-else:
-    df.loc[df['close'] < df['low_min'], 'signal'] = -1
+df['vol_ma'] = df['volume'].rolling(lookback).mean().shift(1)
 
 df.dropna(inplace=True)
 
-# ================================
-# 回测（简化）
-# ================================
+# 信号
+df['signal'] = 0
+df.loc[
+    (df['close'] > df['high_max']) &
+    (df['volume'] > df['vol_ma'] * vol_mult) &
+    df['trend_up'],
+    'signal'
+] = 1
+
+df.loc[
+    (df['close'] < df['low_min']) &
+    (df['volume'] > df['vol_ma'] * vol_mult) &
+    df['trend_down'],
+    'signal'
+] = -1
+
+# 回测
 def backtest(df):
     equity = [0]
+    trades = []
     position = 0
     entry = 0
-    trades = []
+    stop = 0
 
     for i in range(1, len(df)):
         row = df.iloc[i]
-        prev = df.iloc[i-1]
         price = row['open']
 
-        # 平仓
-        if position == 1 and row['signal'] == 0:
-            pnl = price - entry
-            trades.append(pnl)
-            equity.append(equity[-1] + pnl)
-            position = 0
+        # 平多
+        if position == 1:
+            if price <= stop or row['signal'] == 0:
+                pnl = price - entry
+                trades.append(pnl)
+                equity.append(equity[-1] + pnl)
+                position = 0
 
-        if position == -1 and row['signal'] == 0:
-            pnl = entry - price
-            trades.append(pnl)
-            equity.append(equity[-1] + pnl)
-            position = 0
+        # 平空
+        if position == -1:
+            if price >= stop or row['signal'] == 0:
+                pnl = entry - price
+                trades.append(pnl)
+                equity.append(equity[-1] + pnl)
+                position = 0
 
         # 开仓
-        if prev['signal'] == 1 and position == 0:
-            entry = price
-            position = 1
+        if position == 0:
+            if row['signal'] == 1:
+                entry = price
+                stop = entry * (1 - stop_pct)
+                position = 1
 
-        if prev['signal'] == -1 and position == 0:
-            entry = price
-            position = -1
+            if row['signal'] == -1:
+                entry = price
+                stop = entry * (1 + stop_pct)
+                position = -1
 
         equity.append(equity[-1])
 
