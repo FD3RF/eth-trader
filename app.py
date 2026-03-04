@@ -5,11 +5,12 @@ import numpy as np
 import plotly.graph_objects as go
 import io
 import itertools
+import re
 
 BASE_URL = "https://www.okx.com"
 
 st.set_page_config(layout="wide", page_title="终极突破系统", page_icon="📈")
-st.title("📊 实体+成交量+前高前低突破 · 终极优化版")
+st.title("📊 实体+成交量+前高前低突破 · 终极完美版")
 
 # ========================= 内置90天历史回测数据 =========================
 csv_data = """body_threshold,vol_ma_period,break_threshold,交易数,多头交易数,空头交易数,多头胜率,空头胜率,多头盈利,空头盈利,胜率,总盈利,最大回撤,夏普比率,盈亏比
@@ -94,8 +95,8 @@ def generate_signals(df, body_threshold, vol_ma_period, volume_multiplier):
     df.loc[sell, 'signal'] = -1
     return df
 
-# ========================= 回测函数（修正夏普）=========================
-def run_backtest(df, fee_rate):
+# ========================= 回测函数（接收 vol_ma_period 参数）=========================
+def run_backtest(df, fee_rate, vol_ma_period):
     initial_capital = 10000
     balance = initial_capital
     position = 0
@@ -309,7 +310,7 @@ with st.sidebar:
         for i, (b, vp, vm) in enumerate(itertools.product(body_range, vol_ma_range, vol_mult_range)):
             status_text.text(f"扫描中: body={b}, vol_ma={vp}, mult={vm} ({i+1}/{total_combos})")
             df_signal = generate_signals(df_raw, b, vp, vm)
-            res = run_backtest(df_signal, fee_rate)
+            res = run_backtest(df_signal, fee_rate, vp)  # 传入扫描用的 vol_ma_period
             results.append({
                 'body': b,
                 'vol_ma': vp,
@@ -335,7 +336,7 @@ with st.sidebar:
 
 # ========================= 当前策略运行 =========================
 df = generate_signals(df_raw, body_threshold, vol_ma_period, volume_multiplier)
-backtest_res = run_backtest(df, fee_rate)
+backtest_res = run_backtest(df, fee_rate, vol_ma_period)  # 传入当前 vol_ma_period
 
 # ========================= 显示实时回测表现 =========================
 st.subheader("📈 实时回测表现（基于最近数据）")
@@ -420,13 +421,8 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ========================= 参数扫描结果（带应用按钮）=========================
 if 'scan_results' in st.session_state:
-    st.subheader("🔍 参数扫描结果（点击行可应用）")
+    st.subheader("🔍 参数扫描结果（按夏普降序）")
     scan_df = st.session_state['scan_results'].copy()
-    
-    # 显示表格，并为每一行添加一个按钮列
-    # 为了简化，我们使用st.dataframe并添加一个选择器
-    # 另一种方法是使用st.columns动态生成按钮，但这里采用点击行后手动输入的方式
-    # 更好的方案：在表格旁边加一个“应用选中行”按钮
     st.dataframe(scan_df.head(20), use_container_width=True)
     
     # 添加一个下拉框选择要应用的参数
@@ -434,16 +430,24 @@ if 'scan_results' in st.session_state:
     for idx, row in scan_df.head(20).iterrows():
         apply_options.append(f"body={row['body']}, vol_ma={row['vol_ma']}, mult={row['mult']}, 胜率={row['胜率%']}%, 夏普={row['夏普(年化)']}")
     selected_scan = st.selectbox("从扫描结果选择参数组合应用", apply_options)
+    
     if st.button("应用扫描参数"):
-        # 解析选中的字符串
-        parts = selected_scan.split(',')
-        body_val = float(parts[0].split('=')[1])
-        vol_val = int(parts[1].split('=')[1])
-        mult_val = float(parts[2].split('=')[1])
-        st.session_state['body_threshold'] = body_val
-        st.session_state['vol_ma_period'] = vol_val
-        st.session_state['volume_multiplier'] = mult_val
-        st.rerun()
+        # 使用正则表达式提取所有数字
+        text = selected_scan
+        numbers = re.findall(r"[-+]?\d*\.?\d+", text)
+        if len(numbers) >= 3:
+            try:
+                body_val = float(numbers[0])
+                vol_val = int(float(numbers[1]))  # 先转float再int，防止小数点
+                mult_val = float(numbers[2])
+                st.session_state['body_threshold'] = body_val
+                st.session_state['vol_ma_period'] = vol_val
+                st.session_state['volume_multiplier'] = mult_val
+                st.rerun()
+            except Exception as e:
+                st.error(f"解析参数失败: {e}")
+        else:
+            st.error("无法从选择中提取参数")
     
     csv = scan_df.to_csv(index=False)
     st.download_button("📥 下载扫描结果", csv, "scan_results.csv", "text/csv")
