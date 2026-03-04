@@ -1,301 +1,317 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import io
 
-# ===== OKX 配置 =====
-API_KEY = "YOUR_KEY"
-API_SECRET = "YOUR_SECRET"
-PASSPHRASE = "YOUR_PASSPHRASE"
 BASE_URL = "https://www.okx.com"
 
-st.set_page_config(layout="wide", page_title="5分钟ETH突破策略看盘+回测数据", page_icon="📈")
+st.set_page_config(layout="wide", page_title="统一突破系统·专业版", page_icon="📈")
+st.title("📊 统一突破系统（专业版：N周期突破 + 趋势过滤）")
 
+# =========================
+# 侧边栏参数
+# =========================
+with st.sidebar:
+    st.header("策略参数")
+    lookback = st.slider("突破观察周期", min_value=2, max_value=50, value=20, step=1,
+                         help="计算过去N根K线的最高/最低，突破该区间才视为有效")
+    body_threshold = st.slider("实体比例阈值", 0.1, 0.8, 0.4, 0.05,
+                               help="K线实体高度占整个波动的比例阈值")
+    vol_ma_period = st.slider("成交量均线周期", 5, 50, 20,
+                              help="计算成交量均线的周期数")
+    vol_multiplier = st.slider("成交量放大倍数", 1.0, 3.0, 1.5, 0.1,
+                               help="成交量需大于均线的倍数")
+    use_trend_filter = st.checkbox("启用趋势过滤 (EMA50)", value=True,
+                                   help="只在价格位于EMA50上方时接受买入，下方时接受卖出")
+    fee_rate = st.number_input("手续费率 (单边)", 
+                               min_value=0.0, max_value=0.01, value=0.0005, step=0.0001, format="%.4f",
+                               help="开平仓各收取一次")
 
-# ===== 获取K线 =====
+# =========================
+# 获取K线数据
+# =========================
 @st.cache_data(ttl=30)
-def get_candles(instId="ETH-USDT", bar="5m", limit=200):
-    try:
-        url = f"{BASE_URL}/api/v5/market/candles"
-        res = requests.get(
-            url,
-            params={"instId": instId, "limit": limit, "bar": bar},
-            timeout=6
-        ).json()
-        if res.get("code") != "0":
-            return pd.DataFrame()
+def get_candles(limit=500):
+    url = f"{BASE_URL}/api/v5/market/candles"
+    r = requests.get(url, params={
+        "instId": "ETH-USDT",
+        "bar": "5m",
+        "limit": limit
+    }).json()
 
-        df = pd.DataFrame(
-            res["data"],
-            columns=["ts", "o", "h", "l", "c", "v", "volCcy", "volCcyQuote", "confirm"]
-        )[::-1]
-        df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
-        for col in ["o", "h", "l", "c", "v"]:
-            df[col] = df[col].astype(float)
-        return df
-    except Exception as e:
-        st.error(f"获取K线失败: {e}")
-        return pd.DataFrame()
+    df = pd.DataFrame(r["data"], columns=[
+        "ts", "o", "h", "l", "c", "v", "volCcy", "volCcyQuote", "confirm"
+    ])[::-1]
 
+    df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
+    df[["o", "h", "l", "c", "v"]] = df[["o", "h", "l", "c", "v"]].astype(float)
+    return df
 
-# ===== 策略计算（低点不破 + 高点突破 + 成交量条件）=====
-def calculate_signals(df, lookback=1, volume_type="放量", vol_ma_period=15, vol_multiplier=1.2):
-    """
-    根据条件生成信号：
-    - 买入：当前最低价 >= 前 lookback 根K线的最低价 且 当前最高价 > 前 lookback 根K线的最高价
-    - 卖出：当前最高价 <= 前 lookback 根K线的最高价 且 当前最低价 < 前 lookback 根K线的最低价
-    成交量条件：
-      - "放量": 成交量 > 均线 * vol_multiplier
-      - "缩量": 成交量 < 均线 * vol_multiplier
-      - "无": 不检查成交量
-    """
+df = get_candles(limit=500)  # 获取更多数据，以便计算EMA和滚动窗口
+
+# =========================
+# 核心突破逻辑（N周期突破 + 趋势过滤）
+# =========================
+def breakout_logic(df):
     df = df.copy()
-    df['prev_high'] = df['h'].shift(lookback)
-    df['prev_low'] = df['l'].shift(lookback)
+    # 过去N根K线的最高、最低（滚动窗口，shift(1)避免用到当前K线）
+    df["rolling_high"] = df["h"].rolling(window=lookback).max().shift(1)
+    df["rolling_low"] = df["l"].rolling(window=lookback).min().shift(1)
 
-    buy_base = (df['l'] >= df['prev_low']) & (df['h'] > df['prev_high'])
-    sell_base = (df['h'] <= df['prev_high']) & (df['l'] < df['prev_low'])
+    # 实体比例
+    df["body_ratio"] = abs(df["c"] - df["o"]) / (df["h"] - df["l"])
+    df["body_ratio"] = df["body_ratio"].replace([np.inf, -np.inf], np.nan)
 
-    if volume_type != "无":
-        df['vol_ma'] = df['v'].rolling(window=vol_ma_period).mean()
-        if volume_type == "放量":
-            vol_condition = df['v'] > df['vol_ma'] * vol_multiplier
-        else:
-            vol_condition = df['v'] < df['vol_ma'] * vol_multiplier
-    else:
-        vol_condition = True
+    # 成交量均线
+    df["vol_ma"] = df["v"].rolling(vol_ma_period).mean()
 
-    df['signal'] = 0
-    df.loc[buy_base & vol_condition, 'signal'] = 1
-    df.loc[sell_base & vol_condition, 'signal'] = -1
+    # 趋势过滤：EMA50
+    df["ema50"] = df["c"].ewm(span=50).mean()
 
-    df['position'] = df['signal'].replace(0, method='ffill').fillna(0)
+    # 买入条件：收盘价 > 过去N根最高，且为阳线，成交量放大，实体足够
+    buy = (
+        (df["c"] > df["rolling_high"]) &
+        (df["c"] > df["o"]) &
+        (df["v"] > df["vol_ma"] * vol_multiplier) &
+        (df["body_ratio"] > body_threshold)
+    )
+    # 卖出条件：收盘价 < 过去N根最低，且为阴线，成交量放大，实体足够
+    sell = (
+        (df["c"] < df["rolling_low"]) &
+        (df["c"] < df["o"]) &
+        (df["v"] > df["vol_ma"] * vol_multiplier) &
+        (df["body_ratio"] > body_threshold)
+    )
+
+    # 趋势过滤
+    if use_trend_filter:
+        buy = buy & (df["c"] > df["ema50"])      # 只在上升趋势中做多
+        sell = sell & (df["c"] < df["ema50"])    # 只在下降趋势中做空
+
+    df["signal"] = 0
+    df.loc[buy, "signal"] = 1
+    df.loc[sell, "signal"] = -1
     return df
 
+df = breakout_logic(df)
 
-# ===== 模拟下单 =====
-def place_order(side, size):
-    st.info(f"模拟下单：{side} {size} ETH（未实盘）")
-    return True
+# =========================
+# 回测函数（修正Sharpe计算，采用资金曲线收益率）
+# =========================
+def run_backtest(df, fee_rate):
+    initial_capital = 10000
+    balance = initial_capital
+    position = 0
+    entry_price = 0.0
+    trades = []               # 每笔交易的收益率（百分比）
+    equity_curve = [balance]  # 资金曲线
 
+    # 遍历K线，从足够长的索引开始（确保滚动窗口有效）
+    start_idx = max(lookback, vol_ma_period, 50) + 1  # 确保所有指标都有有效值
+    for i in range(start_idx, len(df) - 1):
+        sig = df["signal"].iloc[i]
 
-# ===== 加载回测数据（内置CSV或上传）=====
-@st.cache_data
-def load_backtest_data(uploaded_file=None):
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-        except Exception as e:
-            st.error(f"读取文件失败: {e}")
-            return pd.DataFrame()
-    else:
-        # 内置数据（从您提供的CSV内容复制）
-        data = """body_threshold,vol_ma_period,break_threshold,交易数,多头交易数,空头交易数,多头胜率,空头胜率,多头盈利,空头盈利,胜率,总盈利,最大回撤,夏普比率,盈亏比
-0.15,15,0.001,235,116,119,66.37931034482759,68.0672268907563,470.15512826847237,558.4718197276695,67.23404255319149,1028.6269479961416,0.4165299098957239,0.8606266549250197,1.7961553750939152
-0.15,15,0.0008,258,125,133,65.60000000000001,65.41353383458647,466.079787761337,561.6676983829412,65.50387596899225,1027.7474861442784,0.4165299098957239,0.8493591728762571,1.760506690206602
-0.15,15,0.0012,217,105,112,71.42857142857143,70.53571428571429,485.9436610909964,574.5544817950911,70.96774193548387,1060.4981428860874,0.3969425913510632,0.9059610043479966,1.7617952052434003
-0.15,10,0.001,233,115,118,66.08695652173913,67.79661016949152,461.05667668061426,549.7809932020772,66.95278969957081,1010.8376698826912,0.4165299098957239,0.8469443330215395,1.7962579357153006
-0.15,10,0.0008,257,124,133,65.32258064516128,65.41353383458647,456.9813361734789,554.3537055882366,65.36964980544747,1011.3350417617157,0.4165299098957239,0.8366713249976645,1.751164374377886
-0.15,10,0.0012,215,104,111,71.15384615384616,70.27027027027027,476.8452095031383,565.8636552694987,70.69767441860465,1042.7088647726368,0.3969425913510632,0.8920782446041523,1.761987279920726
-0.15,20,0.001,236,117,119,66.66666666666666,68.0672268907563,488.20047233781236,562.6633965616921,67.37288135593221,1050.8638688995043,0.4165299098957239,0.8780882160300897,1.8276766128866202
-0.15,20,0.0008,260,126,134,65.87301587301587,65.67164179104478,484.125131830677,567.2361089478518,65.76923076923077,1051.361240778529,0.4165299098957239,0.8674411025233326,1.7799696442583801
-0.15,20,0.0012,218,106,112,71.69811320754717,70.53571428571429,503.9890051603364,578.7460586291139,71.10091743119266,1082.7350637894501,0.3969425913510632,0.9237215869857187,1.7967803489629814
-0.12,15,0.001,235,116,119,66.37931034482759,68.0672268907563,470.15512826847237,558.4718197276695,67.23404255319149,1028.6269479961416,0.4165299098957239,0.8606266549250197,1.7961553750939152
-0.12,15,0.0008,258,125,133,65.60000000000001,65.41353383458647,466.079787761337,561.6676983829412,65.50387596899225,1027.7474861442784,0.4165299098957239,0.8493591728762571,1.760506690206602
-0.12,15,0.0012,217,105,112,71.42857142857143,70.53571428571429,485.9436610909964,574.5544817950911,70.96774193548387,1060.4981428860874,0.3969425913510632,0.9059610043479966,1.7617952052434003
-0.12,10,0.001,233,115,118,66.08695652173913,67.79661016949152,461.05667668061426,549.7809932020772,66.95278969957081,1010.8376698826912,0.4165299098957239,0.8469443330215395,1.7962579357153006
-0.12,10,0.0008,257,124,133,65.32258064516128,65.41353383458647,456.9813361734789,554.3537055882366,65.36964980544747,1011.3350417617157,0.4165299098957239,0.8366713249976645,1.751164374377886
-0.12,10,0.0012,215,104,111,71.15384615384616,70.27027027027027,476.8452095031383,565.8636552694987,70.69767441860465,1042.7088647726368,0.3969425913510632,0.8920782446041523,1.761987279920726
-0.12,20,0.001,236,117,119,66.66666666666666,68.0672268907563,488.20047233781236,562.6633965616921,67.37288135593221,1050.8638688995043,0.4165299098957239,0.8780882160300897,1.8276766128866202
-0.12,20,0.0008,260,126,134,65.87301587301587,65.67164179104478,484.125131830677,567.2361089478518,65.76923076923077,1051.361240778529,0.4165299098957239,0.8674411025233326,1.7799696442583801
-0.12,20,0.0012,218,106,112,71.69811320754717,70.53571428571429,503.9890051603364,578.7460586291139,71.10091743119266,1082.7350637894501,0.3969425913510632,0.9237215869857187,1.7967803489629814
-0.18,15,0.001,235,116,119,66.37931034482759,68.0672268907563,470.15512826847237,558.4718197276695,67.23404255319149,1028.6269479961416,0.4165299098957239,0.8606266549250197,1.7961553750939152
-0.18,15,0.0008,258,125,133,65.60000000000001,65.41353383458647,466.079787761337,561.6676983829412,65.50387596899225,1027.7474861442784,0.4165299098957239,0.8493591728762571,1.760506690206602
-0.18,15,0.0012,217,105,112,71.42857142857143,70.53571428571429,485.9436610909964,574.5544817950911,70.96774193548387,1060.4981428860874,0.3969425913510632,0.9059610043479966,1.7617952052434003
-0.18,10,0.001,233,115,118,66.08695652173913,67.79661016949152,461.05667668061426,549.7809932020772,66.95278969957081,1010.8376698826912,0.4165299098957239,0.8469443330215395,1.7962579357153006
-0.18,10,0.0008,257,124,133,65.32258064516128,65.41353383458647,456.9813361734789,554.3537055882366,65.36964980544747,1011.3350417617157,0.4165299098957239,0.8366713249976645,1.751164374377886
-0.18,10,0.0012,215,104,111,71.15384615384616,70.27027027027027,476.8452095031383,565.8636552694987,70.69767441860465,1042.7088647726368,0.3969425913510632,0.8920782446041523,1.761987279920726
-0.18,20,0.001,236,117,119,66.66666666666666,68.0672268907563,488.20047233781236,562.6633965616921,67.37288135593221,1050.8638688995043,0.4165299098957239,0.8780882160300897,1.8276766128866202
-0.18,20,0.0008,260,126,134,65.87301587301587,65.67164179104478,484.125131830677,567.2361089478518,65.76923076923077,1051.361240778529,0.4165299098957239,0.8674411025233326,1.7799696442583801
-0.18,20,0.0012,218,106,112,71.69811320754717,70.53571428571429,503.9890051603364,578.7460586291139,71.10091743119266,1082.7350637894501,0.3969425913510632,0.9237215869857187,1.7967803489629814"""
-        df = pd.read_csv(io.StringIO(data))
-    return df
+        if sig != 0 and sig != position:
+            next_open = df["o"].iloc[i + 1]
 
+            # 平仓
+            if position != 0:
+                if position == 1:
+                    ret = (next_open / entry_price - 1)
+                else:
+                    ret = (entry_price / next_open - 1)
+                ret -= fee_rate
+                balance *= (1 + ret)
+                trades.append(ret * 100)
+                equity_curve.append(balance)
 
-# ===== 主界面 =====
-def main():
-    st.title("📊 5分钟以太坊合约 · 低点不破+高点突破策略看盘 + 回测数据")
+            # 开新仓
+            if sig == 1:
+                entry_price = next_open
+                position = 1
+                balance *= (1 - fee_rate)
+                equity_curve.append(balance)
+            elif sig == -1:
+                entry_price = next_open
+                position = -1
+                balance *= (1 - fee_rate)
+                equity_curve.append(balance)
 
-    # ---- 侧边栏参数 ----
-    with st.sidebar:
-        st.header("突破策略参数")
-        lookback = st.number_input("比较前几根K线", min_value=1, max_value=10, value=1, step=1,
-                                   help="例如1表示与前一根K线比较")
-
-        volume_type = st.selectbox("成交量条件", ["无", "放量", "缩量"], index=1,
-                                   help="放量：成交量大于均线倍数；缩量：小于均线倍数")
-        if volume_type != "无":
-            vol_ma_period = st.number_input("成交量均线周期", min_value=5, max_value=50, value=15, step=1)
-            vol_multiplier = st.number_input("成交量倍数", min_value=0.1, value=1.2, step=0.1,
-                                             help="成交量与均线的比值阈值")
+    # 最后平仓
+    if position != 0:
+        last_close = df["c"].iloc[-1]
+        if position == 1:
+            ret = (last_close / entry_price - 1)
         else:
-            vol_ma_period = 15
-            vol_multiplier = 1.0
+            ret = (entry_price / last_close - 1)
+        ret -= fee_rate
+        balance *= (1 + ret)
+        trades.append(ret * 100)
+        equity_curve.append(balance)
+        position = 0
 
-        st.header("交易设置")
-        trade_size = st.number_input("下单数量 (ETH)", min_value=0.001, value=0.01, step=0.001, format="%.3f")
-        mode = st.radio("模式", ["模拟", "实盘（需配置密钥）"], index=0, disabled=True)
-        st.markdown("---")
-        st.caption("数据源: OKX ETH-USDT 永续合约")
+    # 计算各项指标
+    total_return = (balance / initial_capital - 1) * 100
+    num_trades = len(trades)
 
-        # ---- 新增：回测数据上传折叠区 ----
-        with st.expander("📁 回测数据 (CSV)"):
-            uploaded_file = st.file_uploader("上传回测CSV文件", type=["csv"])
-            st.caption("若未上传，使用内置90天回测数据（27组参数）")
-
-    # ---- 加载回测数据 ----
-    backtest_df = load_backtest_data(uploaded_file)
-
-    # ---- 获取实时K线数据 ----
-    df = get_candles(bar="5m", limit=200)
-    if df.empty:
-        st.error("无法获取K线数据，请稍后重试。")
-        return
-
-    # ---- 计算策略信号 ----
-    df = calculate_signals(df, lookback, volume_type, vol_ma_period, vol_multiplier)
-
-    # ---- 绘制K线图 + 信号点 ----
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.7, 0.3],
-        subplot_titles=("ETH-USDT 价格", "成交量")
-    )
-
-    fig.add_trace(
-        go.Candlestick(
-            x=df["time"],
-            open=df["o"],
-            high=df["h"],
-            low=df["l"],
-            close=df["c"],
-            name="K线"
-        ),
-        row=1, col=1
-    )
-
-    buy_signals = df[df["signal"] == 1]
-    sell_signals = df[df["signal"] == -1]
-    fig.add_trace(
-        go.Scatter(
-            x=buy_signals["time"],
-            y=buy_signals["l"] * 0.99,
-            mode="markers",
-            marker=dict(symbol="triangle-up", size=12, color="green"),
-            name="买入信号"
-        ),
-        row=1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=sell_signals["time"],
-            y=sell_signals["h"] * 1.01,
-            mode="markers",
-            marker=dict(symbol="triangle-down", size=12, color="red"),
-            name="卖出信号"
-        ),
-        row=1, col=1
-    )
-
-    colors = ['red' if row['o'] > row['c'] else 'green' for _, row in df.iterrows()]
-    fig.add_trace(
-        go.Bar(x=df["time"], y=df["v"], name="成交量", marker_color=colors),
-        row=2, col=1
-    )
-
-    if volume_type != "无":
-        fig.add_trace(
-            go.Scatter(x=df["time"], y=df["vol_ma"], line=dict(color="purple", width=1), name="成交量MA"),
-            row=2, col=1
-        )
-
-    fig.update_layout(
-        xaxis_rangeslider_visible=False,
-        height=700,
-        hovermode="x unified"
-    )
-    fig.update_yaxes(title_text="价格", row=1, col=1)
-    fig.update_yaxes(title_text="成交量", row=2, col=1)
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ---- 当前信号提示 ----
-    last_row = df.iloc[-1]
-    if last_row["position"] == 1:
-        signal_text = "📈 当前处于多头持仓状态 (最后信号为买入)"
-    elif last_row["position"] == -1:
-        signal_text = "📉 当前处于空头持仓状态 (最后信号为卖出)"
+    if num_trades == 0:
+        win_rate = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+        profit_factor = 0.0
+        sharpe = 0.0
+        max_drawdown = 0.0
     else:
-        signal_text = "⏸️ 无持仓 (最近无信号)"
+        wins = [t for t in trades if t > 0]
+        losses = [t for t in trades if t < 0]
+        win_rate = len(wins) / num_trades * 100
+        avg_win = np.mean(wins) if wins else 0
+        avg_loss = abs(np.mean(losses)) if losses else 0
+        profit_factor = (sum(wins) / abs(sum(losses))) if losses else np.inf
 
-    st.info(f"**最新策略状态**：{signal_text}")
+        # === 修正 Sharpe 计算：基于资金曲线每步收益率 ===
+        equity = np.array(equity_curve)
+        step_returns = np.diff(equity) / equity[:-1]   # 每步收益率（已扣除手续费）
+        if len(step_returns) > 1 and np.std(step_returns) > 0:
+            # 年化因子：5分钟K线，每天288根，每年365天
+            sharpe = np.mean(step_returns) / np.std(step_returns) * np.sqrt(288 * 365)
+        else:
+            sharpe = 0.0
 
-    last_buy = buy_signals["time"].max() if not buy_signals.empty else None
-    last_sell = sell_signals["time"].max() if not sell_signals.empty else None
-    col1, col2 = st.columns(2)
-    with col1:
-        if last_buy:
-            st.success(f"最近买入信号: {last_buy.strftime('%Y-%m-%d %H:%M')}")
-    with col2:
-        if last_sell:
-            st.error(f"最近卖出信号: {last_sell.strftime('%Y-%m-%d %H:%M')}")
+        # 计算最大回撤
+        peak = np.maximum.accumulate(equity)
+        drawdown = (peak - equity) / peak * 100
+        max_drawdown = np.max(drawdown)
 
-    # ---- 回测数据展示 ----
-    st.subheader("📊 回测参数表现总览")
-    if not backtest_df.empty:
-        # 选择要显示的列（排除一些不常用的）
-        display_cols = ["body_threshold", "vol_ma_period", "break_threshold", 
-                        "交易数", "胜率", "总盈利", "最大回撤", "夏普比率", "盈亏比"]
-        available_cols = [col for col in display_cols if col in backtest_df.columns]
-        
-        # 添加排序功能
-        sort_col = st.selectbox("排序依据", available_cols, index=available_cols.index("总盈利") if "总盈利" in available_cols else 0)
-        sort_asc = st.checkbox("升序", value=False)
-        
-        sorted_df = backtest_df.sort_values(by=sort_col, ascending=sort_asc)
-        
-        # 高亮前三名（按总盈利，如果总盈利存在）
-        def highlight_top3(s):
-            if sort_col == "总盈利" and "总盈利" in sorted_df.columns:
-                top3_values = sorted_df["总盈利"].nlargest(3).values
-                return ['background-color: rgba(255, 255, 0, 0.2)' if s.name == "总盈利" and v in top3_values else '' for v in s]
-            return ['' for _ in s]
-        
-        st.dataframe(sorted_df[available_cols].style.apply(highlight_top3, axis=0), use_container_width=True)
-        
-        # 显示最优参数（按总盈利）
-        if "总盈利" in backtest_df.columns:
-            best_row = backtest_df.loc[backtest_df["总盈利"].idxmax()]
-            st.success(f"🏆 最佳参数（按总盈利）：body_threshold={best_row['body_threshold']}, vol_ma_period={best_row['vol_ma_period']}, break_threshold={best_row['break_threshold']}，总盈利={best_row['总盈利']:.2f}，胜率={best_row['胜率']:.2f}%")
-    else:
-        st.warning("无回测数据可显示")
+    return {
+        "final_balance": balance,
+        "total_return": total_return,
+        "num_trades": num_trades,
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": profit_factor,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "equity_curve": equity_curve,
+        "trades": trades
+    }
 
-    # ---- 手动下单区 ----
-    st.subheader("✋ 手动交易")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📈 买入"):
-            place_order("buy", trade_size)
-    with col2:
-        if st.button("📉 卖出"):
-            place_order("sell", trade_size)
+backtest_results = run_backtest(df, fee_rate)
 
-    st.caption("本工具仅供学习参考，不构成投资建议。实盘需自行承担风险。")
+# =========================
+# 显示回测指标
+# =========================
+st.subheader("📈 回测表现（基于历史数据）")
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("总收益率", f"{backtest_results['total_return']:.2f}%")
+    st.metric("交易次数", backtest_results['num_trades'])
+with col2:
+    st.metric("胜率", f"{backtest_results['win_rate']:.1f}%")
+    # 盈亏比，防止除零
+    rr = backtest_results['avg_win'] / backtest_results['avg_loss'] if backtest_results['avg_loss'] > 0 else np.nan
+    st.metric("盈亏比", f"{rr:.2f}" if not np.isnan(rr) else "N/A")
+with col3:
+    st.metric("最大回撤", f"{backtest_results['max_drawdown']:.2f}%")
+    st.metric("夏普比率", f"{backtest_results['sharpe']:.2f}")
+with col4:
+    st.metric("获利因子", f"{backtest_results['profit_factor']:.2f}")
+    st.metric("手续费率", f"{fee_rate*100:.3f}%")
 
+# =========================
+# 资金曲线图
+# =========================
+if len(backtest_results['equity_curve']) > 1:
+    fig_equity = go.Figure()
+    fig_equity.add_trace(go.Scatter(
+        y=backtest_results['equity_curve'],
+        mode='lines',
+        name='资金曲线',
+        line=dict(color='blue', width=2)
+    ))
+    fig_equity.update_layout(
+        title="资金曲线 (起始10000)",
+        xaxis_title="交易步数",
+        yaxis_title="账户余额",
+        height=300,
+        margin=dict(l=0, r=0, t=30, b=0)
+    )
+    st.plotly_chart(fig_equity, use_container_width=True)
 
-if __name__ == "__main__":
-    main()
+# =========================
+# 实时信号状态
+# =========================
+st.subheader("🔔 实时信号状态")
+latest_signal = df["signal"].iloc[-1] if not df.empty else 0
+if latest_signal == 1:
+    st.success("📈 最新信号：买入")
+elif latest_signal == -1:
+    st.error("📉 最新信号：卖出")
+else:
+    st.info("⏸️ 最新信号：无")
+
+# 最近信号时间
+buy_signals = df[df["signal"] == 1]
+sell_signals = df[df["signal"] == -1]
+last_buy_time = buy_signals["time"].max() if not buy_signals.empty else None
+last_sell_time = sell_signals["time"].max() if not sell_signals.empty else None
+col1, col2 = st.columns(2)
+with col1:
+    if last_buy_time:
+        st.success(f"最近买入信号: {last_buy_time.strftime('%Y-%m-%d %H:%M')}")
+with col2:
+    if last_sell_time:
+        st.error(f"最近卖出信号: {last_sell_time.strftime('%Y-%m-%d %H:%M')}")
+
+# =========================
+# K线图（带买卖点）
+# =========================
+st.subheader("📊 最新K线图")
+fig = go.Figure()
+
+fig.add_trace(go.Candlestick(
+    x=df["time"],
+    open=df["o"],
+    high=df["h"],
+    low=df["l"],
+    close=df["c"],
+    name="K线"
+))
+
+buy_points = df[df["signal"] == 1]
+sell_points = df[df["signal"] == -1]
+fig.add_trace(go.Scatter(
+    x=buy_points["time"],
+    y=buy_points["c"],
+    mode="markers",
+    marker=dict(symbol="triangle-up", size=12, color="green"),
+    name="买入"
+))
+fig.add_trace(go.Scatter(
+    x=sell_points["time"],
+    y=sell_points["c"],
+    mode="markers",
+    marker=dict(symbol="triangle-down", size=12, color="red"),
+    name="卖出"
+))
+
+# 可选：添加EMA50线
+if use_trend_filter:
+    fig.add_trace(go.Scatter(
+        x=df["time"],
+        y=df["ema50"],
+        line=dict(color="purple", width=1),
+        name="EMA50"
+    ))
+
+fig.update_layout(
+    xaxis_rangeslider_visible=False,
+    height=500,
+    hovermode="x unified"
+)
+st.plotly_chart(fig, use_container_width=True)
+
+st.caption("⚠️ 注意：回测已考虑手续费，使用下一根开盘价执行。本工具仅供参考，不构成投资建议。")
