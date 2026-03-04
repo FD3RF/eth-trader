@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-纯K线吞没形态策略（初始资金100，只用K线，无任何指标）
+纯K线吞没形态策略（优化版）
+初始资金100，只用K线（无任何指标）
 信号：看涨/看跌吞没形态
 止损：固定点数
 止盈：止损点数的倍数
@@ -10,19 +11,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.optimize import brute
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 st.set_page_config(layout="wide")
-st.title("📈 纯K线吞没形态策略（无指标，初始资金100）")
+st.title("📈 纯K线吞没形态策略（优化版，初始资金100）")
 
 # ====== 侧边栏 ======
 st.sidebar.header("运行设置")
 mode = st.sidebar.radio("模式", ["手动调参", "自动优化"])
 
 if mode == "手动调参":
-    stop_points = st.sidebar.number_input("止损点数", min_value=1.0, max_value=100.0, value=10.0, step=1.0)
+    stop_points = st.sidebar.number_input("止损点数", min_value=5.0, max_value=50.0, value=15.0, step=1.0)
     tp_ratio = st.sidebar.number_input("止盈倍数 (相对于止损)", min_value=1.0, max_value=5.0, value=2.0, step=0.1)
     use_trailing = st.sidebar.checkbox("移动止损", value=False)
     trail_period = st.sidebar.slider("移动止损周期", 5, 50, 10) if use_trailing else 0
@@ -66,7 +66,6 @@ st.info(f"训练集 {len(df_train)} | 测试集 {len(df_test)}")
 # ====== 特征工程：只识别吞没形态 ======
 def prepare_features(df):
     df = df.copy()
-    # 前一根K线数据
     df['prev_open'] = df['open'].shift(1)
     df['prev_high'] = df['high'].shift(1)
     df['prev_low'] = df['low'].shift(1)
@@ -204,11 +203,10 @@ def backtest(df, params):
     peak = eq_series.expanding().max()
     drawdown = (peak - eq_series) / peak
     max_dd = drawdown.max()
-    # 夏普比率（基于日收益率，此处每根K线作为一天）
+    # 夏普比率（基于每根K线收益率，5分钟数据年化）
     returns = pd.Series(equity).pct_change().dropna()
     if returns.std() != 0:
-        # 假设数据为5分钟，一年约有 365*24*12 ≈ 105120 根K线
-        sharpe = returns.mean() / returns.std() * np.sqrt(365 * 24 * 12)
+        sharpe = returns.mean() / returns.std() * np.sqrt(365 * 24 * 12)  # 5分钟K线年化
     else:
         sharpe = 0
 
@@ -227,18 +225,18 @@ def backtest(df, params):
 
 # ====== 自动优化 ======
 def optimize_params(df_train, objective='profit_factor'):
-    # 搜索范围（可自行调整）
+    # 扩大搜索范围，使止损更大，止盈倍数更高
     param_grid = {
-        'stop_points': np.arange(5, 31, 5),           # 5,10,15,20,25,30
-        'tp_ratio': np.arange(1.0, 4.0, 0.5),         # 1.0,1.5,2.0,2.5,3.0,3.5
+        'stop_points': np.arange(10, 41, 5),        # 10,15,20,25,30,35,40
+        'tp_ratio': np.arange(1.5, 4.0, 0.5),       # 1.5,2.0,2.5,3.0,3.5
         'use_trailing': [False, True],
-        'trail_period': [5, 10, 15],
+        'trail_period': [5, 10, 15, 20],
         'enable_short': [True, False]
     }
     best_score = -np.inf
     best_params = None
     total = (len(param_grid['stop_points']) * len(param_grid['tp_ratio']) *
-             2 * 3 * 2)
+             2 * len(param_grid['trail_period']) * 2)
     prog = st.progress(0)
     status = st.empty()
     count = 0
@@ -259,6 +257,9 @@ def optimize_params(df_train, objective='profit_factor'):
                         count += 1
                         prog.progress(count / total)
                         if res and res['num_trades'] > 30:
+                            # 增加过滤条件：最大回撤不能超过40%，否则跳过
+                            if res['max_drawdown'] > 0.4:
+                                continue
                             if objective == 'profit_factor':
                                 score = res['profit_factor']
                             elif objective == 'sharpe':
