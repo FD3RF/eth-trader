@@ -30,7 +30,10 @@ def get_candles(limit=300, bar="15m"):
         )[::-1]
 
         df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
-        df[["o", "h", "l", "c", "v"]] = df[["o", "h", "l", "c", "v"]].astype(float)
+
+        # 强制数值转换（防异常）
+        for col in ["o", "h", "l", "c", "v"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
         return df
 
@@ -40,8 +43,12 @@ def get_candles(limit=300, bar="15m"):
 
 
 # ========================= 期望值 =========================
-def expectancy(samples):
-    if samples is None or len(samples) < 30:
+def expectancy(samples: pd.Series):
+    if samples is None:
+        return 0
+
+    samples = samples.dropna()
+    if len(samples) < 30:
         return 0
 
     win = samples[samples > 0]
@@ -87,7 +94,11 @@ def main():
     # 量能
     df["vol_ma"] = df["v"].rolling(lookback, min_periods=lookback).mean()
     df["vol_median"] = df["v"].rolling(lookback, min_periods=lookback).median()
-    df["vol_break"] = (df["v"] > df["vol_ma"] * volume_mult) & (df["v"] > df["vol_median"])
+
+    df["vol_break"] = (
+        (df["v"] > df["vol_ma"] * volume_mult) &
+        (df["v"] > df["vol_median"])
+    )
 
     # 实体（防除零）
     df["body"] = (df["c"] - df["o"]).abs() / df["o"].replace(0, np.nan)
@@ -115,8 +126,8 @@ def main():
     future = 3
     df["future_return"] = df["c"].shift(-future) / df["c"] - 1
 
-    up_samples = df[df["valid_break_up"]]["future_return"].dropna()
-    down_samples = df[df["valid_break_down"]]["future_return"].dropna()
+    up_samples = df[df["valid_break_up"]]["future_return"]
+    down_samples = df[df["valid_break_down"]]["future_return"]
 
     exp_up = expectancy(up_samples)
     exp_down = expectancy(down_samples)
@@ -125,11 +136,11 @@ def main():
     st.write({
         "突破上期望(%)": round(exp_up * 100, 2),
         "突破下期望(%)": round(exp_down * 100, 2),
-        "样本数(上)": len(up_samples),
-        "样本数(下)": len(down_samples)
+        "样本数(上)": len(up_samples.dropna()),
+        "样本数(下)": len(down_samples.dropna())
     })
 
-    if len(up_samples) < 30 or len(down_samples) < 30:
+    if len(up_samples.dropna()) < 30 or len(down_samples.dropna()) < 30:
         st.warning("样本不足，期望值参考意义有限")
 
     # ===================== 可视化 =====================
