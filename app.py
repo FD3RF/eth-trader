@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-最强实盘级优化
-核心：
-- 多周期趋势
-- ATR动态止损
-- 动态仓位
-- 低频高质
-- 防过拟合
+终极实盘强化版
+目标：
+- 交易更少
+- 质量更高
+- 风控更严
+- 防假突破
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="实盘级优化", layout="wide")
-st.title("🚀 最强实盘优化")
+st.set_page_config(page_title="终极强化版", layout="wide")
+st.title("🚀 终极实盘强化")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
@@ -35,7 +34,7 @@ df['volume'] = df['vol']
 st.write(f"数据行: {len(df)}")
 
 # ================================
-# 多周期趋势（最重要）
+# 多周期趋势（核心）
 # ================================
 df['ema20'] = df['close'].ewm(span=20).mean()
 df['ema50'] = df['close'].ewm(span=50).mean()
@@ -45,18 +44,18 @@ df['trend_up'] = (df['ema20'] > df['ema50']) & (df['ema50'] > df['ema200'])
 df['trend_down'] = (df['ema20'] < df['ema50']) & (df['ema50'] < df['ema200'])
 
 # ================================
-# 动态特征
+# 动态特征（更严格）
 # ================================
-lookback = 30  # 拉长周期（更稳）
+lookback = 40  # 拉长周期 → 交易更少
 
 df['high_max'] = df['high'].rolling(lookback).max().shift(1)
 df['low_min'] = df['low'].rolling(lookback).min().shift(1)
 
 df['vol_ma'] = df['volume'].rolling(lookback).mean().shift(1)
 df['vol_std'] = df['volume'].rolling(lookback).std().shift(1)
-df['vol_threshold'] = df['vol_ma'] + df['vol_std'] * 0.8  # 更严格放量
+df['vol_threshold'] = df['vol_ma'] + df['vol_std'] * 1.2  # 更严格放量
 
-# ATR（动态止损）
+# ATR
 tr = pd.concat([
     df['high'] - df['low'],
     (df['high'] - df['close'].shift()).abs(),
@@ -68,7 +67,7 @@ df['atr'] = tr.rolling(14).mean()
 df.dropna(inplace=True)
 
 # ================================
-# 信号（更严格）
+# 信号（非常严格）
 # ================================
 df['signal'] = 0
 
@@ -89,14 +88,7 @@ df.loc[
 ] = -1
 
 # ================================
-# 动态仓位（核心实盘思维）
-# ================================
-def calc_position_size(atr, capital=10000):
-    risk_per_trade = 0.01  # 每单风险1%
-    return (capital * risk_per_trade) / (atr * 2 + 1e-9)
-
-# ================================
-# 回测（实盘级）
+# 回测（实盘更严）
 # ================================
 def backtest(df):
     equity = [0]
@@ -104,9 +96,8 @@ def backtest(df):
     position = 0
     entry = 0
 
-    rr = 2.5  # 提高盈亏比
-    min_hold = 3  # 最小持仓K线（防假突破）
-
+    rr = 3.0          # 提高盈亏比
+    min_hold = 5      # 最小持仓K线
     hold = 0
 
     for i in range(1, len(df)):
@@ -115,7 +106,6 @@ def backtest(df):
         high = row['high']
         low = row['low']
 
-        # 持仓计数
         if position != 0:
             hold += 1
         else:
@@ -123,7 +113,7 @@ def backtest(df):
 
         # ===== 平多 =====
         if position == 1:
-            stop = entry - row['atr'] * 1.5
+            stop = entry - row['atr'] * 1.8
             take = entry + (entry - stop) * rr
 
             if low <= stop:
@@ -138,7 +128,6 @@ def backtest(df):
                 equity.append(equity[-1] + pnl)
                 position = 0
 
-            # 防假突破：最低持仓
             elif hold >= min_hold and row['signal'] == -1:
                 pnl = price - entry
                 trades.append(pnl)
@@ -147,7 +136,7 @@ def backtest(df):
 
         # ===== 平空 =====
         if position == -1:
-            stop = entry + row['atr'] * 1.5
+            stop = entry + row['atr'] * 1.8
             take = entry - (stop - entry) * rr
 
             if high >= stop:
@@ -191,7 +180,7 @@ def backtest(df):
     }
 
 # ================================
-# 回测展示
+# 展示
 # ================================
 res = backtest(df)
 
