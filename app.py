@@ -6,8 +6,8 @@ import numpy as np
 
 BASE_URL = "https://www.okx.com"
 
-st.set_page_config(layout="wide", page_title="突破+趋势+期望值优化版", page_icon="📈")
-st.title("📊 突破 / 趋势 / 期望值 · 优化版")
+st.set_page_config(layout="wide", page_title="突破+趋势+期望值终极版", page_icon="📈")
+st.title("📊 突破 / 趋势 / 期望值 · 终极版")
 
 
 # ========================= 获取K线 =========================
@@ -26,30 +26,30 @@ def get_candles(limit=300, bar="15m"):
 
         df = pd.DataFrame(
             res["data"],
-            columns=["ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"]
+            columns=["ts", "o", "h", "l", "c", "v", "volCcy", "volCcyQuote", "confirm"]
         )[::-1]
 
         df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
-        df[["o","h","l","c","v"]] = df[["o","h","l","c","v"]].astype(float)
+        df[["o", "h", "l", "c", "v"]] = df[["o", "h", "l", "c", "v"]].astype(float)
 
         return df
 
-    except Exception as e:
-        st.error(f"获取失败: {e}")
+    except Exception:
+        st.error("获取失败，请检查网络")
         return pd.DataFrame()
 
 
-# ========================= 期望值计算 =========================
+# ========================= 期望值 =========================
 def expectancy(samples):
-    if samples is None or len(samples) < 10:
+    if samples is None or len(samples) < 30:
         return 0
 
     win = samples[samples > 0]
     loss = samples[samples <= 0]
 
     win_rate = len(win) / len(samples)
-    avg_win = win.mean() if len(win) > 0 else 0
-    avg_loss = abs(loss.mean()) if len(loss) > 0 else 0
+    avg_win = win.mean() if len(win) else 0
+    avg_loss = abs(loss.mean()) if len(loss) else 0
 
     if avg_loss == 0:
         return 0
@@ -60,45 +60,44 @@ def expectancy(samples):
 
 # ========================= 主逻辑 =========================
 def main():
-    bar = st.selectbox("K线周期", ["5m","15m","1h"], index=1)
+    bar = st.selectbox("K线周期", ["5m", "15m", "1h"], index=1)
     lookback = st.slider("区间周期", 10, 100, 20)
     trend_fast = st.slider("快均线", 10, 50, 20)
     trend_slow = st.slider("慢均线", 30, 200, 50)
-    volume_mult = st.slider("量能倍数", 1.0, 3.0, 1.5, 0.1)
+    volume_mult = st.slider("量能倍数", 1.2, 3.0, 1.5, 0.1)
 
     df = get_candles(limit=300, bar=bar)
     if df.empty:
         st.error("暂无数据")
         return
 
-    # ===== 区间高低 =====
-    df["range_high"] = df["h"].rolling(lookback).max()
-    df["range_low"] = df["l"].rolling(lookback).min()
+    # ===================== 滚动计算（防 NaN）=====================
+    df["range_high"] = df["h"].rolling(lookback, min_periods=lookback).max()
+    df["range_low"] = df["l"].rolling(lookback, min_periods=lookback).min()
 
-    # ===== 双均线趋势 =====
-    df["ma_fast"] = df["c"].rolling(trend_fast).mean()
-    df["ma_slow"] = df["c"].rolling(trend_slow).mean()
+    df["ma_fast"] = df["c"].rolling(trend_fast, min_periods=trend_fast).mean()
+    df["ma_slow"] = df["c"].rolling(trend_slow, min_periods=trend_slow).mean()
 
     df["trend_up"] = df["ma_fast"] > df["ma_slow"]
     df["trend_down"] = df["ma_fast"] < df["ma_slow"]
 
-    # ===== 量能 =====
-    df["vol_ma"] = df["v"].rolling(lookback).mean()
-    df["vol_median"] = df["v"].rolling(lookback).median()
+    # ===================== 量能 =====================
+    df["vol_ma"] = df["v"].rolling(lookback, min_periods=lookback).mean()
+    df["vol_median"] = df["v"].rolling(lookback, min_periods=lookback).median()
 
     df["vol_break"] = (
         (df["v"] > df["vol_ma"] * volume_mult) &
         (df["v"] > df["vol_median"])
     )
 
-    # ===== 实体 =====
+    # ===================== 实体 =====================
     df["body"] = abs(df["c"] - df["o"]) / df["o"]
 
-    # ===== 原始突破 =====
+    # ===================== 原始突破 =====================
     df["raw_break_up"] = df["c"] > df["range_high"].shift(1)
     df["raw_break_down"] = df["c"] < df["range_low"].shift(1)
 
-    # ===== 有效突破（假突破过滤）=====
+    # ===================== 有效突破（假突破过滤）=====================
     df["valid_break_up"] = (
         df["raw_break_up"] &
         df["trend_up"] &
@@ -113,7 +112,7 @@ def main():
         (df["body"] > 0.002)
     )
 
-    # ===== 期望值 =====
+    # ===================== 期望值 =====================
     future = 3
     df["future_return"] = (df["c"].shift(-future) / df["c"] - 1)
 
@@ -131,10 +130,10 @@ def main():
         "样本数(下)": len(down_samples)
     })
 
-    if len(up_samples) < 20 or len(down_samples) < 20:
+    if len(up_samples) < 30 or len(down_samples) < 30:
         st.warning("样本不足，期望值参考意义有限")
 
-    # ===== 可视化 =====
+    # ===================== 可视化 =====================
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=df["time"],
@@ -174,7 +173,7 @@ def main():
     fig.update_layout(xaxis_rangeslider_visible=False, height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ===== 最近信号 =====
+    # ===================== 最近信号 =====================
     st.subheader("🔔 最近有效突破")
     signals = df[(df["valid_break_up"] | df["valid_break_down"])].tail(10)
 
@@ -182,7 +181,7 @@ def main():
         st.info("暂无有效突破")
     else:
         st.dataframe(
-            signals[["time","c","valid_break_up","valid_break_down","vol_break","body"]],
+            signals[["time", "c", "valid_break_up", "valid_break_down", "vol_break", "body"]],
             use_container_width=True
         )
 
