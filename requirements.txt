@@ -1,6 +1,4 @@
 streamlit
 pandas
 numpy
-scipy
 plotly
-time
