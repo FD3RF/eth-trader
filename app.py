@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-滚动验证（walk-forward）
+强化滚动验证（更大样本）
 纯K结构
 """
 
@@ -8,8 +8,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="滚动验证", layout="wide")
-st.title("🚀 滚动验证（Walk Forward）")
+st.set_page_config(page_title="强化滚动验证", layout="wide")
+st.title("🚀 强化滚动验证（更大样本）")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
@@ -132,13 +132,15 @@ def backtest(df):
     return trades, equity
 
 # ================================
-# 滚动验证
+# 强滚动验证
 # ================================
 n = len(df)
-fold = int(n * 0.2)
 
+# 滚动块：20%
+fold = int(n * 0.2)
 results = []
 
+# 更多区段
 for i in range(0, n - fold, fold):
     test = df.iloc[i:i+fold]
     trades, equity = backtest(test)
@@ -146,14 +148,17 @@ for i in range(0, n - fold, fold):
     if trades:
         results.append({
             "start": i,
+            "end": i+fold,
             "trades": len(trades),
             "win_rate": sum(1 for p in trades if p > 0) / len(trades),
             "total": sum(trades),
-            "avg": np.mean(trades)
+            "avg": np.mean(trades),
+            "max_loss": min(trades),
+            "max_profit": max(trades)
         })
 
 # ================================
-# 展示
+# 统计
 # ================================
 st.header("滚动验证结果")
 
@@ -161,10 +166,12 @@ if results:
     df_res = pd.DataFrame(results)
     st.write(df_res)
 
+    st.write("区段数量:", len(results))
     st.write("平均胜率:", df_res['win_rate'].mean())
     st.write("平均单笔:", df_res['avg'].mean())
-    st.write("总区段:", len(results))
+    st.write("胜率波动:", df_res['win_rate'].std())
+    st.write("单笔波动:", df_res['avg'].std())
+
+    st.success("验证完成")
 else:
     st.write("无结果")
-
-st.success("验证完毕")
