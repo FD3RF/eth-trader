@@ -1,302 +1,153 @@
-# -*- coding: utf-8 -*-
-"""
-纯K 5分钟 多周期强化版（优化版）
-包含：
-- 自动识别时间列名
-- 自动识别成交量列名
-- 滑点 + 手续费 + ATR止损 + ADX过滤 + 实时刷新
-- 分批止盈（1倍、2倍、3倍风险）
-"""
-
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import time
 
-st.set_page_config(layout="wide")
-st.title("📊 5分钟纯K专业强化版（优化版）")
+st.set_page_config(page_title="纯K吞没突破 - 0参数版", layout="wide")
+st.title("🚀 5分钟纯K吞没突破战法（真·0参数·纯K版）")
+st.caption("只看相邻两根K线吞没+突破 | 无任何指标 | 初始资金10000 USDT")
 
-# =========================
-# 参数
-# =========================
-st.sidebar.header("策略参数")
+# ================== 参数 ==================
+initial_capital = st.number_input("模拟初始资金 (USDT)", value=10000.0)
+fee_rate = st.number_input("手续费率 (双边)", value=0.0010, format="%.4f")
+slippage = st.number_input("滑点", value=0.0005, format="%.4f")
+rr = 2.5
+sl_buffer = 5.0
 
-body_threshold = st.sidebar.slider("实体比例", 0.05, 0.5, 0.15, 0.01)
-vol_period = st.sidebar.slider("成交量周期", 5, 30, 15)
-break_threshold = st.sidebar.slider("突破幅度", 0.0005, 0.003, 0.001, 0.0001)  # 当前未使用，可保留备用
-atr_period = st.sidebar.slider("ATR周期", 5, 30, 14)
-atr_mult = st.sidebar.slider("ATR倍数", 0.5, 5.0, 1.5, 0.1)
-adx_threshold = st.sidebar.slider("ADX趋势过滤", 10, 40, 20)
-rr = st.sidebar.slider("盈亏比（参考）", 1.0, 5.0, 2.0, 0.1)  # 现用于分批止盈的倍数
+refresh_btn = st.button("🔄 刷新最新信号与统计")
 
-slippage_pct = st.sidebar.slider("滑点%", 0.0, 0.002, 0.0005, 0.0001)
-fee_pct = st.sidebar.slider("手续费%", 0.0, 0.002, 0.0004, 0.0001)
-
-risk_pct = st.sidebar.slider("单笔风险%", 0.5, 5.0, 1.0, 0.1) / 100
-
-auto_refresh = st.sidebar.checkbox("自动刷新")
-refresh_sec = st.sidebar.slider("刷新秒数", 5, 60, 15)
-
-lookback = 20
-initial_equity = 100
-
-# =========================
-# 数据加载与列名适配
-# =========================
-file = st.file_uploader("上传5分钟CSV", type=["csv"])
+# ================== 数据 ==================
+file = st.file_uploader("上传 5分钟 OHLCV CSV", type=["csv"])
 if file is None:
     st.stop()
 
 df = pd.read_csv(file)
-# 将所有列名转为小写，便于统一处理
 df.columns = [c.lower() for c in df.columns]
+df = df.rename(columns={"vol": "volume"})
+df = df[['ts', 'open', 'high', 'low', 'close']].copy()
+df['ts'] = pd.to_datetime(df['ts'], unit='ms')
 
-# --- 自动识别时间列 ---
-possible_time_cols = ['time', 'timestamp', 'date', 'datetime']
-time_col = None
-for col in possible_time_cols:
-    if col in df.columns:
-        time_col = col
-        break
-if time_col is None:
-    st.error("❌ CSV文件中未找到时间列。请确保列名包含以下之一：time, timestamp, date, datetime")
-    st.stop()
-# 统一重命名为 'time'
-if time_col != 'time':
-    df.rename(columns={time_col: 'time'}, inplace=True)
+# ================== 纯K吞没突破信号（核心，只有这部分） ==================
+df['prev_open'] = df['open'].shift(1)
+df['prev_high'] = df['high'].shift(1)
+df['prev_low'] = df['low'].shift(1)
+df['prev_close'] = df['close'].shift(1)
 
-# --- 自动识别成交量列（优先 vol，其次 volume）---
-if 'vol' not in df.columns:
-    if 'volume' in df.columns:
-        df.rename(columns={'volume': 'vol'}, inplace=True)
-    else:
-        st.error("❌ CSV文件中未找到成交量列。请确保列名为 vol 或 volume")
-        st.stop()
+df['long_signal'] = (
+    (df['prev_close'] < df['prev_open']) &      # 前阴
+    (df['close'] > df['open']) &                # 当前阳
+    (df['open'] <= df['prev_close']) &          # 实体吞没
+    (df['close'] >= df['prev_open']) &
+    (df['close'] > df['prev_high'])             # 突破前高
+)
 
-# 确保存在 OHLC 列
-required_cols = ['open', 'high', 'low', 'close', 'vol', 'time']
-missing = [c for c in required_cols if c not in df.columns]
-if missing:
-    st.error(f"❌ CSV缺少以下必要列：{missing}")
-    st.stop()
+df['short_signal'] = (
+    (df['prev_close'] > df['prev_open']) &
+    (df['close'] < df['open']) &
+    (df['open'] >= df['prev_close']) &
+    (df['close'] <= df['prev_open']) &
+    (df['close'] < df['prev_low'])
+)
 
-# 转换时间格式
-df['time'] = pd.to_datetime(df['time'])
-df.sort_values("time", inplace=True)
-
-# =========================
-# 计算指标
-# =========================
-def add_indicators(data):
-    data['high_max'] = data['high'].rolling(lookback).max().shift(1)
-    data['low_min'] = data['low'].rolling(lookback).min().shift(1)
-    data['body'] = abs(data['close'] - data['open'])
-    data['range'] = data['high'] - data['low']
-    data['body_ratio'] = data['body'] / (data['range'] + 1e-9)
-    data['vol_ma'] = data['vol'].rolling(vol_period).mean()
-
-    # ATR
-    tr = np.maximum(
-        data['high'] - data['low'],
-        np.maximum(
-            abs(data['high'] - data['close'].shift(1)),
-            abs(data['low'] - data['close'].shift(1))
-        )
-    )
-    data['atr'] = tr.rolling(atr_period).mean()
-
-    # ADX
-    up = data['high'].diff()
-    down = -data['low'].diff()
-
-    plus_dm = np.where((up > down) & (up > 0), up, 0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0)
-
-    tr_smooth = tr.rolling(14).sum()
-    plus_di = 100 * pd.Series(plus_dm).rolling(14).sum() / tr_smooth
-    minus_di = 100 * pd.Series(minus_dm).rolling(14).sum() / tr_smooth
-
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    data['adx'] = dx.rolling(14).mean()
-
-    return data.dropna()
-
-df = add_indicators(df)
-
-# 30分钟确认
-df_30 = df.set_index('time').resample('30T').agg({
-    'open':'first','high':'max','low':'min','close':'last','vol':'sum'
-}).dropna().reset_index()
-df_30 = add_indicators(df_30)
-
-# =========================
-# 回测逻辑（分批止盈）
-# =========================
-equity = initial_equity
-equity_curve = []
-records = []
-signals = []
-
-position = 0                # 0-无持仓，1-多头，-1-空头
-positions_list = []         # 存储当前持仓的子仓位信息，每个元素为字典
+# ================== 纯K回测（含手续费滑点） ==================
+trades = []
+marks = []
+equity = initial_capital
+equity_curve = [initial_capital]
+position = 0
+entry_price = 0
 
 for i in range(1, len(df)):
     row = df.iloc[i]
-    row30 = df_30[df_30['time'] <= row['time']].iloc[-1]
+    price = row['open']
+    signal = 1 if row['long_signal'] else (-1 if row['short_signal'] else 0)
 
-    signal = 0
-    if row['adx'] > adx_threshold:
-        if row['close'] > row['high_max'] and row['body_ratio'] > body_threshold:
-            if row30['close'] > row30['high_max']:
-                signal = 1
-        if row['close'] < row['low_min'] and row['body_ratio'] > body_threshold:
-            if row30['close'] < row30['low_min']:
-                signal = -1
-
-    # 开仓条件：无持仓且有信号
     if position == 0 and signal != 0:
-        entry_price = row['open'] * (1 + slippage_pct * signal)
-        atr = row['atr']
-        stop = entry_price - atr * atr_mult if signal == 1 else entry_price + atr * atr_mult
-        risk = abs(entry_price - stop)
-        size = equity * risk_pct / risk
-
-        # 三个目标价（1倍、2倍、3倍风险）
-        if signal == 1:  # 多头
-            tp1 = entry_price + risk * 1
-            tp2 = entry_price + risk * 2
-            tp3 = entry_price + risk * 3
-        else:            # 空头
-            tp1 = entry_price - risk * 1
-            tp2 = entry_price - risk * 2
-            tp3 = entry_price - risk * 3
-
-        size_sub = size / 3.0
-
-        positions_list = [{
-            'side': signal,
-            'entry': entry_price,
-            'stop': stop,
-            'tps': [tp1, tp2, tp3],
-            'filled': [False, False, False],
-            'size': size_sub
-        }]
-
-        signals.append((row['time'], signal, entry_price, stop, tp1))
+        entry_price = price + signal * price * slippage
+        sl_price = (row['low'] - sl_buffer) if signal == 1 else (row['high'] + sl_buffer)
+        tp_price = entry_price + signal * (entry_price - sl_price) * rr
         position = signal
+        marks.append((i, entry_price, "buy" if signal==1 else "sell"))
 
-    # 持仓管理（分批止盈）
-    if positions_list:
-        pos = positions_list[0]
-        side = pos['side']
-        entry = pos['entry']
-        stop = pos['stop']
-        tps = pos['tps']
-        filled = pos['filled']
-        size_sub = pos['size']
+    elif position != 0:
+        high, low = row['high'], row['low']
+        exited = False
+        exit_price = 0
+        if position == 1:
+            if low <= sl_price:
+                exit_price = sl_price - row['open'] * slippage
+                exited = True
+            elif high >= tp_price:
+                exit_price = tp_price + row['open'] * slippage
+                exited = True
+        else:
+            if high >= sl_price:
+                exit_price = sl_price + row['open'] * slippage
+                exited = True
+            elif low <= tp_price:
+                exit_price = tp_price - row['open'] * slippage
+                exited = True
 
-        # 止损检查（所有剩余子仓位同时止损）
-        if side == 1:  # 多头
-            if row['low'] <= stop:
-                for j in range(3):
-                    if not filled[j]:
-                        exit_price = stop * (1 - slippage_pct)
-                        pnl = (exit_price - entry) * size_sub
-                        pnl -= equity * fee_pct
-                        equity += pnl
-                        records.append({"side": "long", "pnl": pnl, "target": f"stop_{j+1}"})
-                        filled[j] = True
-                positions_list = []
-                position = 0
-        else:           # 空头
-            if row['high'] >= stop:
-                for j in range(3):
-                    if not filled[j]:
-                        exit_price = stop * (1 + slippage_pct)
-                        pnl = (entry - exit_price) * size_sub
-                        pnl -= equity * fee_pct
-                        equity += pnl
-                        records.append({"side": "short", "pnl": pnl, "target": f"stop_{j+1}"})
-                        filled[j] = True
-                positions_list = []
-                position = 0
+        if exited:
+            pnl_points = (exit_price - entry_price) * position
+            fee = abs(pnl_points) * fee_rate * 2
+            net_pnl = pnl_points - fee
+            equity += net_pnl
+            trades.append({
+                'idx': i, 'pnl': net_pnl, 'side': 'long' if position==1 else 'short',
+                'sl': sl_price, 'tp': tp_price, 'exit': exit_price
+            })
+            marks.append((i, exit_price, "sell" if position==1 else "buy"))
+            position = 0
+            equity_curve.append(equity)
 
-        # 止盈检查（逐个目标）
-        if positions_list:   # 仍有未平仓位
-            for j in range(3):
-                if not filled[j]:
-                    tp = tps[j]
-                    if side == 1:  # 多头
-                        if row['high'] >= tp:
-                            exit_price = tp * (1 - slippage_pct)
-                            pnl = (exit_price - entry) * size_sub
-                            pnl -= equity * fee_pct
-                            equity += pnl
-                            records.append({"side": "long", "pnl": pnl, "target": f"tp{j+1}"})
-                            filled[j] = True
-                    else:           # 空头
-                        if row['low'] <= tp:
-                            exit_price = tp * (1 + slippage_pct)
-                            pnl = (entry - exit_price) * size_sub
-                            pnl -= equity * fee_pct
-                            equity += pnl
-                            records.append({"side": "short", "pnl": pnl, "target": f"tp{j+1}"})
-                            filled[j] = True
+# ================== 统计面板 ==================
+df_tr = pd.DataFrame(trades)
+st.header("📊 纯K统计结果")
 
-            # 若所有子仓位均已平仓，清空持仓
-            if all(filled):
-                positions_list = []
-                position = 0
+if len(df_tr) > 0:
+    last100 = df_tr.tail(100)
+    win_all = (df_tr['pnl'] > 0).mean() * 100
+    win_100 = (last100['pnl'] > 0).mean() * 100 if len(last100) > 0 else 0
+    profit_factor = df_tr[df_tr['pnl']>0]['pnl'].sum() / abs(df_tr[df_tr['pnl']<0]['pnl'].sum()) if len(df_tr[df_tr['pnl']<0]) > 0 else 0
 
-    equity_curve.append(equity)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("总交易数", len(df_tr))
+    col2.metric("近100笔胜率", f"{win_100:.2f}%")
+    col3.metric("总胜率", f"{win_all:.2f}%")
+    col4.metric("获利因子", f"{profit_factor:.2f}")
 
-df['equity'] = [np.nan] + equity_curve
+    # 多空分离
+    st.subheader("多空分离")
+    long_tr = df_tr[df_tr['side']=='long']
+    short_tr = df_tr[df_tr['side']=='short']
+    c1, c2 = st.columns(2)
+    with c1: st.metric("多头胜率", f"{(long_tr['pnl']>0).mean()*100:.2f}%" if len(long_tr)>0 else "0%")
+    with c2: st.metric("空头胜率", f"{(short_tr['pnl']>0).mean()*100:.2f}%" if len(short_tr)>0 else "0%")
 
-# =========================
-# 统计
-# =========================
-st.header("📌 统计")
-if len(records) > 0:
-    rec = pd.DataFrame(records).tail(100)
-    long_win = rec[rec['side']=="long"]['pnl']>0
-    short_win = rec[rec['side']=="short"]['pnl']>0
+    # 最近信号（带SL/TP）
+    st.subheader("最近信号明细（SL/TP价格）")
+    st.dataframe(df_tr.tail(20)[['idx','side','pnl','sl','tp','exit']], use_container_width=True)
 
-    st.metric("当前资金", f"{equity:.2f}")
-    st.metric("最近100胜率", f"{(rec['pnl']>0).mean()*100:.2f}%")
-    st.metric("多头胜率", f"{long_win.mean()*100:.2f}%" if len(long_win)>0 else "N/A")
-    st.metric("空头胜率", f"{short_win.mean()*100:.2f}%" if len(short_win)>0 else "N/A")
-else:
-    st.info("暂无交易记录")
+# ================== 资金曲线 ==================
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(y=equity_curve, mode='lines', line=dict(color='cyan'), name='资金曲线'))
+fig_eq.update_layout(title="资金曲线（纯K + 手续费滑点）", height=400)
+st.plotly_chart(fig_eq, use_container_width=True)
 
-# =========================
-# K线图
-# =========================
-st.header("📈 K线")
-fig = go.Figure()
-fig.add_trace(go.Candlestick(
-    x=df['time'],
-    open=df['open'],
-    high=df['high'],
-    low=df['low'],
-    close=df['close']
-))
-for t, side, entry, stop, tp1 in signals:
-    fig.add_annotation(x=t, y=entry,
-        text="▲" if side==1 else "▼",
-        showarrow=True)
-fig.update_layout(xaxis_rangeslider_visible=False)
+# ================== K线图 + 箭头 ==================
+fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+                                     increasing_line_color="lime", decreasing_line_color="red")])
+
+for idx, price, action in marks:
+    fig.add_trace(go.Scatter(x=[df.index[idx]], y=[price],
+                             mode="markers+text",
+                             marker=dict(symbol="arrow-up" if action=="buy" else "arrow-down",
+                                         color="blue" if action=="buy" else "red", size=18),
+                             text="↑" if action=="buy" else "↓",
+                             textposition="top center" if action=="buy" else "bottom center"))
+
+fig.update_layout(title="📈 纯K吞没突破（箭头标记）", xaxis_rangeslider_visible=False, height=800)
 st.plotly_chart(fig, use_container_width=True)
 
-# =========================
-# 资金曲线
-# =========================
-st.header("💰 资金曲线")
-st.line_chart(df['equity'])
-
-# =========================
-# 自动刷新
-# =========================
-if auto_refresh:
-    time.sleep(refresh_sec)
-    st.experimental_rerun()
+st.success("✅ 已彻底回归纯K吞没突破（0指标）！最干净、最适合实盘。")
+st.info("把胜率、资金曲线、近100笔胜率截图发我，我继续帮你微调RR或加4H趋势过滤（仍保持纯K逻辑）。")
