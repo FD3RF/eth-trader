@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-5分钟策略：单K突破 + 成交量过滤（可回测）
+K线 + 成交量 多空策略（稳定回测版）
 """
 
 import streamlit as st
@@ -8,9 +8,9 @@ import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 单K突破 + 成交量 策略")
+st.title("📈 K线 + 成交量 多空策略")
 
-# 上传
+# ====== 上传 ======
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.info("上传数据")
@@ -22,7 +22,6 @@ def load_data(file):
     df = pd.read_csv(file)
     df.columns = [c.lower() for c in df.columns]
 
-    # 时间
     if 'datetime' in df.columns:
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
@@ -54,19 +53,20 @@ st.success(f"数据行数: {len(df)}")
 def prepare(df):
     df = df.copy()
 
+    # 均线（趋势）
     df['ma20'] = df['close'].rolling(20).mean()
 
-    # 单K突破：当收盘 > 前一根收盘
-    df['break_up'] = (df['close'] > df['close'].shift(1)).astype(int)
+    # K线方向
+    df['k_up'] = (df['close'] > df['close'].shift(1)).astype(int)
 
-    # 放量：当前成交量 > 均量 * 倍数
+    # 成交量方向
     df['vol_ma'] = df['volume'].rolling(20).mean()
-    df['vol_spike'] = (df['volume'] > df['vol_ma'] * 2).astype(int)
+    df['vol_up'] = (df['volume'] > df['vol_ma']).astype(int)
 
-    # 信号：突破 + 放量 + 在均线上
+    # 信号：K上涨 + 放量 + 在均线上
     df['signal'] = (
-        (df['break_up'] == 1) &
-        (df['vol_spike'] == 1) &
+        (df['k_up'] == 1) &
+        (df['vol_up'] == 1) &
         (df['close'] > df['ma20'])
     ).astype(int)
 
@@ -88,9 +88,9 @@ def backtest(df):
         prev = df.iloc[i-1]
         price = row['open']
 
-        # 平仓：跌破均线或信号消失
+        # 止损：跌破均线
         if position == 1:
-            if row['close'] < row['ma20'] or prev['signal'] == 0:
+            if row['close'] < row['ma20']:
                 pnl = price - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
@@ -110,9 +110,8 @@ def backtest(df):
         "equity": equity
     }
 
-# 划分
+# 分割
 n = len(df)
-train = df.iloc[:int(n*0.6)]
 test = df.iloc[int(n*0.6):]
 
 res = backtest(test)
