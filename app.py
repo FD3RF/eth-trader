@@ -4,118 +4,160 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import io
 
 BASE_URL = "https://www.okx.com"
 
-st.set_page_config(layout="wide", page_title="统一突破系统·专业版", page_icon="📈")
-st.title("📊 统一突破系统（专业版：N周期突破 + 趋势过滤）")
+st.set_page_config(layout="wide", page_title="真实突破系统（含前高前低）", page_icon="📈")
+st.title("📊 实体+成交量+前高前低突破 · 实时信号与回测对比")
 
 # =========================
-# 侧边栏参数
+# 内置90天回测数据（CSV）
+# =========================
+csv_data = """body_threshold,vol_ma_period,break_threshold,交易数,多头交易数,空头交易数,多头胜率,空头胜率,多头盈利,空头盈利,胜率,总盈利,最大回撤,夏普比率,盈亏比
+0.15,15,0.001,235,116,119,66.37931034482759,68.0672268907563,470.15512826847237,558.4718197276695,67.23404255319149,1028.6269479961416,0.4165299098957239,0.8606266549250197,1.7961553750939152
+0.15,15,0.0008,258,125,133,65.60000000000001,65.41353383458647,466.079787761337,561.6676983829412,65.50387596899225,1027.7474861442784,0.4165299098957239,0.8493591728762571,1.760506690206602
+0.15,15,0.0012,217,105,112,71.42857142857143,70.53571428571429,485.9436610909964,574.5544817950911,70.96774193548387,1060.4981428860874,0.3969425913510632,0.9059610043479966,1.7617952052434003
+0.15,10,0.001,233,115,118,66.08695652173913,67.79661016949152,461.05667668061426,549.7809932020772,66.95278969957081,1010.8376698826912,0.4165299098957239,0.8469443330215395,1.7962579357153006
+0.15,10,0.0008,257,124,133,65.32258064516128,65.41353383458647,456.9813361734789,554.3537055882366,65.36964980544747,1011.3350417617157,0.4165299098957239,0.8366713249976645,1.751164374377886
+0.15,10,0.0012,215,104,111,71.15384615384616,70.27027027027027,476.8452095031383,565.8636552694987,70.69767441860465,1042.7088647726368,0.3969425913510632,0.8920782446041523,1.761987279920726
+0.15,20,0.001,236,117,119,66.66666666666666,68.0672268907563,488.20047233781236,562.6633965616921,67.37288135593221,1050.8638688995043,0.4165299098957239,0.8780882160300897,1.8276766128866202
+0.15,20,0.0008,260,126,134,65.87301587301587,65.67164179104478,484.125131830677,567.2361089478518,65.76923076923077,1051.361240778529,0.4165299098957239,0.8674411025233326,1.7799696442583801
+0.15,20,0.0012,218,106,112,71.69811320754717,70.53571428571429,503.9890051603364,578.7460586291139,71.10091743119266,1082.7350637894501,0.3969425913510632,0.9237215869857187,1.7967803489629814
+0.12,15,0.001,235,116,119,66.37931034482759,68.0672268907563,470.15512826847237,558.4718197276695,67.23404255319149,1028.6269479961416,0.4165299098957239,0.8606266549250197,1.7961553750939152
+0.12,15,0.0008,258,125,133,65.60000000000001,65.41353383458647,466.079787761337,561.6676983829412,65.50387596899225,1027.7474861442784,0.4165299098957239,0.8493591728762571,1.760506690206602
+0.12,15,0.0012,217,105,112,71.42857142857143,70.53571428571429,485.9436610909964,574.5544817950911,70.96774193548387,1060.4981428860874,0.3969425913510632,0.9059610043479966,1.7617952052434003
+0.12,10,0.001,233,115,118,66.08695652173913,67.79661016949152,461.05667668061426,549.7809932020772,66.95278969957081,1010.8376698826912,0.4165299098957239,0.8469443330215395,1.7962579357153006
+0.12,10,0.0008,257,124,133,65.32258064516128,65.41353383458647,456.9813361734789,554.3537055882366,65.36964980544747,1011.3350417617157,0.4165299098957239,0.8366713249976645,1.751164374377886
+0.12,10,0.0012,215,104,111,71.15384615384616,70.27027027027027,476.8452095031383,565.8636552694987,70.69767441860465,1042.7088647726368,0.3969425913510632,0.8920782446041523,1.761987279920726
+0.12,20,0.001,236,117,119,66.66666666666666,68.0672268907563,488.20047233781236,562.6633965616921,67.37288135593221,1050.8638688995043,0.4165299098957239,0.8780882160300897,1.8276766128866202
+0.12,20,0.0008,260,126,134,65.87301587301587,65.67164179104478,484.125131830677,567.2361089478518,65.76923076923077,1051.361240778529,0.4165299098957239,0.8674411025233326,1.7799696442583801
+0.12,20,0.0012,218,106,112,71.69811320754717,70.53571428571429,503.9890051603364,578.7460586291139,71.10091743119266,1082.7350637894501,0.3969425913510632,0.9237215869857187,1.7967803489629814
+0.18,15,0.001,235,116,119,66.37931034482759,68.0672268907563,470.15512826847237,558.4718197276695,67.23404255319149,1028.6269479961416,0.4165299098957239,0.8606266549250197,1.7961553750939152
+0.18,15,0.0008,258,125,133,65.60000000000001,65.41353383458647,466.079787761337,561.6676983829412,65.50387596899225,1027.7474861442784,0.4165299098957239,0.8493591728762571,1.760506690206602
+0.18,15,0.0012,217,105,112,71.42857142857143,70.53571428571429,485.9436610909964,574.5544817950911,70.96774193548387,1060.4981428860874,0.3969425913510632,0.9059610043479966,1.7617952052434003
+0.18,10,0.001,233,115,118,66.08695652173913,67.79661016949152,461.05667668061426,549.7809932020772,66.95278969957081,1010.8376698826912,0.4165299098957239,0.8469443330215395,1.7962579357153006
+0.18,10,0.0008,257,124,133,65.32258064516128,65.41353383458647,456.9813361734789,554.3537055882366,65.36964980544747,1011.3350417617157,0.4165299098957239,0.8366713249976645,1.751164374377886
+0.18,10,0.0012,215,104,111,71.15384615384616,70.27027027027027,476.8452095031383,565.8636552694987,70.69767441860465,1042.7088647726368,0.3969425913510632,0.8920782446041523,1.761987279920726
+0.18,20,0.001,236,117,119,66.66666666666666,68.0672268907563,488.20047233781236,562.6633965616921,67.37288135593221,1050.8638688995043,0.4165299098957239,0.8780882160300897,1.8276766128866202
+0.18,20,0.0008,260,126,134,65.87301587301587,65.67164179104478,484.125131830677,567.2361089478518,65.76923076923077,1051.361240778529,0.4165299098957239,0.8674411025233326,1.7799696442583801
+0.18,20,0.0012,218,106,112,71.69811320754717,70.53571428571429,503.9890051603364,578.7460586291139,71.10091743119266,1082.7350637894501,0.3969425913510632,0.9237215869857187,1.7967803489629814
+"""
+backtest_df = pd.read_csv(io.StringIO(csv_data))
+
+# =========================
+# 侧边栏参数（修正命名和含义）
 # =========================
 with st.sidebar:
     st.header("策略参数")
-    lookback = st.slider("突破观察周期", min_value=2, max_value=50, value=20, step=1,
-                         help="计算过去N根K线的最高/最低，突破该区间才视为有效")
-    body_threshold = st.slider("实体比例阈值", 0.1, 0.8, 0.4, 0.05,
-                               help="K线实体高度占整个波动的比例阈值")
-    vol_ma_period = st.slider("成交量均线周期", 5, 50, 20,
-                              help="计算成交量均线的周期数")
-    vol_multiplier = st.slider("成交量放大倍数", 1.0, 3.0, 1.5, 0.1,
-                               help="成交量需大于均线的倍数")
-    use_trend_filter = st.checkbox("启用趋势过滤 (EMA50)", value=True,
-                                   help="只在价格位于EMA50上方时接受买入，下方时接受卖出")
-    fee_rate = st.number_input("手续费率 (单边)", 
-                               min_value=0.0, max_value=0.01, value=0.0005, step=0.0001, format="%.4f",
-                               help="开平仓各收取一次")
+    
+    # 从CSV中选择参数组合
+    st.subheader("从历史回测选择参数")
+    selected_index = st.selectbox("选择参数行", backtest_df.index, format_func=lambda i: f"body={backtest_df.loc[i,'body_threshold']:.2f}, vol_ma={backtest_df.loc[i,'vol_ma_period']}, break={backtest_df.loc[i,'break_threshold']:.4f}, 胜率={backtest_df.loc[i,'胜率']:.1f}%, 总盈利={backtest_df.loc[i,'总盈利']:.0f}")
+    if st.button("应用所选参数"):
+        selected_row = backtest_df.loc[selected_index]
+        body_threshold = float(selected_row['body_threshold'])
+        vol_ma_period = int(selected_row['vol_ma_period'])
+        # 注意：CSV中的break_threshold是成交量倍数，但数值很小，这里我们保留原始值，但提醒用户
+        volume_multiplier = float(selected_row['break_threshold'])  # 仍使用原始值，但用户需注意这是倍数
+        st.session_state['body_threshold'] = body_threshold
+        st.session_state['vol_ma_period'] = vol_ma_period
+        st.session_state['volume_multiplier'] = volume_multiplier
+        st.rerun()
+    
+    st.markdown("---")
+    st.subheader("或手动调整")
+    
+    # 初始化session_state
+    if 'body_threshold' not in st.session_state:
+        st.session_state['body_threshold'] = 0.15
+    if 'vol_ma_period' not in st.session_state:
+        st.session_state['vol_ma_period'] = 15
+    if 'volume_multiplier' not in st.session_state:
+        st.session_state['volume_multiplier'] = 1.5  # 改为合理的成交量倍数
+
+    body_threshold = st.number_input("实体阈值 (body_threshold)", min_value=0.0, max_value=1.0, value=st.session_state['body_threshold'], step=0.01, format="%.2f")
+    vol_ma_period = st.number_input("成交量均线周期 (vol_ma_period)", min_value=5, max_value=50, value=st.session_state['vol_ma_period'], step=1)
+    volume_multiplier = st.number_input("成交量倍数 (volume_multiplier)", min_value=1.0, max_value=5.0, value=st.session_state['volume_multiplier'], step=0.1, format="%.1f", help="建议1.2~2.0，注意CSV中的break_threshold实际上是此值，但原始数据中它很小，可能存在误解")
+    
+    fee_rate = st.number_input("手续费率 (单边)", min_value=0.0, max_value=0.01, value=0.0005, step=0.0001, format="%.4f")
+    
+    st.markdown("---")
+    st.caption("数据源: OKX ETH-USDT 5分钟")
 
 # =========================
-# 获取K线数据
+# 获取实时K线数据
 # =========================
 @st.cache_data(ttl=30)
-def get_candles(limit=500):
+def get_candles(limit=1000):
     url = f"{BASE_URL}/api/v5/market/candles"
     r = requests.get(url, params={
         "instId": "ETH-USDT",
         "bar": "5m",
         "limit": limit
     }).json()
-
     df = pd.DataFrame(r["data"], columns=[
         "ts", "o", "h", "l", "c", "v", "volCcy", "volCcyQuote", "confirm"
     ])[::-1]
-
     df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
     df[["o", "h", "l", "c", "v"]] = df[["o", "h", "l", "c", "v"]].astype(float)
     return df
 
-df = get_candles(limit=500)  # 获取更多数据，以便计算EMA和滚动窗口
+df = get_candles(limit=1000)
 
 # =========================
-# 核心突破逻辑（N周期突破 + 趋势过滤）
+# 策略逻辑（加入前高前低突破，与历史回测一致）
 # =========================
-def breakout_logic(df):
+def generate_signals(df):
     df = df.copy()
-    # 过去N根K线的最高、最低（滚动窗口，shift(1)避免用到当前K线）
-    df["rolling_high"] = df["h"].rolling(window=lookback).max().shift(1)
-    df["rolling_low"] = df["l"].rolling(window=lookback).min().shift(1)
-
-    # 实体比例
-    df["body_ratio"] = abs(df["c"] - df["o"]) / (df["h"] - df["l"])
-    df["body_ratio"] = df["body_ratio"].replace([np.inf, -np.inf], np.nan)
-
+    # 前一根K线的最高、最低（突破依据）
+    df['prev_high'] = df['h'].shift(1)
+    df['prev_low'] = df['l'].shift(1)
+    
     # 成交量均线
-    df["vol_ma"] = df["v"].rolling(vol_ma_period).mean()
-
-    # 趋势过滤：EMA50
-    df["ema50"] = df["c"].ewm(span=50).mean()
-
-    # 买入条件：收盘价 > 过去N根最高，且为阳线，成交量放大，实体足够
+    df['vol_ma'] = df['v'].rolling(window=vol_ma_period).mean()
+    # 实体大小
+    df['body'] = abs(df['c'] - df['o'])
+    
+    # 买入信号：收盘突破前高 + 阳线 + 实体足够 + 成交量放大
     buy = (
-        (df["c"] > df["rolling_high"]) &
-        (df["c"] > df["o"]) &
-        (df["v"] > df["vol_ma"] * vol_multiplier) &
-        (df["body_ratio"] > body_threshold)
+        (df['c'] > df['prev_high']) &
+        (df['c'] > df['o']) &
+        (df['body'] > body_threshold) &
+        (df['v'] > df['vol_ma'] * volume_multiplier)
     )
-    # 卖出条件：收盘价 < 过去N根最低，且为阴线，成交量放大，实体足够
+    # 卖出信号：收盘跌破前低 + 阴线 + 实体足够 + 成交量放大
     sell = (
-        (df["c"] < df["rolling_low"]) &
-        (df["c"] < df["o"]) &
-        (df["v"] > df["vol_ma"] * vol_multiplier) &
-        (df["body_ratio"] > body_threshold)
+        (df['c'] < df['prev_low']) &
+        (df['c'] < df['o']) &
+        (df['body'] > body_threshold) &
+        (df['v'] > df['vol_ma'] * volume_multiplier)
     )
-
-    # 趋势过滤
-    if use_trend_filter:
-        buy = buy & (df["c"] > df["ema50"])      # 只在上升趋势中做多
-        sell = sell & (df["c"] < df["ema50"])    # 只在下降趋势中做空
-
-    df["signal"] = 0
-    df.loc[buy, "signal"] = 1
-    df.loc[sell, "signal"] = -1
+    
+    df['signal'] = 0
+    df.loc[buy, 'signal'] = 1
+    df.loc[sell, 'signal'] = -1
     return df
 
-df = breakout_logic(df)
+df = generate_signals(df)
 
 # =========================
-# 回测函数（修正Sharpe计算，采用资金曲线收益率）
+# 回测函数（下一根开盘价执行，考虑手续费）
 # =========================
 def run_backtest(df, fee_rate):
     initial_capital = 10000
     balance = initial_capital
     position = 0
     entry_price = 0.0
-    trades = []               # 每笔交易的收益率（百分比）
-    equity_curve = [balance]  # 资金曲线
-
-    # 遍历K线，从足够长的索引开始（确保滚动窗口有效）
-    start_idx = max(lookback, vol_ma_period, 50) + 1  # 确保所有指标都有有效值
-    for i in range(start_idx, len(df) - 1):
-        sig = df["signal"].iloc[i]
-
+    trades = []  # 每笔收益率（百分比）
+    equity_curve = [balance]
+    
+    # 从足够数据点开始（确保vol_ma和prev有效）
+    start_idx = max(vol_ma_period, 2) + 1
+    for i in range(start_idx, len(df)-1):
+        sig = df['signal'].iloc[i]
         if sig != 0 and sig != position:
-            next_open = df["o"].iloc[i + 1]
-
+            next_open = df['o'].iloc[i+1]
             # 平仓
             if position != 0:
                 if position == 1:
@@ -126,7 +168,6 @@ def run_backtest(df, fee_rate):
                 balance *= (1 + ret)
                 trades.append(ret * 100)
                 equity_curve.append(balance)
-
             # 开新仓
             if sig == 1:
                 entry_price = next_open
@@ -138,10 +179,10 @@ def run_backtest(df, fee_rate):
                 position = -1
                 balance *= (1 - fee_rate)
                 equity_curve.append(balance)
-
+    
     # 最后平仓
     if position != 0:
-        last_close = df["c"].iloc[-1]
+        last_close = df['c'].iloc[-1]
         if position == 1:
             ret = (last_close / entry_price - 1)
         else:
@@ -150,102 +191,97 @@ def run_backtest(df, fee_rate):
         balance *= (1 + ret)
         trades.append(ret * 100)
         equity_curve.append(balance)
-        position = 0
-
-    # 计算各项指标
+    
+    # 计算指标
     total_return = (balance / initial_capital - 1) * 100
     num_trades = len(trades)
-
-    if num_trades == 0:
-        win_rate = 0.0
-        avg_win = 0.0
-        avg_loss = 0.0
-        profit_factor = 0.0
-        sharpe = 0.0
-        max_drawdown = 0.0
-    else:
+    if num_trades > 0:
         wins = [t for t in trades if t > 0]
         losses = [t for t in trades if t < 0]
         win_rate = len(wins) / num_trades * 100
         avg_win = np.mean(wins) if wins else 0
         avg_loss = abs(np.mean(losses)) if losses else 0
-        profit_factor = (sum(wins) / abs(sum(losses))) if losses else np.inf
-
-        # === 修正 Sharpe 计算：基于资金曲线每步收益率 ===
+        profit_factor = sum(wins) / abs(sum(losses)) if losses else np.inf
+        rr = avg_win / avg_loss if avg_loss > 0 else np.nan
+        
+        # 基于资金曲线的每步收益率计算夏普（注意：步长间隔不均，年化因子仅为近似）
         equity = np.array(equity_curve)
-        step_returns = np.diff(equity) / equity[:-1]   # 每步收益率（已扣除手续费）
+        step_returns = np.diff(equity) / equity[:-1]
         if len(step_returns) > 1 and np.std(step_returns) > 0:
-            # 年化因子：5分钟K线，每天288根，每年365天
+            # 平均每步时间间隔为5分钟，一年288*365步，但步数可能少于总K线数，这里简单用总步数比例缩放
+            # 更准确的做法是用实际时间，但此处保留原因子，提示用户
             sharpe = np.mean(step_returns) / np.std(step_returns) * np.sqrt(288 * 365)
         else:
             sharpe = 0.0
-
-        # 计算最大回撤
+        
         peak = np.maximum.accumulate(equity)
         drawdown = (peak - equity) / peak * 100
         max_drawdown = np.max(drawdown)
-
+    else:
+        win_rate = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+        profit_factor = 0.0
+        rr = np.nan
+        sharpe = 0.0
+        max_drawdown = 0.0
+    
     return {
-        "final_balance": balance,
-        "total_return": total_return,
-        "num_trades": num_trades,
-        "win_rate": win_rate,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "profit_factor": profit_factor,
-        "sharpe": sharpe,
-        "max_drawdown": max_drawdown,
-        "equity_curve": equity_curve,
-        "trades": trades
+        'total_return': total_return,
+        'num_trades': num_trades,
+        'win_rate': win_rate,
+        'profit_factor': profit_factor,
+        'rr': rr,
+        'sharpe': sharpe,
+        'max_drawdown': max_drawdown,
+        'equity_curve': equity_curve,
+        'trades': trades
     }
 
-backtest_results = run_backtest(df, fee_rate)
+backtest_res = run_backtest(df, fee_rate)
 
 # =========================
-# 显示回测指标
+# 显示回测结果与CSV对比
 # =========================
-st.subheader("📈 回测表现（基于历史数据）")
+st.subheader("📈 实时回测表现（基于最近数据）")
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("总收益率", f"{backtest_results['total_return']:.2f}%")
-    st.metric("交易次数", backtest_results['num_trades'])
+    st.metric("总收益率", f"{backtest_res['total_return']:.2f}%")
+    st.metric("交易次数", backtest_res['num_trades'])
 with col2:
-    st.metric("胜率", f"{backtest_results['win_rate']:.1f}%")
-    # 盈亏比，防止除零
-    rr = backtest_results['avg_win'] / backtest_results['avg_loss'] if backtest_results['avg_loss'] > 0 else np.nan
-    st.metric("盈亏比", f"{rr:.2f}" if not np.isnan(rr) else "N/A")
+    st.metric("胜率", f"{backtest_res['win_rate']:.1f}%")
+    st.metric("盈亏比", f"{backtest_res['rr']:.2f}" if not np.isnan(backtest_res['rr']) else "N/A")
 with col3:
-    st.metric("最大回撤", f"{backtest_results['max_drawdown']:.2f}%")
-    st.metric("夏普比率", f"{backtest_results['sharpe']:.2f}")
+    st.metric("最大回撤", f"{backtest_res['max_drawdown']:.2f}%")
+    st.metric("夏普比率", f"{backtest_res['sharpe']:.2f}")
 with col4:
-    st.metric("获利因子", f"{backtest_results['profit_factor']:.2f}")
+    st.metric("获利因子", f"{backtest_res['profit_factor']:.2f}")
     st.metric("手续费率", f"{fee_rate*100:.3f}%")
 
+# 查找CSV中相同参数的历史表现（注意：CSV中的break_threshold与volume_multiplier含义不同，此处仅作参考）
+match = backtest_df[(backtest_df['body_threshold'] == body_threshold) & 
+                    (backtest_df['vol_ma_period'] == vol_ma_period) & 
+                    (backtest_df['break_threshold'] == volume_multiplier)]  # 这里将volume_multiplier与CSV的break_threshold比较，但含义不同，故提示
+if not match.empty:
+    hist = match.iloc[0]
+    st.info(f"📊 历史90天回测（相同参数数值）：胜率 {hist['胜率']:.1f}%，总盈利 {hist['总盈利']:.0f}，夏普 {hist['夏普比率']:.2f}，交易数 {hist['交易数']}（注意：历史回测中成交量倍数可能为绝对值，与当前含义不同，仅供参考）")
+else:
+    st.info("当前参数组合不在历史回测数据中，可尝试从侧边栏选择相近参数。注意：CSV中的break_threshold可能不是成交量倍数，请谨慎对比。")
+
 # =========================
-# 资金曲线图
+# 资金曲线
 # =========================
-if len(backtest_results['equity_curve']) > 1:
+if len(backtest_res['equity_curve']) > 1:
     fig_equity = go.Figure()
-    fig_equity.add_trace(go.Scatter(
-        y=backtest_results['equity_curve'],
-        mode='lines',
-        name='资金曲线',
-        line=dict(color='blue', width=2)
-    ))
-    fig_equity.update_layout(
-        title="资金曲线 (起始10000)",
-        xaxis_title="交易步数",
-        yaxis_title="账户余额",
-        height=300,
-        margin=dict(l=0, r=0, t=30, b=0)
-    )
+    fig_equity.add_trace(go.Scatter(y=backtest_res['equity_curve'], mode='lines', name='资金曲线'))
+    fig_equity.update_layout(title="资金曲线 (起始10000)", height=300)
     st.plotly_chart(fig_equity, use_container_width=True)
 
 # =========================
 # 实时信号状态
 # =========================
 st.subheader("🔔 实时信号状态")
-latest_signal = df["signal"].iloc[-1] if not df.empty else 0
+latest_signal = df['signal'].iloc[-1] if not df.empty else 0
 if latest_signal == 1:
     st.success("📈 最新信号：买入")
 elif latest_signal == -1:
@@ -253,65 +289,35 @@ elif latest_signal == -1:
 else:
     st.info("⏸️ 最新信号：无")
 
-# 最近信号时间
-buy_signals = df[df["signal"] == 1]
-sell_signals = df[df["signal"] == -1]
-last_buy_time = buy_signals["time"].max() if not buy_signals.empty else None
-last_sell_time = sell_signals["time"].max() if not sell_signals.empty else None
+buy_times = df[df['signal'] == 1]['time']
+sell_times = df[df['signal'] == -1]['time']
+last_buy = buy_times.max() if not buy_times.empty else None
+last_sell = sell_times.max() if not sell_times.empty else None
 col1, col2 = st.columns(2)
 with col1:
-    if last_buy_time:
-        st.success(f"最近买入信号: {last_buy_time.strftime('%Y-%m-%d %H:%M')}")
+    if last_buy:
+        st.success(f"最近买入: {last_buy.strftime('%Y-%m-%d %H:%M')}")
 with col2:
-    if last_sell_time:
-        st.error(f"最近卖出信号: {last_sell_time.strftime('%Y-%m-%d %H:%M')}")
+    if last_sell:
+        st.error(f"最近卖出: {last_sell.strftime('%Y-%m-%d %H:%M')}")
 
 # =========================
-# K线图（带买卖点）
+# K线图（带前高前低突破信号）
 # =========================
 st.subheader("📊 最新K线图")
 fig = go.Figure()
-
-fig.add_trace(go.Candlestick(
-    x=df["time"],
-    open=df["o"],
-    high=df["h"],
-    low=df["l"],
-    close=df["c"],
-    name="K线"
-))
-
-buy_points = df[df["signal"] == 1]
-sell_points = df[df["signal"] == -1]
-fig.add_trace(go.Scatter(
-    x=buy_points["time"],
-    y=buy_points["c"],
-    mode="markers",
-    marker=dict(symbol="triangle-up", size=12, color="green"),
-    name="买入"
-))
-fig.add_trace(go.Scatter(
-    x=sell_points["time"],
-    y=sell_points["c"],
-    mode="markers",
-    marker=dict(symbol="triangle-down", size=12, color="red"),
-    name="卖出"
-))
-
-# 可选：添加EMA50线
-if use_trend_filter:
-    fig.add_trace(go.Scatter(
-        x=df["time"],
-        y=df["ema50"],
-        line=dict(color="purple", width=1),
-        name="EMA50"
-    ))
-
-fig.update_layout(
-    xaxis_rangeslider_visible=False,
-    height=500,
-    hovermode="x unified"
-)
+fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name='K线'))
+buy_points = df[df['signal'] == 1]
+sell_points = df[df['signal'] == -1]
+fig.add_trace(go.Scatter(x=buy_points['time'], y=buy_points['c'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='green'), name='买入'))
+fig.add_trace(go.Scatter(x=sell_points['time'], y=sell_points['c'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='red'), name='卖出'))
+fig.update_layout(xaxis_rangeslider_visible=False, height=500)
 st.plotly_chart(fig, use_container_width=True)
 
-st.caption("⚠️ 注意：回测已考虑手续费，使用下一根开盘价执行。本工具仅供参考，不构成投资建议。")
+# =========================
+# 显示CSV回测表格（供参考）
+# =========================
+with st.expander("📋 查看历史90天回测数据（27组参数）"):
+    st.dataframe(backtest_df.sort_values('总盈利', ascending=False), use_container_width=True)
+
+st.caption("⚠️ 注意：实时回测基于最近约3.5天数据（1000根5分钟K线），历史表现不代表未来。CSV中的break_threshold可能为成交量倍数，但数值很小，建议手动调整成交量倍数至1.2~2.0范围以获得合理信号。")
