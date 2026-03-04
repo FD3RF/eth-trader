@@ -1,27 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-真实K线图 + 信号
-进场提示
+纸交易模拟版（纯K优化）
+用于实盘验证，不下单
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
+import numpy as np
 
-st.set_page_config(page_title="K线+信号", layout="wide")
-st.title("📊 真实K线 + 进场提示")
+st.set_page_config(page_title="纸交易模拟(优化版)", layout="wide")
+st.title("🚀 纸交易模拟（纯K优化）")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
-# ================================
-# 加载
-# ================================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
-# 字段映射
 df['open'] = df['open']
 df['high'] = df['high']
 df['low'] = df['low']
@@ -30,9 +26,9 @@ df['volume'] = df['vol']
 
 st.write(f"数据行: {len(df)}")
 
-# ================================
-# 特征
-# ================================
+# =========================
+# 纯K特征构建
+# =========================
 def build_features(df):
     df = df.copy()
     lookback = 20
@@ -49,123 +45,145 @@ def build_features(df):
 
 df = build_features(df)
 
-# ================================
-# 信号
-# ================================
-df['signal'] = 0
+# =========================
+# 进场信号模块（优化版）
+# =========================
+def generate_signal(df, i):
+    row = df.iloc[i]
 
-df.loc[
-    (df['close'] > df['high_max']) &
-    (df['body_ratio'] > 0.35) &
-    (df['close'] > df['open']),
-    'signal'
-] = 1
+    close = row['close']
+    high = row['high']
+    low = row['low']
 
-df.loc[
-    (df['close'] < df['low_min']) &
-    (df['body_ratio'] > 0.35) &
-    (df['close'] < df['open']),
-    'signal'
-] = -1
+    high_max = row['high_max']
+    low_min = row['low_min']
+    body_ratio = row['body_ratio']
+    volume = row['volume']
 
-# ================================
-# K线图
-# ================================
-st.header("K线图")
+    # 成交量均线
+    vol_ma = df['volume'].rolling(20).mean().iloc[i]
 
-fig = go.Figure()
+    # 是否在区间中部（避免中部假突破）
+    in_middle = (close > low_min * 1.05) and (close < high_max * 0.95)
 
-fig.add_trace(go.Candlestick(
-    x=df.index,
-    open=df['open'],
-    high=df['high'],
-    low=df['low'],
-    close=df['close'],
-    name="K线"
-))
+    # 实体强度
+    strong_body = body_ratio > 0.45
 
-# 多头信号点
-buy = df[df['signal'] == 1]
-fig.add_trace(go.Scatter(
-    x=buy.index,
-    y=buy['close'],
-    mode='markers',
-    marker=dict(symbol='triangle-up', size=12, color='green'),
-    name='多头'
-))
+    # 成交量确认
+    valid_volume = volume > vol_ma
 
-# 空头信号点
-sell = df[df['signal'] == -1]
-fig.add_trace(go.Scatter(
-    x=sell.index,
-    y=sell['close'],
-    mode='markers',
-    marker=dict(symbol='triangle-down', size=12, color='red'),
-    name='空头'
-))
+    # 突破幅度（避免刚碰就算突破）
+    break_up_strength = (close - high_max) / high_max
+    break_down_strength = (low_min - close) / low_min
 
-fig.update_layout(
-    title="K线 + 信号",
-    xaxis_title="时间",
-    yaxis_title="价格",
-    xaxis_rangeslider_visible=False
-)
+    # 多头突破有效
+    if (close > high_max) and strong_body and valid_volume:
+        if break_up_strength > 0.002 and not in_middle:
+            return 1
 
-st.plotly_chart(fig, use_container_width=True)
+    # 空头突破有效
+    if (close < low_min) and strong_body and valid_volume:
+        if break_down_strength > 0.002 and not in_middle:
+            return -1
 
-# ================================
-# 最新计划
-# ================================
-st.header("最新交易计划")
+    return 0
 
-latest = df.iloc[-1]
 
-if latest['signal'] == 1:
-    st.success("📈 多头计划：突破 + 强阳")
-    st.write("""
-    进场：
-    - 突破前高
-    - 强实体阳
+# =========================
+# 模拟交易
+# =========================
+records = []
 
-    止损：
-    - 结构跌破
+def simulate(df):
+    position = 0
+    entry = 0
+    hold = 0
+    rr = 2.5
+    min_hold = 3
 
-    退出：
-    - 盈利目标
-    - 信号反转
-    """)
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        price = row['open']
+        high = row['high']
+        low = row['low']
 
-elif latest['signal'] == -1:
-    st.error("📉 空头计划：跌破 + 强阴")
-    st.write("""
-    进场：
-    - 跌破前低
-    - 强实体阴
+        if position != 0:
+            hold += 1
+        else:
+            hold = 0
 
-    止损：
-    - 结构突破
+        signal = generate_signal(df, i)
 
-    退出：
-    - 盈利目标
-    - 信号反转
-    """)
+        # 平多
+        if position == 1:
+            stop = entry - (row['range'] * 0.5)
+            take = entry + (entry - stop) * rr
+
+            if low <= stop:
+                records.append({"pnl": stop - entry})
+                position = 0
+
+            elif high >= take:
+                records.append({"pnl": take - entry})
+                position = 0
+
+            elif hold >= min_hold and signal == -1:
+                records.append({"pnl": price - entry})
+                position = 0
+
+        # 平空
+        if position == -1:
+            stop = entry + (row['range'] * 0.5)
+            take = entry - (stop - entry) * rr
+
+            if high >= stop:
+                records.append({"pnl": entry - stop})
+                position = 0
+
+            elif low <= take:
+                records.append({"pnl": entry - take})
+                position = 0
+
+            elif hold >= min_hold and signal == 1:
+                records.append({"pnl": entry - price})
+                position = 0
+
+        # 开仓
+        if position == 0:
+            if signal == 1:
+                entry = price
+                position = 1
+            elif signal == -1:
+                entry = price
+                position = -1
+
+    return records
+
+
+# =========================
+# 执行模拟
+# =========================
+records = simulate(df)
+
+# =========================
+# 统计与展示
+# =========================
+st.header("模拟结果")
+
+if records:
+    df_rec = pd.DataFrame(records)
+    st.write(df_rec)
+
+    st.metric("交易数", len(df_rec))
+    st.metric("胜率", f"{(df_rec['pnl'] > 0).mean() * 100:.2f}%")
+    st.metric("总盈利", df_rec['pnl'].sum())
+    st.metric("平均单笔", df_rec['pnl'].mean())
+    st.metric("最大盈利", df_rec['pnl'].max())
+    st.metric("最大亏损", df_rec['pnl'].min())
+
+    st.line_chart(df_rec['pnl'].cumsum())
 
 else:
-    st.info("⏳ 无计划：等待结构")
-    st.write("""
-    不进场：
-    - 无突破
-    - 无强实体
-    - 结构未确认
-    """)
+    st.write("无交易记录")
 
-# ================================
-# 历史统计
-# ================================
-st.header("历史统计")
-
-st.write("多头次数:", (df['signal'] == 1).sum())
-st.write("空头次数:", (df['signal'] == -1).sum())
-st.write("无信号:", (df['signal'] == 0).sum())
-
-st.success("K线加载完成")
+st.success("模拟完成（纯K优化版）")
