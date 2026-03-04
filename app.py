@@ -8,7 +8,7 @@ from datetime import datetime
 import numpy as np
 import plotly.io as pio
 
-# ====================== OKX API（可移至环境变量） ======================
+# ====================== 配置 ======================
 API_KEY = "YOUR_API_KEY"
 API_SECRET = "YOUR_API_SECRET"
 PASSPHRASE = "YOUR_PASSPHRASE"
@@ -16,52 +16,46 @@ PASSPHRASE = "YOUR_PASSPHRASE"
 pio.templates['custom_dark'] = pio.templates['plotly_dark']
 pio.templates['custom_light'] = pio.templates['plotly']
 
-st.set_page_config(layout="wide", page_title="量化回测 & 决策引擎", page_icon="📊")
+st.set_page_config(layout="wide", page_title="量化回测与决策引擎", page_icon="📊")
 
 
-# ====================== 工具函数 ======================
+# ====================== 策略概率模型 ======================
 def bayesian_update(prior, evidence):
-    denominator = (prior * evidence) + ((1 - prior) * (1 - evidence))
-    return (prior * evidence / denominator) * 100 if denominator else 50.0
+    denom = (prior * evidence) + ((1 - prior) * (1 - evidence))
+    return (prior * evidence / denom) * 100 if denom else 50.0
 
 
 def calculate_prob(df):
-    if len(df) < 30:
+    if len(df) < 50:
         return 45.0
 
-    df['vol_ma5'] = df['v'].rolling(5).mean()
-    volume_confirm = df['v'].iloc[-1] > df['vol_ma5'].iloc[-1] * 1.5
-
-    is_golden_cross = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
+    is_golden = df['ema_f'].iloc[-1] > df['ema_s'].iloc[-1]
     rsi = df['rsi'].iloc[-1]
-    macd_cross = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
+    rsi_ok = 30 < rsi < 70
+
+    macd_ok = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
     net_flow = df['net_flow'].iloc[-1]
 
     bb_upper = df['c'].rolling(20).mean() + 2 * df['c'].rolling(20).std()
     bb_lower = df['c'].rolling(20).mean() - 2 * df['c'].rolling(20).std()
-    bb_squeeze = (bb_upper.iloc[-1] - bb_lower.iloc[-1]) / df['c'].iloc[-1] < 0.015
+    bb_squeeze = (bb_upper.iloc[-1] - bb_lower.iloc[-1]) / df['c'].iloc[-1] < 0.02
 
-    trend_weight = 1.2 if net_flow > 0 else 0.8
-    squeeze_penalty = -18 if bb_squeeze else 0
-    volume_bonus = 12 if volume_confirm else 0
+    prob = 50
+    prob += 20 if is_golden else -15
+    prob += 12 if rsi_ok else -10
+    prob += 15 if macd_ok else -12
+    prob += 10 if net_flow > 0 else -10
+    prob += -20 if bb_squeeze else 0
 
-    prob = 50.0
-    prob += 25 * trend_weight if is_golden_cross else -18 * trend_weight
-    prob += 18 if 30 < rsi < 70 else -12
-    prob += 15 * trend_weight if macd_cross else -15 * trend_weight
-    prob += 15 if net_flow > 0 else -15
-    prob += squeeze_penalty + volume_bonus
-
-    return max(min(prob, 96), 4)
+    return max(min(prob, 90), 10)
 
 
-# ====================== 数据层 ======================
+# ====================== 数据获取 ======================
 @st.cache_data(ttl=15)
 def get_ls_ratio():
-    url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio"
-    params = {"instId": "ETH-USDT", "period": "5m"}
     try:
-        res = requests.get(url, params=params, timeout=4).json()
+        url = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio"
+        res = requests.get(url, params={"instId": "ETH-USDT", "period": "5m"}, timeout=4).json()
         if res.get('code') == '0' and res.get('data'):
             return float(res['data'][0][1])
     except:
@@ -78,13 +72,13 @@ def get_candles(f_ema, s_ema, bar="15m", limit=200):
             raise ValueError("API error")
 
         df = pd.DataFrame(res['data'],
-                         columns=['ts', 'o', 'h', 'l', 'c', 'v', 'volCcy', 'volCcyQuote', 'confirm'])[::-1]
+                         columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])[::-1]
         df['time'] = pd.to_datetime(df['ts'].astype(float), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
-        for c in ['o', 'h', 'l', 'c', 'v']:
+        for c in ['o','h','l','c','v']:
             df[c] = df[c].astype(float)
 
-        df['ema_f'] = df['c'].ewm(span=f_ema, adjust=False).mean()
-        df['ema_s'] = df['c'].ewm(span=s_ema, adjust=False).mean()
+        df['ema_f'] = df['c'].ewm(span=f_ema).mean()
+        df['ema_s'] = df['c'].ewm(span=s_ema).mean()
 
         diff = df['c'].diff()
         gain = diff.clip(lower=0).rolling(14).mean()
@@ -100,18 +94,18 @@ def get_candles(f_ema, s_ema, bar="15m", limit=200):
         try:
             trades = requests.get("https://www.okx.com/api/v5/market/trades?instId=ETH-USDT&limit=100", timeout=6).json()
             if trades.get('code') == '0':
-                tdf = pd.DataFrame(trades['data'], columns=['ts', 'px', 'sz', 'side'])
+                tdf = pd.DataFrame(trades['data'], columns=['ts','px','sz','side'])
                 tdf['sz'] = tdf['sz'].astype(float)
-                df['net_flow'] = tdf[tdf['side'] == 'buy']['sz'].sum() - tdf[tdf['side'] == 'sell']['sz'].sum()
+                df['net_flow'] = tdf[tdf['side']=='buy']['sz'].sum() - tdf[tdf['side']=='sell']['sz'].sum()
             else:
                 df['net_flow'] = 0
         except:
             df['net_flow'] = 0
 
         tr = pd.concat([
-            df['h'] - df['l'],
-            abs(df['h'] - df['c'].shift()),
-            abs(df['l'] - df['c'].shift())
+            df['h']-df['l'],
+            abs(df['h']-df['c'].shift()),
+            abs(df['l']-df['c'].shift())
         ], axis=1).max(axis=1)
         df['atr'] = tr.rolling(14).mean()
 
@@ -133,32 +127,47 @@ def get_candles(f_ema, s_ema, bar="15m", limit=200):
 
 
 # ====================== 回测模块 ======================
-def backtest(df, initial_balance=10000, risk=0.01):
+def backtest(df, initial_balance=10000, risk=0.01, fee=0.0005):
     balance = initial_balance
-    positions = []
-    equity_curve = []
+    equity = []
+    position = None
 
-    for i in range(30, len(df)):
+    for i in range(50, len(df)):
         sub = df.iloc[:i]
         prob = calculate_prob(sub)
-
         price = sub['c'].iloc[-1]
         atr = sub['atr'].iloc[-1] or 1
 
-        if prob > 65:
+        # 开仓
+        if position is None and prob > 65:
             size = (balance * risk) / atr
-            positions.append({'entry': price, 'size': size})
-        elif prob < 35 and positions:
-            pos = positions.pop()
-            pnl = (price - pos['entry']) * pos['size']
-            balance += pnl
+            position = {
+                "entry": price,
+                "size": size,
+                "stop": price - atr * 1.5,
+                "take": price + atr * 3
+            }
 
-        equity_curve.append(balance)
+        # 持仓管理
+        if position:
+            pnl = (price - position["entry"]) * position["size"]
+
+            if price <= position["stop"]:
+                pnl = (position["stop"] - position["entry"]) * position["size"]
+
+            if price >= position["take"]:
+                pnl = (position["take"] - position["entry"]) * position["size"]
+
+            pnl -= abs(pnl) * fee
+            balance += pnl
+            position = None
+
+        equity.append(balance)
 
     return {
         "final_balance": balance,
         "return_pct": (balance / initial_balance - 1) * 100,
-        "equity_curve": equity_curve
+        "equity_curve": equity
     }
 
 
