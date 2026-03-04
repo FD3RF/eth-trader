@@ -1,64 +1,64 @@
-import streamlit as st
+import ccxt
 import pandas as pd
-import requests
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 import time
 
-st.set_page_config(page_title="OKX ETH 永续 5m K线", layout="wide")
+# ==============================
+# 配置交易所与参数
+# ==============================
 
-st.title("OKX ETH 永续合约 5分钟 K 线")
+exchange = ccxt.binance()  # 使用 Binance 公共数据
+symbol = 'ETH/USDT'
+timeframe = '5m'
+limit = 100  # 获取最近100根K线
 
-# ====== 配置 ======
-symbol = "ETH-USDT-SWAP"
-bar = "5m"
-limit = 100
+# ==============================
+# 获取K线数据函数
+# ==============================
 
-# ====== 拉取 OKX 公共 API ======
-def fetch_candles():
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={bar}&limit={limit}"
-    resp = requests.get(url)
-    data = resp.json()
-    return data.get("data")
+def fetch_klines():
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
-data = fetch_candles()
+# ==============================
+# 绘图函数（K线 + 成交量）
+# ==============================
 
-if data:
-    df = pd.DataFrame(data, columns=[
-        "ts", "o", "h", "l", "c", "vol", "volCcy", "volCcyQuote", "confirm"
-    ])
+def plot_data(df):
+    plt.figure()
+    plt.plot(df['timestamp'], df['close'])
+    plt.title('ETH 5-Min Close Price')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
 
-    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
-    df = df.sort_values("ts")
+    plt.figure()
+    plt.bar(df['timestamp'], df['volume'])
+    plt.title('Volume')
+    plt.xlabel('Time')
+    plt.ylabel('Volume')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
 
-    df[["o", "h", "l", "c"]] = df[["o", "h", "l", "c"]].astype(float)
+# ==============================
+# 主盯盘循环（实时刷新）
+# ==============================
 
-    st.subheader("最近K线数据（部分）")
-    st.dataframe(df.tail())
+def monitor(interval=60):
+    while True:
+        df = fetch_klines()
+        print(df.tail())  # 打印最新几行数据
+        plot_data(df)
+        time.sleep(interval)  # 每分钟刷新一次
 
-    fig = go.Figure(data=[
-        go.Candlestick(
-            x=df["ts"],
-            open=df["o"],
-            high=df["h"],
-            low=df["l"],
-            close=df["c"]
-        )
-    ])
+# ==============================
+# 启动盯盘
+# ==============================
 
-    fig.update_layout(
-        title="ETH 永续 5 分钟 K 线",
-        xaxis_title="时间",
-        yaxis_title="价格",
-        xaxis_rangeslider_visible=False
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.error("无法获取数据，请检查 OKX API 或网络。")
-
-# ====== 自动刷新（可选）======
-refresh = st.checkbox("自动刷新（每60秒）")
-if refresh:
-    time.sleep(60)
-    st.experimental_rerun()
+if __name__ == "__main__":
+    monitor(interval=60)
