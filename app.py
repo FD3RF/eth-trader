@@ -1,30 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-终极优化版：突破 + 放量 + 多周期 + ATR止损 + 风控
-更实盘友好
+终极实战优化版
+核心：
+- 多周期趋势
+- ATR动态止损
+- 放量突破
+- 过滤低质量单
+- 降低交易频率
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="终极优化策略", layout="wide")
-st.title("🚀 终极优化策略（更稳）")
+st.set_page_config(page_title="终极实战版", layout="wide")
+st.title("🚀 终极实战优化")
 
-# =========================
-# 上传
-# =========================
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
-# =========================
-# 加载
-# =========================
+# ================================
+# 加载 & 字段
+# ================================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
-# 字段映射（你的数据）
 df['open'] = df['open']
 df['high'] = df['high']
 df['low'] = df['low']
@@ -33,9 +34,9 @@ df['volume'] = df['vol']
 
 st.write(f"数据行: {len(df)}")
 
-# =========================
+# ================================
 # 多周期趋势
-# =========================
+# ================================
 df['ema20'] = df['close'].ewm(span=20).mean()
 df['ema50'] = df['close'].ewm(span=50).mean()
 df['ema200'] = df['close'].ewm(span=200).mean()
@@ -43,9 +44,9 @@ df['ema200'] = df['close'].ewm(span=200).mean()
 df['trend_up'] = (df['ema20'] > df['ema50']) & (df['ema50'] > df['ema200'])
 df['trend_down'] = (df['ema20'] < df['ema50']) & (df['ema50'] < df['ema200'])
 
-# =========================
+# ================================
 # 动态特征
-# =========================
+# ================================
 lookback = 20
 
 df['high_max'] = df['high'].rolling(lookback).max().shift(1)
@@ -55,7 +56,7 @@ df['vol_ma'] = df['volume'].rolling(lookback).mean().shift(1)
 df['vol_std'] = df['volume'].rolling(lookback).std().shift(1)
 df['vol_threshold'] = df['vol_ma'] + df['vol_std'] * 0.5
 
-# ATR（动态止损）
+# ATR
 tr = pd.concat([
     df['high'] - df['low'],
     (df['high'] - df['close'].shift()).abs(),
@@ -66,12 +67,12 @@ df['atr'] = tr.rolling(14).mean()
 
 df.dropna(inplace=True)
 
-# =========================
-# 信号
-# =========================
+# ================================
+# 信号（更严格）
+# ================================
 df['signal'] = 0
 
-# 多头：突破前高 + 放量 + 顺势
+# 多头：
 df.loc[
     (df['close'] > df['high_max']) &
     (df['volume'] > df['vol_threshold']) &
@@ -79,7 +80,7 @@ df.loc[
     'signal'
 ] = 1
 
-# 空头：跌破前低 + 放量 + 顺势
+# 空头：
 df.loc[
     (df['close'] < df['low_min']) &
     (df['volume'] > df['vol_threshold']) &
@@ -87,19 +88,17 @@ df.loc[
     'signal'
 ] = -1
 
-# =========================
+# ================================
 # 回测（实盘友好）
-# =========================
+# ================================
 def backtest(df):
     equity = [0]
     trades = []
     position = 0
     entry = 0
 
-    # 风控参数
-    risk_pct = 0.01      # 单笔风险 1%
-    rr = 2.0             # 盈亏比
-    capital = 10000      # 假设资金
+    risk_pct = 0.01
+    rr = 2.0
 
     for i in range(1, len(df)):
         row = df.iloc[i]
@@ -107,7 +106,7 @@ def backtest(df):
         high = row['high']
         low = row['low']
 
-        # ========== 平多 ==========
+        # ===== 平多 =====
         if position == 1:
             stop = entry - row['atr'] * 1.5
             take = entry + (entry - stop) * rr
@@ -130,7 +129,7 @@ def backtest(df):
                 equity.append(equity[-1] + pnl)
                 position = 0
 
-        # ========== 平空 ==========
+        # ===== 平空 =====
         if position == -1:
             stop = entry + row['atr'] * 1.5
             take = entry - (stop - entry) * rr
@@ -153,7 +152,7 @@ def backtest(df):
                 equity.append(equity[-1] + pnl)
                 position = 0
 
-        # ========== 开仓 ==========
+        # ===== 开仓 =====
         if position == 0:
             if row['signal'] == 1:
                 entry = price
@@ -175,9 +174,9 @@ def backtest(df):
         "equity": equity
     }
 
-# =========================
+# ================================
 # 回测展示
-# =========================
+# ================================
 res = backtest(df)
 
 st.header("回测结果")
