@@ -47,6 +47,9 @@ def expectancy(samples):
     win = samples[samples > 0]
     loss = samples[samples <= 0]
 
+    if len(samples) == 0:
+        return 0
+
     win_rate = len(win) / len(samples)
     avg_win = win.mean() if len(win) else 0
     avg_loss = abs(loss.mean()) if len(loss) else 0
@@ -72,30 +75,41 @@ def main():
         return
 
     # ===================== 滚动计算 =====================
-    df["range_high"] = df["h"].rolling(lookback).max()
-    df["range_low"] = df["l"].rolling(lookback).min()
+    df["range_high"] = df["h"].rolling(lookback, min_periods=lookback).max()
+    df["range_low"] = df["l"].rolling(lookback, min_periods=lookback).min()
 
-    df["ma_fast"] = df["c"].rolling(trend_fast).mean()
-    df["ma_slow"] = df["c"].rolling(trend_slow).mean()
+    df["ma_fast"] = df["c"].rolling(trend_fast, min_periods=trend_fast).mean()
+    df["ma_slow"] = df["c"].rolling(trend_slow, min_periods=trend_slow).mean()
 
     df["trend_up"] = df["ma_fast"] > df["ma_slow"]
     df["trend_down"] = df["ma_fast"] < df["ma_slow"]
 
-    # 量能（中位+均值）
-    df["vol_ma"] = df["v"].rolling(lookback).mean()
-    df["vol_median"] = df["v"].rolling(lookback).median()
+    # 量能
+    df["vol_ma"] = df["v"].rolling(lookback, min_periods=lookback).mean()
+    df["vol_median"] = df["v"].rolling(lookback, min_periods=lookback).median()
     df["vol_break"] = (df["v"] > df["vol_ma"] * volume_mult) & (df["v"] > df["vol_median"])
 
-    # 实体
-    df["body"] = (df["c"] - df["o"]).abs() / df["o"]
+    # 实体（防除零）
+    df["body"] = (df["c"] - df["o"]).abs() / df["o"].replace(0, np.nan)
 
     # 原始突破
     df["raw_break_up"] = df["c"] > df["range_high"].shift(1)
     df["raw_break_down"] = df["c"] < df["range_low"].shift(1)
 
     # 有效突破（假突破过滤）
-    df["valid_break_up"] = df["raw_break_up"] & df["trend_up"] & df["vol_break"] & (df["body"] > 0.002)
-    df["valid_break_down"] = df["raw_break_down"] & df["trend_down"] & df["vol_break"] & (df["body"] > 0.002)
+    df["valid_break_up"] = (
+        df["raw_break_up"] &
+        df["trend_up"] &
+        df["vol_break"] &
+        (df["body"] > 0.002)
+    )
+
+    df["valid_break_down"] = (
+        df["raw_break_down"] &
+        df["trend_down"] &
+        df["vol_break"] &
+        (df["body"] > 0.002)
+    )
 
     # ===================== 期望值 =====================
     future = 3
