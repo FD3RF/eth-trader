@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-稳定版：K线突破 + 成交量确认 + 回调进场
-可回测，可跑Streamlit
+稳定优化版：突破 + 回调 + 放量
+可回测
 """
 
 import streamlit as st
@@ -9,18 +9,18 @@ import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("🚀 稳定策略：突破 + 回调 + 成交量")
+st.title("🚀 稳定优化策略：突破 + 回调 + 放量")
 
-# ==============================
+# =========================
 # 上传
-# ==============================
+# =========================
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
-# ==============================
+# =========================
 # 加载
-# ==============================
+# =========================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
@@ -39,46 +39,43 @@ df['volume'] = col(df,'volume','vol')
 for c in ['open','high','low','close','volume']:
     if df[c] is None:
         st.error(f"缺少字段: {c}")
-        st.write(df.columns)
         st.stop()
 
 df = df.dropna().reset_index(drop=True)
 
-# ==============================
+# =========================
 # 参数（可调）
-# ==============================
-lookback = 20            # 突破周期
-volume_mult = 2.0        # 放量倍数
-pullback_ratio = 0.5      # 回调比例（越小越严格）
-stop_loss_pct = 0.01      # 单笔止损 1%
-rr = 2.0                  # 盈亏比（仅参考）
+# =========================
+lookback = 20
+volume_mult = 2.0
+pullback = 0.5        # 回调比例（越小越严格）
+stop_pct = 0.01       # 止损1%
+rr = 2.0              # 盈亏比（参考）
 
-# ==============================
+# =========================
 # 特征
-# ==============================
+# =========================
 df['high_max'] = df['high'].rolling(lookback).max()
 df['low_min'] = df['low'].rolling(lookback).min()
 df['volume_ma'] = df['volume'].rolling(lookback).mean()
 
-# ==============================
+# =========================
 # 信号
-# ==============================
+# =========================
 df['break_up'] = df['close'] > df['high_max'].shift(1)
 df['break_down'] = df['close'] < df['low_min'].shift(1)
 
 df['volume_ok'] = df['volume'] > df['volume_ma'] * volume_mult
 
-# 回调：回踩不超过突破幅度一半
-df['pullback_ok'] = (
-    df['close'] >= df['high_max'].shift(1) * (1 - pullback_ratio * 0.01)
-)
+# 回调：收盘不跌破突破位一定比例
+df['pullback_ok'] = df['close'] >= df['high_max'].shift(1) * (1 - pullback * 0.01)
 
 df['long_signal'] = df['break_up'] & df['volume_ok'] & df['pullback_ok']
 df['short_signal'] = df['break_down'] & df['volume_ok']
 
-# ==============================
+# =========================
 # 回测
-# ==============================
+# =========================
 def backtest(df):
     equity = [0]
     trades = []
@@ -91,7 +88,7 @@ def backtest(df):
 
         # 平多
         if position == 1:
-            if row['close'] < entry * (1 - stop_loss_pct) or row['short_signal']:
+            if row['close'] < entry * (1 - stop_pct) or row['short_signal']:
                 pnl = price - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
@@ -99,7 +96,7 @@ def backtest(df):
 
         # 平空
         elif position == -1:
-            if row['close'] > entry * (1 + stop_loss_pct) or row['long_signal']:
+            if row['close'] > entry * (1 + stop_pct) or row['long_signal']:
                 pnl = entry - price
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
@@ -116,17 +113,12 @@ def backtest(df):
 
         equity.append(equity[-1])
 
-    return {
-        "trades": trades,
-        "equity": equity
-    }
+    return trades, equity
 
-# ==============================
+# =========================
 # 执行
-# ==============================
-res = backtest(df)
-trades = res['trades']
-equity = res['equity']
+# =========================
+trades, equity = backtest(df)
 
 st.header("回测结果")
 st.metric("交易次数", len(trades))
