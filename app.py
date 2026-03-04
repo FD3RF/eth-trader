@@ -1,127 +1,135 @@
 # -*- coding: utf-8 -*-
 """
-K线 + 成交量 策略（实盘友好版）
-思路：
-- 突破前高
-- 放量确认
-- 回调后进场
-- 固定止损 + 盈亏比
+5分钟合约：K线突破 + 成交量 + 回调进场（稳定版）
+作者：AI
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="K线+成交量策略", layout="wide")
-st.title("📈 K线 + 成交量 策略")
+st.set_page_config(layout="wide")
+st.title("🚀 稳定版：突破+回调+成交量")
 
 # 上传
-uploaded = st.file_uploader("上传 CSV", type=["csv"])
-if uploaded is None:
-    st.info("上传数据")
+file = st.file_uploader("上传 CSV", type=["csv"])
+if file is None:
     st.stop()
 
 # 加载
-@st.cache_data
-def load(file):
-    df = pd.read_csv(file)
-    df.columns = [c.lower() for c in df.columns]
-    return df
-
-df = load(uploaded)
-st.write("数据行:", len(df))
+df = pd.read_csv(file)
+df.columns = [c.lower() for c in df.columns]
 
 # 字段兼容
-def get(df, *names):
+def col(df, *names):
     for n in names:
         if n in df.columns:
             return df[n]
     return None
 
-df['open'] = get(df,'open')
-df['high'] = get(df,'high')
-df['low'] = get(df,'low')
-df['close'] = get(df,'close')
-df['volume'] = get(df,'volume','vol')
+df['open'] = col(df,'open')
+df['high'] = col(df,'high')
+df['low'] = col(df,'low')
+df['close'] = col(df,'close')
+df['volume'] = col(df,'volume','vol')
 
 for c in ['open','high','low','close','volume']:
     if df[c] is None:
         st.error(f"缺少字段: {c}")
+        st.write(df.columns)
         st.stop()
 
-# 策略参数
-st.sidebar.header("策略参数")
-lookback = st.sidebar.slider("突破周期", 5, 50, 20)
-rr = st.sidebar.slider("盈亏比", 1.0, 4.0, 2.0)
-vol_mult = st.sidebar.slider("放量倍数", 1.0, 3.0, 1.5)
+df = df.dropna().reset_index(drop=True)
 
-# 特征：前高 + 放量
-df['high_roll'] = df['high'].rolling(lookback).max()
-df['vol_ma'] = df['volume'].rolling(lookback).mean()
+# ====== 策略参数 ======
+lookback = 20                 # 突破周期
+volume_mult = 2.0             # 放量倍数
+pullback_ratio = 0.5          # 回调比例
+stop_loss_pct = 0.01          # 单笔止损 1%
+rr = 2.0                      # 盈亏比
 
-# 信号
-df['break'] = df['close'] > df['high_roll'].shift(1)
-df['vol_confirm'] = df['volume'] > df['vol_ma'] * vol_mult
-df['signal'] = (df['break'] & df['vol_confirm']).astype(int)
+# ====== 特征 ======
+df['high_max'] = df['high'].rolling(lookback).max()
+df['low_min'] = df['low'].rolling(lookback).min()
+df['volume_ma'] = df['volume'].rolling(lookback).mean()
 
-# 回测
+# ====== 信号 ======
+df['break_up'] = df['close'] > df['high_max'].shift(1)
+df['break_down'] = df['close'] < df['low_min'].shift(1)
+
+df['volume_ok'] = df['volume'] > df['volume_ma'] * volume_mult
+
+# 回调条件：价格回踩不超过突破幅度的一半
+df['pullback_ok'] = (
+    (df['close'] >= df['high_max'].shift(1) * (1 - pullback_ratio * 0.01))
+)
+
+df['long_signal'] = df['break_up'] & df['volume_ok'] & df['pullback_ok']
+df['short_signal'] = df['break_down'] & df['volume_ok']
+
+# ====== 回测 ======
 def backtest(df):
     equity = [0]
+    trades = []
     position = 0
     entry = 0
-    trades = []
 
     for i in range(1, len(df)):
         row = df.iloc[i]
-        prev = df.iloc[i-1]
         price = row['open']
 
         # 平仓条件
         if position == 1:
-            stop = entry * 0.99
-            target = entry + (entry - stop) * rr
-
-            if row['low'] <= stop:
-                pnl = stop - entry
+            if row['close'] < entry * (1 - stop_loss_pct):
+                pnl = price - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
-
-            elif row['high'] >= target:
-                pnl = target - entry
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                position = 0
-
-            elif row['close'] < row['high_roll'] * 0.995:
+            elif row['short_signal']:
                 pnl = price - entry
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
 
-        # 开仓条件
-        if prev['signal'] == 1 and position == 0:
-            entry = price
-            position = 1
+        elif position == -1:
+            if row['close'] > entry * (1 + stop_loss_pct):
+                pnl = entry - price
+                trades.append(pnl)
+                equity.append(equity[-1] + pnl)
+                position = 0
+            elif row['long_signal']:
+                pnl = entry - price
+                trades.append(pnl)
+                equity.append(equity[-1] + pnl)
+                position = 0
+
+        # 开仓
+        if position == 0:
+            if row['long_signal']:
+                entry = price
+                position = 1
+            elif row['short_signal']:
+                entry = price
+                position = -1
 
         equity.append(equity[-1])
 
     return {
-        "trades": len(trades),
-        "win_rate": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
-        "profit": sum(trades),
+        "trades": trades,
         "equity": equity
     }
 
-# 执行回测
+# ====== 执行 ======
 res = backtest(df)
 
+# 统计
+trades = res['trades']
+equity = res['equity']
+
 st.header("回测结果")
-st.metric("交易", res["trades"])
-st.metric("胜率", f"{res['win_rate']*100:.2f}%")
-st.metric("盈利", f"{res['profit']:.2f}")
+st.metric("交易次数", len(trades))
+st.metric("胜率", f"{sum(1 for p in trades if p>0)/len(trades)*100:.2f}%" if trades else "0")
+st.metric("总盈利", f"{sum(trades):.2f}")
 
-if res["trades"] > 0:
-    st.line_chart(pd.Series(res["equity"]))
-
-st.success("运行完成")
+# 曲线
+st.line_chart(pd.Series(equity))
