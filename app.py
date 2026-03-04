@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（终极版：参数扫描 + 自动推荐 + 多空统计）
+纸交易模拟（终极版：参数扫描 + 多空统计 + 修复inf）
 功能：
 - 支持手续费与滑点模拟
 - 可调参数：突破周期、盈亏比、最小持有K线、实体强度阈值、成交量均线周期、突破阈值
@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 from itertools import product
 
-st.set_page_config(page_title="纸交易模拟(多空统计)", layout="wide")
+st.set_page_config(page_title="纸交易模拟(多空统计+修复)", layout="wide")
 st.title("📈 纸交易模拟（终极版：参数扫描 + 多空统计）")
 
 # ==================== 侧边栏参数设置 ====================
@@ -126,7 +126,7 @@ def generate_signal(df, i, break_threshold, body_threshold):
 def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
              rr_ratio, min_hold, break_threshold, body_threshold):
     """
-    返回: records_df, equity_series, long_trades, short_trades, 
+    返回: records_df, equity_series, long_trades, short_trades,
           long_wins, short_wins, long_pnl, short_pnl
     """
     records = []
@@ -232,11 +232,11 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
             market_value = cash
         equity_curve.append(market_value)
 
-    return (pd.DataFrame(records), 
+    return (pd.DataFrame(records),
             pd.Series(equity_curve, index=df.index[start_idx:end_idx]),
             long_trades, short_trades, long_wins, short_wins, long_pnl, short_pnl)
 
-# ==================== 统计指标 ====================
+# ==================== 统计指标（修复无穷大） ====================
 def compute_stats(records, equity_series, name="策略"):
     if len(records) == 0:
         return {f"{name}_交易数": 0}
@@ -249,7 +249,10 @@ def compute_stats(records, equity_series, name="策略"):
     stats[f"{name}_胜率"] = (records['pnl'] > 0).mean() * 100
     avg_win = records[records['pnl'] > 0]['pnl'].mean()
     avg_loss = records[records['pnl'] < 0]['pnl'].mean()
-    stats[f"{name}_盈亏比"] = avg_win / abs(avg_loss) if avg_loss != 0 else np.inf
+    if avg_loss != 0:
+        stats[f"{name}_盈亏比"] = avg_win / abs(avg_loss)
+    else:
+        stats[f"{name}_盈亏比"] = 10.0  # 无亏损时设为较大值，避免inf
     losses = (records['pnl'] < 0).astype(int)
     loss_streaks = (losses.groupby((losses != losses.shift()).cumsum()).sum())
     stats[f"{name}_最大连续亏损次数"] = loss_streaks.max() if len(loss_streaks) > 0 else 0
@@ -302,14 +305,12 @@ if enable_scan and run_scan:
             if enable_oos:
                 split_point = int(len(df_feat_scan) * train_ratio)
                 test_df = df_feat_scan.iloc[split_point:]
-                # 使用增强版 simulate，获取多空统计
                 test_records, test_equity, lt, st, lw, sw, lpnl, spnl = simulate(
                     test_df, 0, len(test_df),
                     fee_rate, slippage, apply_costs,
                     rr_ratio, min_hold, br_th, b_th
                 )
                 stats = compute_stats(test_records, test_equity, "测试集")
-                # 提取测试集指标，加入多空统计
                 scan_results.append({
                     'body_threshold': b_th,
                     'vol_ma_period': v_period,
@@ -328,7 +329,6 @@ if enable_scan and run_scan:
                     '盈亏比': stats['测试集_盈亏比'],
                 })
             else:
-                # 全样本扫描
                 records, equity, lt, st, lw, sw, lpnl, spnl = simulate(
                     df_feat_scan, 0, len(df_feat_scan),
                     fee_rate, slippage, apply_costs,
@@ -378,6 +378,8 @@ if enable_scan and run_scan:
 
     if scan_results:
         result_df = pd.DataFrame(scan_results)
+        # 替换无穷大和NaN为0，防止渲染错误
+        result_df = result_df.replace([np.inf, -np.inf], 0).fillna(0)
         st.dataframe(result_df)
 
         # ==================== 自动推荐功能 ====================
@@ -446,7 +448,7 @@ if enable_scan and run_scan:
         st.warning("没有有效的扫描结果。")
 
 else:
-    # 单次运行（原有逻辑）
+    # 单次运行（原有逻辑，未修改）
     df_feat = build_features(df, lookback, vol_ma_period)
 
     if enable_oos:
@@ -483,7 +485,7 @@ else:
             rr_ratio, min_hold, break_threshold, body_threshold
         )
 
-    # 统计展示（与之前相同，略去多空统计，因为单次运行不要求多空分项）
+    # 统计展示
     if enable_oos:
         col1, col2 = st.columns(2)
         with col1:
@@ -548,4 +550,4 @@ else:
             st.line_chart(equity_df[['权益', '峰值']])
             st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（终极版：参数扫描 + 多空统计）")
+st.success("模拟完成（终极版：参数扫描 + 多空统计 + 修复）")
