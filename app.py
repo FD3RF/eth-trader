@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-纯K线吞没形态策略（修复回撤计算，初始资金100）
-只基于K线形态（看涨/看跌吞没） + 成交量 + 均线过滤
-支持ATR止损止盈、移动止损、双向交易、自动参数优化
+纯K线吞没形态策略（初始资金100，只用K线，无任何指标）
+信号：看涨/看跌吞没形态
+止损：固定点数
+止盈：止损点数的倍数
+支持移动止损、双向交易、自动参数优化
 """
 
 import streamlit as st
@@ -13,24 +15,21 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 st.set_page_config(layout="wide")
-st.title("📈 纯K线吞没形态策略（初始资金100）")
+st.title("📈 纯K线吞没形态策略（无指标，初始资金100）")
 
 # ====== 侧边栏 ======
 st.sidebar.header("运行设置")
 mode = st.sidebar.radio("模式", ["手动调参", "自动优化"])
 
 if mode == "手动调参":
-    ma_period = st.sidebar.slider("均线周期", 5, 100, 20)
-    vol_ma_period = st.sidebar.slider("成交量均线周期", 5, 100, 20)
-    atr_period = st.sidebar.slider("ATR周期", 5, 50, 14)
-    stop_mult = st.sidebar.slider("止损倍数 (ATR)", 1.0, 5.0, 2.0, 0.1)
-    tp_mult = st.sidebar.slider("止盈倍数 (0=不用)", 0.0, 5.0, 2.0, 0.1)
+    stop_points = st.sidebar.number_input("止损点数", min_value=1.0, max_value=100.0, value=10.0, step=1.0)
+    tp_ratio = st.sidebar.number_input("止盈倍数 (相对于止损)", min_value=1.0, max_value=5.0, value=2.0, step=0.1)
     use_trailing = st.sidebar.checkbox("移动止损", value=False)
     trail_period = st.sidebar.slider("移动止损周期", 5, 50, 10) if use_trailing else 0
     enable_short = st.sidebar.checkbox("启用做空", value=True)
 
 # ====== 上传数据 ======
-file = st.file_uploader("上传CSV (需包含 open,high,low,close,volume,datetime)", type=["csv"])
+file = st.file_uploader("上传CSV (需包含 open,high,low,close,datetime)", type=["csv"])
 if not file:
     st.info("请上传数据文件")
     st.stop()
@@ -53,15 +52,6 @@ def load_data(file):
         if col not in df.columns:
             st.error(f"缺少{col}")
             st.stop()
-    if 'volume' in df.columns:
-        df['volume'] = df['volume']
-    elif 'vol' in df.columns:
-        df['volume'] = df['vol']
-    elif 'tick_volume' in df.columns:
-        df['volume'] = df['tick_volume']
-    else:
-        st.error("缺少成交量字段")
-        st.stop()
     return df
 
 df_full = load_data(file)
@@ -73,44 +63,38 @@ df_train = df_full.iloc[:split].copy()
 df_test = df_full.iloc[split:].copy()
 st.info(f"训练集 {len(df_train)} | 测试集 {len(df_test)}")
 
-# ====== 特征工程 ======
-def prepare_features(df, ma_p, vol_ma_p, atr_p):
+# ====== 特征工程：只识别吞没形态 ======
+def prepare_features(df):
     df = df.copy()
-    df['ma'] = df['close'].rolling(ma_p).mean()
-    df['vol_ma'] = df['volume'].rolling(vol_ma_p).mean()
-    df['tr'] = np.maximum(df['high']-df['low'],
-                          np.maximum(abs(df['high']-df['close'].shift(1)),
-                                     abs(df['low']-df['close'].shift(1))))
-    df['atr'] = df['tr'].rolling(atr_p).mean()
-    for col in ['open','high','low','close']:
-        df[f'prev_{col}'] = df[col].shift(1)
-    # 吞没形态
+    # 前一根K线数据
+    df['prev_open'] = df['open'].shift(1)
+    df['prev_high'] = df['high'].shift(1)
+    df['prev_low'] = df['low'].shift(1)
+    df['prev_close'] = df['close'].shift(1)
+
+    # 看涨吞没条件（当前阳线完全覆盖前一根阴线）
     bull = (df['prev_close'] < df['prev_open']) & (df['close'] > df['open']) & \
            (df['open'] < df['prev_close']) & (df['close'] > df['prev_open'])
+    # 看跌吞没条件（当前阴线完全覆盖前一根阳线）
     bear = (df['prev_close'] > df['prev_open']) & (df['close'] < df['open']) & \
            (df['open'] > df['prev_close']) & (df['close'] < df['prev_open'])
-    # 过滤
-    price_above_ma = df['close'] > df['ma']
-    price_below_ma = df['close'] < df['ma']
-    vol_surge = df['volume'] > df['vol_ma']
-    df['long_signal'] = (bull & price_above_ma & vol_surge).astype(int)
-    df['short_signal'] = (bear & price_below_ma & vol_surge).astype(int)
+
+    df['long_signal'] = bull.astype(int)
+    df['short_signal'] = bear.astype(int)
     df.dropna(inplace=True)
     return df
 
-# ====== 回测核心（初始资金100） ======
+# ====== 回测核心（初始资金100，固定点数止损） ======
 def backtest(df, params):
     """
-    params: dict 包含 ma_period, vol_ma_period, atr_period,
-                 stop_mult, tp_mult, use_trailing, trail_period, enable_short
-    返回权益曲线(资金)和交易列表
+    params: dict 包含 stop_points, tp_ratio, use_trailing, trail_period, enable_short
     """
-    df = prepare_features(df, params['ma_period'], params['vol_ma_period'], params['atr_period'])
+    df = prepare_features(df)
     if len(df) == 0:
         return None
 
-    initial_capital = 100.0          # 初始资金设为100
-    equity = [initial_capital]       # 权益曲线
+    initial_capital = 100.0
+    equity = [initial_capital]
     trades = []                      # 每笔盈亏点数
     position = 0                      # 1多 -1空
     entry_price = 0.0
@@ -130,11 +114,12 @@ def backtest(df, params):
                 if cur['low'] <= stop_loss:
                     exit_price = stop_loss
                     exit_signal = True
-                elif params['tp_mult'] > 0 and cur['high'] >= take_profit:
+                elif params['tp_ratio'] > 0 and cur['high'] >= take_profit:
                     exit_price = take_profit
                     exit_signal = True
                 elif params['use_trailing'] and params['trail_period'] > 0:
-                    new_stop = df['close'].iloc[i-params['trail_period']:i].min()
+                    # 更新移动止损为过去N周期最低点
+                    new_stop = df['low'].iloc[i-params['trail_period']:i].min()
                     trail_stop = max(trail_stop, new_stop) if trail_stop != 0 else new_stop
                     if cur['low'] <= trail_stop:
                         exit_price = trail_stop
@@ -145,11 +130,11 @@ def backtest(df, params):
                 if cur['high'] >= stop_loss:
                     exit_price = stop_loss
                     exit_signal = True
-                elif params['tp_mult'] > 0 and cur['low'] <= take_profit:
+                elif params['tp_ratio'] > 0 and cur['low'] <= take_profit:
                     exit_price = take_profit
                     exit_signal = True
                 elif params['use_trailing'] and params['trail_period'] > 0:
-                    new_stop = df['close'].iloc[i-params['trail_period']:i].max()
+                    new_stop = df['high'].iloc[i-params['trail_period']:i].max()
                     trail_stop = min(trail_stop, new_stop) if trail_stop != 0 else new_stop
                     if cur['high'] >= trail_stop:
                         exit_price = trail_stop
@@ -160,7 +145,6 @@ def backtest(df, params):
             if exit_signal:
                 pnl_points = exit_price - entry_price if position == 1 else entry_price - exit_price
                 trades.append(pnl_points)
-                # 将点数盈亏加到资金上（假设每点价值为1）
                 equity.append(equity[-1] + pnl_points)
                 position = 0
                 continue
@@ -169,10 +153,9 @@ def backtest(df, params):
         if position == 0:
             if prev['long_signal'] == 1:
                 entry_price = cur['open']
-                atr = prev['atr']
-                stop_loss = entry_price - params['stop_mult'] * atr
-                if params['tp_mult'] > 0:
-                    take_profit = entry_price + params['tp_mult'] * atr
+                stop_loss = entry_price - params['stop_points']
+                if params['tp_ratio'] > 0:
+                    take_profit = entry_price + params['stop_points'] * params['tp_ratio']
                 else:
                     take_profit = 0
                 if params['use_trailing']:
@@ -181,10 +164,9 @@ def backtest(df, params):
                 equity.append(equity[-1])
             elif params['enable_short'] and prev['short_signal'] == 1:
                 entry_price = cur['open']
-                atr = prev['atr']
-                stop_loss = entry_price + params['stop_mult'] * atr
-                if params['tp_mult'] > 0:
-                    take_profit = entry_price - params['tp_mult'] * atr
+                stop_loss = entry_price + params['stop_points']
+                if params['tp_ratio'] > 0:
+                    take_profit = entry_price - params['stop_points'] * params['tp_ratio']
                 else:
                     take_profit = 0
                 if params['use_trailing']:
@@ -217,12 +199,12 @@ def backtest(df, params):
     avg_loss = -loss.mean() if len(loss) > 0 else 0
     profit_factor = win.sum() / (-loss.sum()) if len(loss) > 0 else np.inf
     total_return = equity[-1] - initial_capital
-    # 最大回撤（基于资金曲线）
+    # 最大回撤
     eq_series = pd.Series(equity)
     peak = eq_series.expanding().max()
     drawdown = (peak - eq_series) / peak
     max_dd = drawdown.max()
-    # 夏普比率（基于每日收益率，此处每根K线作为一天，年化因子按数据周期调整）
+    # 夏普比率（基于日收益率，此处每根K线作为一天）
     returns = pd.Series(equity).pct_change().dropna()
     if returns.std() != 0:
         # 假设数据为5分钟，一年约有 365*24*12 ≈ 105120 根K线
@@ -247,55 +229,45 @@ def backtest(df, params):
 def optimize_params(df_train, objective='profit_factor'):
     # 搜索范围（可自行调整）
     param_grid = {
-        'ma_period': range(10, 51, 5),
-        'vol_ma_period': range(10, 51, 5),
-        'atr_period': range(7, 22, 2),
-        'stop_mult': np.arange(1.0, 4.0, 0.5),
-        'tp_mult': np.arange(1.0, 4.0, 0.5),
+        'stop_points': np.arange(5, 31, 5),           # 5,10,15,20,25,30
+        'tp_ratio': np.arange(1.0, 4.0, 0.5),         # 1.0,1.5,2.0,2.5,3.0,3.5
         'use_trailing': [False, True],
         'trail_period': [5, 10, 15],
         'enable_short': [True, False]
     }
     best_score = -np.inf
     best_params = None
-    total = (len(param_grid['ma_period']) * len(param_grid['vol_ma_period']) *
-             len(param_grid['atr_period']) * len(param_grid['stop_mult']) *
-             len(param_grid['tp_mult']) * 2 * 3 * 2)
+    total = (len(param_grid['stop_points']) * len(param_grid['tp_ratio']) *
+             2 * 3 * 2)
     prog = st.progress(0)
     status = st.empty()
     count = 0
 
-    for ma in param_grid['ma_period']:
-        for vol in param_grid['vol_ma_period']:
-            for atr in param_grid['atr_period']:
-                for stop in param_grid['stop_mult']:
-                    for tp in param_grid['tp_mult']:
-                        for trail in param_grid['use_trailing']:
-                            for tper in param_grid['trail_period']:
-                                for short in param_grid['enable_short']:
-                                    params = {
-                                        'ma_period': ma,
-                                        'vol_ma_period': vol,
-                                        'atr_period': atr,
-                                        'stop_mult': stop,
-                                        'tp_mult': tp,
-                                        'use_trailing': trail,
-                                        'trail_period': tper if trail else 0,
-                                        'enable_short': short
-                                    }
-                                    res = backtest(df_train, params)
-                                    count += 1
-                                    prog.progress(count / total)
-                                    if res and res['num_trades'] > 30:
-                                        if objective == 'profit_factor':
-                                            score = res['profit_factor']
-                                        elif objective == 'sharpe':
-                                            score = res['sharpe']
-                                        else:
-                                            score = res['total_return']
-                                        if score > best_score:
-                                            best_score = score
-                                            best_params = params.copy()
+    for stop in param_grid['stop_points']:
+        for tp in param_grid['tp_ratio']:
+            for trail in param_grid['use_trailing']:
+                for tper in param_grid['trail_period']:
+                    for short in param_grid['enable_short']:
+                        params = {
+                            'stop_points': stop,
+                            'tp_ratio': tp,
+                            'use_trailing': trail,
+                            'trail_period': tper if trail else 0,
+                            'enable_short': short
+                        }
+                        res = backtest(df_train, params)
+                        count += 1
+                        prog.progress(count / total)
+                        if res and res['num_trades'] > 30:
+                            if objective == 'profit_factor':
+                                score = res['profit_factor']
+                            elif objective == 'sharpe':
+                                score = res['sharpe']
+                            else:
+                                score = res['total_return']
+                            if score > best_score:
+                                best_score = score
+                                best_params = params.copy()
     prog.empty()
     status.empty()
     return best_params, best_score
@@ -303,11 +275,8 @@ def optimize_params(df_train, objective='profit_factor'):
 # ====== 执行 ======
 if mode == "手动调参":
     params = {
-        'ma_period': ma_period,
-        'vol_ma_period': vol_ma_period,
-        'atr_period': atr_period,
-        'stop_mult': stop_mult,
-        'tp_mult': tp_mult,
+        'stop_points': stop_points,
+        'tp_ratio': tp_ratio,
         'use_trailing': use_trailing,
         'trail_period': trail_period if use_trailing else 0,
         'enable_short': enable_short
