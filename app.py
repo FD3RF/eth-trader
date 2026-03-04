@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
+"""
+5分钟 趋势强化 + 突破 + ATR风控 回测系统
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 趋势过滤 + 突破 回测")
+st.title("📈 强化趋势突破回测系统")
 
 uploaded = st.file_uploader("上传 CSV", type=["csv"])
 if uploaded is None:
@@ -29,16 +33,25 @@ for col in required:
         st.stop()
 
 if 'volume' not in df.columns:
-    df['volume'] = df['vol']
+    if 'vol' in df.columns:
+        df['volume'] = df['vol']
+    else:
+        st.error("缺少 volume 字段")
+        st.stop()
 
 st.success(f"数据行数: {len(df)}")
 
-# 参数
-rr = st.slider("盈亏比", 1.0, 4.0, 2.0, 0.5)
+# ===== 参数 =====
+rr = st.slider("盈亏比", 1.5, 4.0, 2.0, 0.5)
+fee_rate = st.slider("单边手续费 (%)", 0.0, 0.1, 0.04) / 100
+atr_mult = st.slider("ATR止损倍数", 1.0, 3.0, 1.5, 0.1)
 
-# 趋势
+# ===== 指标计算 =====
 df['ema50'] = df['close'].ewm(span=50).mean()
 df['ema200'] = df['close'].ewm(span=200).mean()
+
+# EMA斜率（趋势是否加速）
+df['ema_slope'] = df['ema50'] - df['ema50'].shift(5)
 
 # ATR
 df['tr'] = np.maximum(
@@ -61,7 +74,11 @@ for i in range(200, len(df)-1):
     prev = df.iloc[i-1]
     curr = df.iloc[i]
 
-    trend = curr['ema50'] > curr['ema200']
+    # ===== 趋势过滤 =====
+    trend = (
+        curr['ema50'] > curr['ema200'] and
+        curr['ema_slope'] > 0
+    )
 
     breakout = curr['high'] > prev['high']
     bullish = curr['close'] > curr['open']
@@ -70,21 +87,27 @@ for i in range(200, len(df)-1):
     if trend and breakout and bullish and vol_ok:
 
         entry = df.iloc[i+1]['open']
-        stop = entry - curr['atr'] * 1.5
-        target = entry + (entry - stop) * rr
+
+        stop = entry - curr['atr'] * atr_mult
+        risk = entry - stop
+        target = entry + risk * rr
 
         for j in range(i+1, len(df)):
 
             future = df.iloc[j]
 
+            # 止损
             if future['low'] <= stop:
                 pnl = stop - entry
+                pnl -= entry * fee_rate * 2
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 break
 
+            # 止盈
             if future['high'] >= target:
                 pnl = target - entry
+                pnl -= entry * fee_rate * 2
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 break
@@ -103,6 +126,7 @@ st.metric("总盈利", f"{profit:.2f}")
 
 st.line_chart(pd.Series(equity))
 
+st.subheader("统计信息")
 st.write("平均盈利:", np.mean(trades))
 st.write("最大盈利:", np.max(trades))
 st.write("最大亏损:", np.min(trades))
