@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（终极版：参数扫描 + 多空统计 + 修复inf）
+纸交易模拟（终极版：参数扫描 + 多空统计 + 修复命名冲突）
 功能：
 - 支持手续费与滑点模拟
 - 可调参数：突破周期、盈亏比、最小持有K线、实体强度阈值、成交量均线周期、突破阈值
@@ -305,7 +305,8 @@ if enable_scan and run_scan:
             if enable_oos:
                 split_point = int(len(df_feat_scan) * train_ratio)
                 test_df = df_feat_scan.iloc[split_point:]
-                test_records, test_equity, lt, st, lw, sw, lpnl, spnl = simulate(
+                # 注意：这里使用 short_t 而不是 st，避免覆盖 streamlit 模块
+                test_records, test_equity, lt, short_t, lw, sw, lpnl, spnl = simulate(
                     test_df, 0, len(test_df),
                     fee_rate, slippage, apply_costs,
                     rr_ratio, min_hold, br_th, b_th
@@ -317,9 +318,9 @@ if enable_scan and run_scan:
                     'break_threshold': br_th,
                     '交易数': stats['测试集_交易数'],
                     '多头交易数': lt,
-                    '空头交易数': st,
+                    '空头交易数': short_t,
                     '多头胜率': (lw / lt * 100) if lt > 0 else 0,
-                    '空头胜率': (sw / st * 100) if st > 0 else 0,
+                    '空头胜率': (sw / short_t * 100) if short_t > 0 else 0,
                     '多头盈利': lpnl,
                     '空头盈利': spnl,
                     '胜率': stats['测试集_胜率'],
@@ -329,7 +330,7 @@ if enable_scan and run_scan:
                     '盈亏比': stats['测试集_盈亏比'],
                 })
             else:
-                records, equity, lt, st, lw, sw, lpnl, spnl = simulate(
+                records, equity, lt, short_t, lw, sw, lpnl, spnl = simulate(
                     df_feat_scan, 0, len(df_feat_scan),
                     fee_rate, slippage, apply_costs,
                     rr_ratio, min_hold, br_th, b_th
@@ -341,9 +342,9 @@ if enable_scan and run_scan:
                     'break_threshold': br_th,
                     '交易数': stats['全样本_交易数'],
                     '多头交易数': lt,
-                    '空头交易数': st,
+                    '空头交易数': short_t,
                     '多头胜率': (lw / lt * 100) if lt > 0 else 0,
-                    '空头胜率': (sw / st * 100) if st > 0 else 0,
+                    '空头胜率': (sw / short_t * 100) if short_t > 0 else 0,
                     '多头盈利': lpnl,
                     '空头盈利': spnl,
                     '胜率': stats['全样本_胜率'],
