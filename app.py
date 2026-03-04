@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（终极版：参数扫描 + 自动推荐）
+纸交易模拟（终极版：参数扫描 + 自动推荐 + 多空统计）
 功能：
 - 支持手续费与滑点模拟
 - 可调参数：突破周期、盈亏比、最小持有K线、实体强度阈值、成交量均线周期、突破阈值
 - 可选样本外测试（训练/测试集划分）
-- 参数自动扫描：一次性测试多组参数组合，汇总对比结果
-- 自动推荐：根据您的偏好（平衡、优先交易数、优先夏普比率、优先胜率）计算综合得分，显示前三名最优组合
+- 参数自动扫描：一次性测试多组参数组合，汇总对比结果（含多空分项统计）
+- 自动推荐：根据您的偏好计算综合得分，显示前三名最优组合
 - 全面统计指标（最大回撤、夏普比率、盈亏比、连续亏损等）
 - 权益曲线与回撤可视化（纯Streamlit实现）
 - 适配 CSV 文件列名：ts, open, high, low, close, vol
@@ -17,8 +17,8 @@ import pandas as pd
 import numpy as np
 from itertools import product
 
-st.set_page_config(page_title="纸交易模拟(参数扫描+自动推荐)", layout="wide")
-st.title("📈 纸交易模拟（终极版：参数扫描 + 自动推荐）")
+st.set_page_config(page_title="纸交易模拟(多空统计)", layout="wide")
+st.title("📈 纸交易模拟（终极版：参数扫描 + 多空统计）")
 
 # ==================== 侧边栏参数设置 ====================
 st.sidebar.header("📌 策略参数（单次运行）")
@@ -122,9 +122,13 @@ def generate_signal(df, i, break_threshold, body_threshold):
             return -1
     return 0
 
-# ==================== 模拟交易 ====================
+# ==================== 模拟交易（返回多空统计） ====================
 def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
              rr_ratio, min_hold, break_threshold, body_threshold):
+    """
+    返回: records_df, equity_series, long_trades, short_trades, 
+          long_wins, short_wins, long_pnl, short_pnl
+    """
     records = []
     equity_curve = []
     position = 0
@@ -132,6 +136,14 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
     entry_idx = 0
     cash = 10000.0
     hold = 0
+
+    # 多空统计
+    long_trades = 0
+    short_trades = 0
+    long_wins = 0
+    short_wins = 0
+    long_pnl = 0.0
+    short_pnl = 0.0
 
     signals = [generate_signal(df, i, break_threshold, body_threshold) for i in range(len(df))]
 
@@ -150,7 +162,7 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
         signal = signals[i]
 
         # 平仓逻辑
-        if position == 1:
+        if position == 1:  # 多头
             stop_loss = entry_price - row['range'] * 0.5
             take_profit = entry_price + (entry_price - stop_loss) * rr_ratio
             exit_price = None
@@ -169,8 +181,13 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
                                 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
                 cash += pnl
                 position = 0
+                # 多头统计
+                long_trades += 1
+                long_pnl += pnl
+                if pnl > 0:
+                    long_wins += 1
 
-        elif position == -1:
+        elif position == -1:  # 空头
             stop_loss = entry_price + row['range'] * 0.5
             take_profit = entry_price - (stop_loss - entry_price) * rr_ratio
             exit_price = None
@@ -189,6 +206,11 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
                                 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
                 cash += pnl
                 position = 0
+                # 空头统计
+                short_trades += 1
+                short_pnl += pnl
+                if pnl > 0:
+                    short_wins += 1
 
         # 开仓
         if position == 0:
@@ -210,7 +232,9 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
             market_value = cash
         equity_curve.append(market_value)
 
-    return pd.DataFrame(records), pd.Series(equity_curve, index=df.index[start_idx:end_idx])
+    return (pd.DataFrame(records), 
+            pd.Series(equity_curve, index=df.index[start_idx:end_idx]),
+            long_trades, short_trades, long_wins, short_wins, long_pnl, short_pnl)
 
 # ==================== 统计指标 ====================
 def compute_stats(records, equity_series, name="策略"):
@@ -278,18 +302,25 @@ if enable_scan and run_scan:
             if enable_oos:
                 split_point = int(len(df_feat_scan) * train_ratio)
                 test_df = df_feat_scan.iloc[split_point:]
-                test_records, test_equity = simulate(
+                # 使用增强版 simulate，获取多空统计
+                test_records, test_equity, lt, st, lw, sw, lpnl, spnl = simulate(
                     test_df, 0, len(test_df),
                     fee_rate, slippage, apply_costs,
                     rr_ratio, min_hold, br_th, b_th
                 )
                 stats = compute_stats(test_records, test_equity, "测试集")
-                # 提取测试集指标
+                # 提取测试集指标，加入多空统计
                 scan_results.append({
                     'body_threshold': b_th,
                     'vol_ma_period': v_period,
                     'break_threshold': br_th,
                     '交易数': stats['测试集_交易数'],
+                    '多头交易数': lt,
+                    '空头交易数': st,
+                    '多头胜率': (lw / lt * 100) if lt > 0 else 0,
+                    '空头胜率': (sw / st * 100) if st > 0 else 0,
+                    '多头盈利': lpnl,
+                    '空头盈利': spnl,
                     '胜率': stats['测试集_胜率'],
                     '总盈利': stats['测试集_总盈利'],
                     '最大回撤': stats['测试集_最大回撤 (%)'],
@@ -298,7 +329,7 @@ if enable_scan and run_scan:
                 })
             else:
                 # 全样本扫描
-                records, equity = simulate(
+                records, equity, lt, st, lw, sw, lpnl, spnl = simulate(
                     df_feat_scan, 0, len(df_feat_scan),
                     fee_rate, slippage, apply_costs,
                     rr_ratio, min_hold, br_th, b_th
@@ -309,6 +340,12 @@ if enable_scan and run_scan:
                     'vol_ma_period': v_period,
                     'break_threshold': br_th,
                     '交易数': stats['全样本_交易数'],
+                    '多头交易数': lt,
+                    '空头交易数': st,
+                    '多头胜率': (lw / lt * 100) if lt > 0 else 0,
+                    '空头胜率': (sw / st * 100) if st > 0 else 0,
+                    '多头盈利': lpnl,
+                    '空头盈利': spnl,
                     '胜率': stats['全样本_胜率'],
                     '总盈利': stats['全样本_总盈利'],
                     '最大回撤': stats['全样本_最大回撤 (%)'],
@@ -322,6 +359,12 @@ if enable_scan and run_scan:
                 'vol_ma_period': v_period,
                 'break_threshold': br_th,
                 '交易数': 0,
+                '多头交易数': 0,
+                '空头交易数': 0,
+                '多头胜率': 0,
+                '空头胜率': 0,
+                '多头盈利': 0,
+                '空头盈利': 0,
                 '胜率': 0,
                 '总盈利': 0,
                 '最大回撤': 0,
@@ -412,7 +455,7 @@ else:
         test_df = df_feat.iloc[split_point:]
 
         st.subheader("📊 训练集结果")
-        train_records, train_equity = simulate(
+        train_records, train_equity, _, _, _, _, _, _ = simulate(
             train_df, 0, len(train_df),
             fee_rate, slippage, apply_costs,
             rr_ratio, min_hold, break_threshold, body_threshold
@@ -423,7 +466,7 @@ else:
             st.write("训练集无交易记录。")
 
         st.subheader("📊 测试集结果")
-        test_records, test_equity = simulate(
+        test_records, test_equity, _, _, _, _, _, _ = simulate(
             test_df, 0, len(test_df),
             fee_rate, slippage, apply_costs,
             rr_ratio, min_hold, break_threshold, body_threshold
@@ -434,13 +477,13 @@ else:
             st.write("测试集无交易记录。")
     else:
         st.subheader("📊 全样本模拟结果")
-        records, equity = simulate(
+        records, equity, _, _, _, _, _, _ = simulate(
             df_feat, 0, len(df_feat),
             fee_rate, slippage, apply_costs,
             rr_ratio, min_hold, break_threshold, body_threshold
         )
 
-    # 统计展示
+    # 统计展示（与之前相同，略去多空统计，因为单次运行不要求多空分项）
     if enable_oos:
         col1, col2 = st.columns(2)
         with col1:
@@ -505,4 +548,4 @@ else:
             st.line_chart(equity_df[['权益', '峰值']])
             st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（终极版：参数扫描 + 自动推荐）")
+st.success("模拟完成（终极版：参数扫描 + 多空统计）")
