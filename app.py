@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（优化版）
+纸交易模拟（多参数自动调整版）
 功能：
 - 支持手续费与滑点模拟
-- 计算最大回撤、夏普比率等风控指标
+- 可调参数：实体强度阈值、成交量均线周期、突破周期、盈亏比、最小持有K线、突破阈值
 - 可选样本外测试（训练/测试集划分）
+- 全面统计指标（最大回撤、夏普比率、盈亏比、连续亏损等）
 - 权益曲线与回撤可视化（纯Streamlit实现）
 - 适配 CSV 文件列名：ts, open, high, low, close, vol
 """
@@ -13,27 +14,33 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="纸交易模拟(优化版)", layout="wide")
-st.title("📈 纸交易模拟（优化版：手续费+回撤+样本外）")
+st.set_page_config(page_title="纸交易模拟(多参数调整)", layout="wide")
+st.title("📈 纸交易模拟（多参数自动调整版）")
 
 # ==================== 侧边栏参数设置 ====================
-st.sidebar.header("模拟参数设置")
+st.sidebar.header("📌 策略参数")
+
+# 基础参数
+lookback = st.sidebar.number_input("突破周期 (lookback)", value=20, min_value=5, max_value=100, step=1)
+rr_ratio = st.sidebar.number_input("盈亏比 (止盈/止损)", value=2.5, min_value=1.0, max_value=5.0, step=0.1)
+min_hold = st.sidebar.number_input("最小持有K线数 (min_hold)", value=3, min_value=1, max_value=10, step=1)
+
+# 信号过滤参数
+break_threshold = st.sidebar.number_input("突破阈值 (比例)", value=0.002, format="%.4f", step=0.0005)
+body_threshold = st.sidebar.number_input("实体强度阈值 (body_threshold)", value=0.45, min_value=0.1, max_value=0.9, step=0.05)
+vol_ma_period = st.sidebar.number_input("成交量均线周期 (vol_ma_period)", value=20, min_value=5, max_value=100, step=1)
 
 # 手续费与滑点
+st.sidebar.header("💰 交易成本")
 fee_rate = st.sidebar.number_input("手续费率（双边，如0.001表示0.1%）", value=0.001, format="%.4f", step=0.0005)
 slippage = st.sidebar.number_input("滑点（比例，如0.0005表示0.05%）", value=0.0005, format="%.4f", step=0.0001)
 apply_costs = st.sidebar.checkbox("启用手续费与滑点", value=True)
 
 # 样本外测试设置
+st.sidebar.header("🔬 验证方式")
 enable_oos = st.sidebar.checkbox("启用样本外测试（训练/测试集划分）", value=False)
 if enable_oos:
     train_ratio = st.sidebar.slider("训练集比例（剩余为测试集）", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
-
-# 策略参数（可调）
-lookback = st.sidebar.number_input("突破周期", value=20, min_value=5, max_value=100, step=1)
-rr_ratio = st.sidebar.number_input("盈亏比（止盈/止损）", value=2.5, min_value=1.0, max_value=5.0, step=0.1)
-min_hold = st.sidebar.number_input("最小持有K线数", value=3, min_value=1, max_value=10, step=1)
-break_threshold = st.sidebar.number_input("突破阈值（比例）", value=0.002, format="%.4f", step=0.0005)
 
 # ==================== 数据上传 ====================
 uploaded_file = st.file_uploader("上传CSV文件（包含OHLCV数据）", type=["csv"])
@@ -63,22 +70,22 @@ if not all(col in df.columns for col in required_cols):
 st.write(f"总数据行数：{len(df)}")
 st.dataframe(df.head())
 
-# ==================== 特征构建 ====================
-def build_features(df, lookback):
+# ==================== 特征构建（使用当前参数） ====================
+def build_features(df, lookback, vol_ma_period):
     df = df.copy()
     df['high_max'] = df['high'].rolling(lookback).max().shift(1)
     df['low_min'] = df['low'].rolling(lookback).min().shift(1)
     df['body'] = (df['close'] - df['open']).abs()
     df['range'] = df['high'] - df['low']
     df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
-    df['vol_ma'] = df['volume'].rolling(20).mean()
+    df['vol_ma'] = df['volume'].rolling(vol_ma_period).mean()
     df.dropna(inplace=True)
     return df
 
-df_feat = build_features(df, lookback)
+df_feat = build_features(df, lookback, vol_ma_period)
 
-# ==================== 信号生成 ====================
-def generate_signal(df, i, break_threshold):
+# ==================== 信号生成（使用当前参数） ====================
+def generate_signal(df, i, break_threshold, body_threshold):
     row = df.iloc[i]
     close = row['close']
     high_max = row['high_max']
@@ -91,7 +98,7 @@ def generate_signal(df, i, break_threshold):
     in_middle = (close > low_min * 1.05) and (close < high_max * 0.95)
 
     # 实体强度与成交量确认
-    strong_body = body_ratio > 0.45
+    strong_body = body_ratio > body_threshold
     valid_volume = volume > vol_ma
 
     # 突破幅度
@@ -107,7 +114,8 @@ def generate_signal(df, i, break_threshold):
     return 0
 
 # ==================== 模拟交易（单段） ====================
-def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs, rr_ratio, min_hold, break_threshold):
+def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs,
+             rr_ratio, min_hold, break_threshold, body_threshold):
     """
     在 df 的 [start_idx, end_idx) 区间上模拟交易
     返回交易记录DataFrame和权益序列
@@ -121,7 +129,7 @@ def simulate(df, start_idx, end_idx, fee_rate, slippage, apply_costs, rr_ratio, 
     hold = 0
 
     # 预计算信号（避免每步重复计算）
-    signals = [generate_signal(df, i, break_threshold) for i in range(len(df))]
+    signals = [generate_signal(df, i, break_threshold, body_threshold) for i in range(len(df))]
 
     for i in range(start_idx, end_idx):
         row = df.iloc[i]
@@ -227,16 +235,22 @@ if enable_oos:
     test_df = df_feat.iloc[split_point:]
 
     st.subheader("📊 训练集结果")
-    train_records, train_equity = simulate(train_df, 0, len(train_df), fee_rate, slippage,
-                                            apply_costs, rr_ratio, min_hold, break_threshold)
+    train_records, train_equity = simulate(
+        train_df, 0, len(train_df),
+        fee_rate, slippage, apply_costs,
+        rr_ratio, min_hold, break_threshold, body_threshold
+    )
     if len(train_records) > 0:
         st.dataframe(train_records)
     else:
         st.write("训练集无交易记录。")
 
     st.subheader("📊 测试集结果")
-    test_records, test_equity = simulate(test_df, 0, len(test_df), fee_rate, slippage,
-                                          apply_costs, rr_ratio, min_hold, break_threshold)
+    test_records, test_equity = simulate(
+        test_df, 0, len(test_df),
+        fee_rate, slippage, apply_costs,
+        rr_ratio, min_hold, break_threshold, body_threshold
+    )
     if len(test_records) > 0:
         st.dataframe(test_records)
     else:
@@ -244,8 +258,11 @@ if enable_oos:
 else:
     # 全数据模拟
     st.subheader("📊 全样本模拟结果")
-    records, equity = simulate(df_feat, 0, len(df_feat), fee_rate, slippage,
-                                apply_costs, rr_ratio, min_hold, break_threshold)
+    records, equity = simulate(
+        df_feat, 0, len(df_feat),
+        fee_rate, slippage, apply_costs,
+        rr_ratio, min_hold, break_threshold, body_threshold
+    )
 
 # ==================== 统计指标计算函数 ====================
 def compute_stats(records, equity_series, name="策略"):
@@ -367,4 +384,4 @@ else:
         # 显示回撤面积图（用 area_chart 模拟）
         st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（优化版，无matplotlib依赖）")
+st.success("模拟完成（多参数自动调整版）")
