@@ -1,4 +1,7 @@
 streamlit
 ccxt
 pandas
+numpy
 matplotlib
+plotly
+requests
