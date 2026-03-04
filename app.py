@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-纯K战术：前高/前低突破 + K线实体
+终极纯K：价格行为 + 结构突破
+不加指标
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="纯K战术", layout="wide")
-st.title("🚀 纯 K 战术（价格行为）")
+st.set_page_config(page_title="终极纯K", layout="wide")
+st.title("🚀 终极纯 K（价格行为）")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
-# =========================
+# ================================
 # 加载
-# =========================
+# ================================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
@@ -28,27 +29,27 @@ df['volume'] = df['vol']
 
 st.write(f"数据行: {len(df)}")
 
-# =========================
-# 特征：前高/前低
-# =========================
+# ================================
+# 结构：前高/前低（关键）
+# ================================
 lookback = 20
 
 df['high_max'] = df['high'].rolling(lookback).max().shift(1)
 df['low_min'] = df['low'].rolling(lookback).min().shift(1)
 
-# K线实体（强势）
+# K线实体
 df['body'] = (df['close'] - df['open']).abs()
 df['range'] = df['high'] - df['low']
 df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
 
-# 实体必须够大（避免十字）
-strong_body = df['body_ratio'] > 0.4
+# 强实体（避免十字）
+strong_body = df['body_ratio'] > 0.35
 
 df.dropna(inplace=True)
 
-# =========================
-# 信号
-# =========================
+# ================================
+# 信号（纯价格）
+# ================================
 df['signal'] = 0
 
 # 多头：
@@ -67,17 +68,17 @@ df.loc[
     'signal'
 ] = -1
 
-# =========================
-# 回测
-# =========================
+# ================================
+# 回测（实盘逻辑）
+# ================================
 def backtest(df):
     equity = [0]
     trades = []
     position = 0
     entry = 0
 
-    rr = 2.0
-    min_hold = 2
+    rr = 2.5
+    min_hold = 3
     hold = 0
 
     for i in range(1, len(df)):
@@ -108,6 +109,7 @@ def backtest(df):
                 equity.append(equity[-1] + pnl)
                 position = 0
 
+            # 防假突破：最低持仓
             elif hold >= min_hold and row['signal'] == -1:
                 pnl = price - entry
                 trades.append(pnl)
@@ -159,9 +161,9 @@ def backtest(df):
         "equity": equity
     }
 
-# =========================
+# ================================
 # 展示
-# =========================
+# ================================
 res = backtest(df)
 
 st.header("回测结果")
