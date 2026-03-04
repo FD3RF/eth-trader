@@ -1,115 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-实盘框架（模板）
-纯K信号 + 风控 + 下单接口（需你接API）
-不含任何交易所凭据
+进场交易计划提示
+基于纯K回测逻辑
+只提示，不交易
 """
 
-import time
-import numpy as np
+import streamlit as st
 import pandas as pd
 
-# ================================
-# 风控参数
-# ================================
-RISK_PER_TRADE = 0.01   # 单笔风险 1%
-RR = 2.5                # 盈亏比
-MIN_HOLD = 3             # 最小持仓K线
+st.set_page_config(page_title="进场计划", layout="wide")
+st.title("🚀 进场交易计划提示")
+
+file = st.file_uploader("上传 CSV", type=["csv"])
+if file is None:
+    st.stop()
 
 # ================================
-# 信号生成（纯K）
+# 加载
 # ================================
-def generate_signal(df):
-    row = df.iloc[-1]
-    strong_body = row['body_ratio'] > 0.35
+df = pd.read_csv(file)
+df.columns = [c.lower() for c in df.columns]
 
-    if (row['close'] > row['high_max']) and strong_body and (row['close'] > row['open']):
-        return 1  # 多
-    if (row['close'] < row['low_min']) and strong_body and (row['close'] < row['open']):
-        return -1 # 空
-    return 0
-
-# ================================
-# 仓位计算（动态）
-# ================================
-def calc_position_size(capital, atr):
-    return (capital * RISK_PER_TRADE) / (atr * 2 + 1e-9)
+df['open'] = df['open']
+df['high'] = df['high']
+df['low'] = df['low']
+df['close'] = df['close']
+df['volume'] = df['vol']
 
 # ================================
-# 模拟下单接口（需替换为实盘API）
-# ================================
-def place_order(side, size):
-    """
-    side: 'buy' 或 'sell'
-    size: 下单数量
-    """
-    print(f"[ORDER] side={side}, size={size}")
-    # 这里接你的交易所API
-    return True
-
-def close_position():
-    print("[CLOSE] 平仓")
-    return True
-
-# ================================
-# 实盘循环（伪框架）
-# ================================
-def trading_loop(api, capital=10000):
-    """
-    api: 你自己的行情/数据接口
-    """
-    position = 0
-    entry = 0
-    hold = 0
-
-    while True:
-        df = api.get_latest()  # 你需实现：获取最新K线DataFrame
-        df = build_features(df)
-
-        signal = generate_signal(df)
-        row = df.iloc[-1]
-        atr = row['atr']
-
-        if position != 0:
-            hold += 1
-        else:
-            hold = 0
-
-        # ===== 平仓逻辑 =====
-        if position == 1:
-            stop = entry - atr * 1.5
-            take = entry + (entry - stop) * RR
-
-            if row['low'] <= stop or (hold >= MIN_HOLD and signal == -1):
-                close_position()
-                position = 0
-
-        if position == -1:
-            stop = entry + atr * 1.5
-            take = entry - (stop - entry) * RR
-
-            if row['high'] >= stop or (hold >= MIN_HOLD and signal == 1):
-                close_position()
-                position = 0
-
-        # ===== 开仓 =====
-        if position == 0 and signal != 0:
-            size = calc_position_size(capital, atr)
-
-            if signal == 1:
-                place_order('buy', size)
-                entry = row['close']
-                position = 1
-
-            elif signal == -1:
-                place_order('sell', size)
-                entry = row['close']
-                position = -1
-
-        time.sleep(1)  # 控制频率
-
-# ================================
-# 纯K特征构建
+# 特征
 # ================================
 def build_features(df):
     df = df.copy()
@@ -122,33 +41,90 @@ def build_features(df):
     df['range'] = df['high'] - df['low']
     df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
 
-    tr = pd.concat([
-        df['high'] - df['low'],
-        (df['high'] - df['close'].shift()).abs(),
-        (df['low'] - df['close'].shift()).abs()
-    ], axis=1).max(axis=1)
-
-    df['atr'] = tr.rolling(14).mean()
     df.dropna(inplace=True)
     return df
 
+df = build_features(df)
+
 # ================================
-# 使用说明
+# 信号
 # ================================
-"""
-使用步骤：
+df['signal'] = 0
 
-1. 实现行情接口：
-   api.get_latest() -> 返回 DataFrame（含 open/high/low/close/vol）
+df.loc[
+    (df['close'] > df['high_max']) &
+    (df['body_ratio'] > 0.35) &
+    (df['close'] > df['open']),
+    'signal'
+] = 1
 
-2. 实现下单接口：
-   place_order / close_position 接入交易所 API
+df.loc[
+    (df['close'] < df['low_min']) &
+    (df['body_ratio'] > 0.35) &
+    (df['close'] < df['open']),
+    'signal'
+] = -1
 
-3. 小资金测试：
-   先用模拟账户
+# ================================
+# 最新计划
+# ================================
+st.header("最新交易计划")
 
-4. 风控：
-   单笔 1%
-"""
+latest = df.iloc[-1]
 
-print("实盘框架加载完成")
+if latest['signal'] == 1:
+    st.success("📈 多头计划：突破 + 强阳")
+    st.write("""
+    进场条件：
+    - 突破前高
+    - 强实体阳线
+    - 结构顺势
+
+    止损：
+    - 跌破结构
+    - 强反转
+
+    退出：
+    - 盈利目标
+    - 信号反转
+    """)
+
+elif latest['signal'] == -1:
+    st.error("📉 空头计划：跌破 + 强阴")
+    st.write("""
+    进场条件：
+    - 跌破前低
+    - 强实体阴线
+    - 结构顺势
+
+    止损：
+    - 突破结构
+    - 强反转
+
+    退出：
+    - 盈利目标
+    - 信号反转
+    """)
+
+else:
+    st.info("⏳ 无计划：等待结构")
+    st.write("""
+    不进场原因：
+    - 无突破
+    - 无强实体
+    - 结构未确认
+    """)
+
+# ================================
+# 历史统计
+# ================================
+st.header("历史统计")
+
+st.write("多头次数:", (df['signal'] == 1).sum())
+st.write("空头次数:", (df['signal'] == -1).sum())
+st.write("无信号:", (df['signal'] == 0).sum())
+
+st.line_chart(df['close'])
+st.line_chart(df['signal'])
+
+st.success("计划生成完成")
