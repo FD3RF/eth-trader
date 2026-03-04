@@ -1,216 +1,109 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-以太坊5分钟突破策略自动交易脚本
-参数：body=0.15, vol_period=15, break=0.001
-交易所：币安合约（U本位） - 测试网
-"""
-
-import ccxt
+import streamlit as st
 import pandas as pd
-import numpy as np
-import time
-import logging
-from datetime import datetime
-import sys
+import plotly.graph_objects as go
 
-# ==================== 配置参数 ====================
-SYMBOL = 'ETH/USDT'           # 交易对
-TIMEFRAME = '5m'               # 周期
-LOOKBACK = 20                  # 突破周期
-VOL_MA_PERIOD = 15             # 成交量均线周期
-BODY_THRESHOLD = 0.15          # 实体强度阈值
-BREAK_THRESHOLD = 0.001        # 突破阈值（0.1%）
-RR_RATIO = 2.5                  # 盈亏比
-MIN_HOLD = 3                    # 最小持仓K线数
-STOP_MULTIPLIER = 0.5           # 止损系数（入场波幅的0.5倍）
+st.set_page_config(page_title="纯K吞没突破 - 只做多头版", layout="wide")
+st.title("🚀 5分钟纯K吞没突破 - 只做多头版（禁用空头）")
+st.caption("只做多头信号 | 纯K吞没突破 | 无任何指标")
 
-# 交易参数
-POSITION_SIZE = 0.01            # 每次开仓数量（根据资金调整）
-MAX_POSITIONS = 1               # 同时最大持仓数（这里只允许单向持仓）
+# 参数
+initial_capital = st.number_input("初始资金 (USDT)", value=10000.0)
+fee_rate = st.number_input("手续费率 (双边)", value=0.0010, format="%.4f")
+slippage = st.number_input("滑点", value=0.0005, format="%.4f")
+rr = 2.5
+sl_buffer = 5.0
 
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("eth_trading.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
+st.button("🔄 刷新信号与统计")
+
+# 数据加载
+file = st.file_uploader("上传 5分钟 OHLCV CSV", type=["csv"])
+if file is None: st.stop()
+
+df = pd.read_csv(file)
+df.columns = [c.lower() for c in df.columns]
+df = df.rename(columns={"vol": "volume"})
+df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+df = df[['ts', 'open', 'high', 'low', 'close']].sort_values('ts').reset_index(drop=True)
+
+# 纯K多头信号（空头已禁用）
+df['prev_open'] = df['open'].shift(1)
+df['prev_high'] = df['high'].shift(1)
+df['prev_low'] = df['low'].shift(1)
+df['prev_close'] = df['close'].shift(1)
+
+df['long_signal'] = (
+    (df['prev_close'] < df['prev_open']) &
+    (df['close'] > df['open']) &
+    (df['open'] <= df['prev_close']) &
+    (df['close'] >= df['prev_open']) &
+    (df['close'] > df['prev_high'])
 )
-logger = logging.getLogger(__name__)
 
-# ==================== 交易所初始化（测试网）====================
-exchange = ccxt.binance({
-    'apiKey': 'YOUR_TESTNET_API_KEY',
-    'secret': 'YOUR_TESTNET_SECRET',
-    'enableRateLimit': True,
-    'options': {
-        'defaultType': 'future',          # 合约交易
-        'testnet': True,                   # 使用测试网（正式实盘请改为False）
-    }
-})
+df['short_signal'] = False  # 强制禁用空头
 
-# 如果使用现货，改为 'spot'，并设置 testnet=False
-# exchange.options['defaultType'] = 'spot'
+# 回测逻辑（同之前）
+trades = []
+marks = []
+equity = initial_capital
+equity_curve = [initial_capital]
+position = 0
+entry_price = 0
 
-# 可选：设置杠杆（合约需要）
-# exchange.set_leverage(1, SYMBOL)   # 逐仓1倍杠杆
+for i in range(1, len(df)):
+    row = df.iloc[i]
+    price = row['open']
+    signal = 1 if row['long_signal'] else (-1 if row['short_signal'] else 0)
 
-# ==================== 数据获取与指标计算 ====================
-def fetch_ohlcv(limit=100):
-    """获取最近limit根K线"""
-    try:
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('datetime', inplace=True)
-        return df
-    except Exception as e:
-        logger.error(f"获取K线失败: {e}")
-        return None
+    if position == 0 and signal != 0:
+        entry_price = price + signal * price * slippage
+        sl_price = row['low'] - sl_buffer if signal == 1 else row['high'] + sl_buffer
+        tp_price = entry_price + signal * (entry_price - sl_price) * rr
+        position = signal
+        marks.append((i, entry_price, "buy" if signal==1 else "sell"))
 
-def calculate_indicators(df):
-    """计算指标"""
-    df = df.copy()
-    df['high_max'] = df['high'].rolling(LOOKBACK).max().shift(1)
-    df['low_min'] = df['low'].rolling(LOOKBACK).min().shift(1)
-    df['body'] = (df['close'] - df['open']).abs()
-    df['range'] = df['high'] - df['low']
-    df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
-    df['vol_ma'] = df['volume'].rolling(VOL_MA_PERIOD).mean()
-    return df
+    elif position != 0:
+        high, low = row['high'], row['low']
+        exited = False
+        exit_price = 0
+        if position == 1:
+            if low <= sl_price:
+                exit_price = sl_price - row['open'] * slippage
+                exited = True
+            elif high >= tp_price:
+                exit_price = tp_price + row['open'] * slippage
+                exited = True
+        else:
+            if high >= sl_price:
+                exit_price = sl_price + row['open'] * slippage
+                exited = True
+            elif low <= tp_price:
+                exit_price = tp_price - row['open'] * slippage
+                exited = True
 
-def check_signal(row):
-    """检查最新K线信号"""
-    if pd.isna(row['high_max']) or pd.isna(row['low_min']):
-        return 0
+        if exited:
+            pnl_points = (exit_price - entry_price) * position
+            fee = abs(pnl_points) * fee_rate * 2
+            net_pnl = pnl_points - fee
+            equity += net_pnl
+            trades.append({'idx': i, 'pnl': net_pnl, 'side': 'long' if position==1 else 'short',
+                           'sl': sl_price, 'tp': tp_price, 'exit': exit_price})
+            marks.append((i, exit_price, "sell" if position==1 else "buy"))
+            position = 0
+            equity_curve.append(equity)
 
-    in_middle = (row['close'] > row['low_min'] * 1.05) and (row['close'] < row['high_max'] * 0.95)
-    strong_body = row['body_ratio'] > BODY_THRESHOLD
-    valid_volume = row['volume'] > row['vol_ma']
+# 统计显示（同之前）
+df_tr = pd.DataFrame(trades)
+if len(df_tr) > 0:
+    last100 = df_tr.tail(100)
+    win_all = (df_tr['pnl'] > 0).mean() * 100
+    win_100 = (last100['pnl'] > 0).mean() * 100 if len(last100) > 0 else 0
 
-    # 多头
-    if (row['close'] > row['high_max']) and strong_body and valid_volume:
-        break_up = (row['close'] - row['high_max']) / row['high_max']
-        if break_up > BREAK_THRESHOLD and not in_middle:
-            return 1
-    # 空头
-    if (row['close'] < row['low_min']) and strong_body and valid_volume:
-        break_down = (row['low_min'] - row['close']) / row['low_min']
-        if break_down > BREAK_THRESHOLD and not in_middle:
-            return -1
-    return 0
+    st.metric("总交易数", len(df_tr))
+    st.metric("近100笔胜率", f"{win_100:.2f}%")
+    st.metric("总胜率", f"{win_all:.2f}%")
+    st.metric("最终资金", f"{equity:.2f} USDT")
 
-# ==================== 交易执行 ====================
-def get_position():
-    """获取当前持仓方向（1多头，-1空头，0无持仓）"""
-    try:
-        positions = exchange.fetch_positions([SYMBOL])
-        for pos in positions:
-            if pos['symbol'] == SYMBOL:
-                if float(pos['contracts']) > 0:
-                    return 1, float(pos['entryPrice'])
-                elif float(pos['contracts']) < 0:
-                    return -1, float(pos['entryPrice'])
-        return 0, None
-    except Exception as e:
-        logger.error(f"获取持仓失败: {e}")
-        return 0, None
+    st.dataframe(df_tr.tail(20)[['idx','side','pnl','sl','tp','exit']])
 
-def place_order(signal, price, range_val):
-    """开仓"""
-    try:
-        if signal == 1:
-            # 做多
-            order = exchange.create_market_buy_order(SYMBOL, POSITION_SIZE)
-            logger.info(f"开多 @ {price}, 数量 {POSITION_SIZE}, 订单 {order['id']}")
-            # 设置止损止盈（限价单）
-            stop_loss = price - range_val * STOP_MULTIPLIER
-            take_profit = price + (price - stop_loss) * RR_RATIO
-            # 止损单（市价）
-            exchange.create_order(SYMBOL, 'STOP_MARKET', 'sell', POSITION_SIZE, None, {'stopPrice': stop_loss})
-            # 止盈单（限价）
-            exchange.create_limit_sell_order(SYMBOL, POSITION_SIZE, take_profit)
-            logger.info(f"设置止损 {stop_loss:.2f}, 止盈 {take_profit:.2f}")
-        elif signal == -1:
-            # 做空
-            order = exchange.create_market_sell_order(SYMBOL, POSITION_SIZE)
-            logger.info(f"开空 @ {price}, 数量 {POSITION_SIZE}, 订单 {order['id']}")
-            stop_loss = price + range_val * STOP_MULTIPLIER
-            take_profit = price - (stop_loss - price) * RR_RATIO
-            exchange.create_order(SYMBOL, 'STOP_MARKET', 'buy', POSITION_SIZE, None, {'stopPrice': stop_loss})
-            exchange.create_limit_buy_order(SYMBOL, POSITION_SIZE, take_profit)
-            logger.info(f"设置止损 {stop_loss:.2f}, 止盈 {take_profit:.2f}")
-    except Exception as e:
-        logger.error(f"开仓失败: {e}")
-
-def close_position(direction):
-    """手动平仓（用于反向信号平仓）"""
-    try:
-        if direction == 1:
-            exchange.create_market_sell_order(SYMBOL, POSITION_SIZE)
-            logger.info("反向信号平多")
-        elif direction == -1:
-            exchange.create_market_buy_order(SYMBOL, POSITION_SIZE)
-            logger.info("反向信号平空")
-    except Exception as e:
-        logger.error(f"平仓失败: {e}")
-
-# ==================== 主循环 ====================
-def main():
-    logger.info("启动自动交易监控...")
-    hold = 0          # 持仓K线计数
-    last_signal_time = None  # 上次信号时间（防止重复开仓）
-
-    while True:
-        try:
-            # 获取最新K线
-            df = fetch_ohlcv(limit=LOOKBACK+20)
-            if df is None:
-                time.sleep(5)
-                continue
-
-            df = calculate_indicators(df)
-            latest = df.iloc[-1]                     # 最新收盘的K线
-            current_price = exchange.fetch_ticker(SYMBOL)['last']  # 实时价格
-
-            # 获取当前持仓
-            position, entry_price = get_position()
-
-            # 更新持仓计数
-            if position != 0:
-                hold += 1
-            else:
-                hold = 0
-
-            # 检查反向信号平仓
-            if position != 0:
-                signal = check_signal(latest)
-                if hold >= MIN_HOLD and signal == -position:
-                    close_position(position)
-                    position = 0
-                    hold = 0
-
-            # 开仓（无持仓时）
-            if position == 0:
-                signal = check_signal(latest)
-                if signal != 0:
-                    # 避免同一根K线重复开仓
-                    now = latest.name
-                    if last_signal_time != now:
-                        place_order(signal, latest['close'], latest['range'])
-                        last_signal_time = now
-
-            # 每隔5秒检查一次
-            time.sleep(5)
-
-        except KeyboardInterrupt:
-            logger.info("用户中断，退出程序")
-            break
-        except Exception as e:
-            logger.error(f"主循环异常: {e}")
-            time.sleep(10)
-
-if __name__ == "__main__":
-    main()
+# 资金曲线 + K线图（同之前代码，省略重复部分）
+# ... 把你之前的资金曲线和K线图代码粘贴在这里即可 ...
