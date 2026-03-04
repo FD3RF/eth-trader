@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（终极版：参数扫描 + 多空统计 + 修复命名冲突）
+纸交易模拟（优化版：更低阈值扫描）
 功能：
 - 支持手续费与滑点模拟
 - 可调参数：突破周期、盈亏比、最小持有K线、实体强度阈值、成交量均线周期、突破阈值
@@ -17,8 +17,8 @@ import pandas as pd
 import numpy as np
 from itertools import product
 
-st.set_page_config(page_title="纸交易模拟(多空统计+修复)", layout="wide")
-st.title("📈 纸交易模拟（终极版：参数扫描 + 多空统计）")
+st.set_page_config(page_title="纸交易模拟(更低阈值扫描)", layout="wide")
+st.title("📈 纸交易模拟（继续优化：更低阈值扫描）")
 
 # ==================== 侧边栏参数设置 ====================
 st.sidebar.header("📌 策略参数（单次运行）")
@@ -54,9 +54,10 @@ enable_scan = st.sidebar.checkbox("启用参数扫描（将覆盖单次运行参
 
 if enable_scan:
     st.sidebar.markdown("请为以下参数输入候选值（用逗号分隔）")
-    body_thresholds_scan = st.sidebar.text_input("实体强度阈值", "0.45, 0.35, 0.25")
+    # 修改为更低的阈值和实体强度
+    body_thresholds_scan = st.sidebar.text_input("实体强度阈值", "0.15, 0.10")
     vol_ma_periods_scan = st.sidebar.text_input("成交量均线周期", "20, 15, 10")
-    break_thresholds_scan = st.sidebar.text_input("突破阈值", "0.002, 0.0015, 0.001")
+    break_thresholds_scan = st.sidebar.text_input("突破阈值", "0.001, 0.0008")
     run_scan = st.sidebar.button("🚀 运行参数扫描")
 
 # ==================== 数据上传 ====================
@@ -449,7 +450,7 @@ if enable_scan and run_scan:
         st.warning("没有有效的扫描结果。")
 
 else:
-    # 单次运行（原有逻辑，未修改）
+    # 单次运行（原有逻辑）
     df_feat = build_features(df, lookback, vol_ma_period)
 
     if enable_oos:
@@ -551,4 +552,4 @@ else:
             st.line_chart(equity_df[['权益', '峰值']])
             st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（终极版：参数扫描 + 多空统计 + 修复）")
+st.success("模拟完成（继续优化：更低阈值扫描）")
