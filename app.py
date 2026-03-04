@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（多参数自动调整版）
+纸交易模拟（最终优化版）
 功能：
 - 支持手续费与滑点模拟
-- 可调参数：实体强度阈值、成交量均线周期、突破周期、盈亏比、最小持有K线、突破阈值
+- 可调参数：突破周期、盈亏比、最小持有K线、实体强度阈值、成交量均线周期、突破阈值
 - 可选样本外测试（训练/测试集划分）
 - 全面统计指标（最大回撤、夏普比率、盈亏比、连续亏损等）
 - 权益曲线与回撤可视化（纯Streamlit实现）
@@ -14,8 +14,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="纸交易模拟(多参数调整)", layout="wide")
-st.title("📈 纸交易模拟（多参数自动调整版）")
+st.set_page_config(page_title="纸交易模拟(最终优化)", layout="wide")
+st.title("📈 纸交易模拟（最终优化版：多参数自动调整）")
 
 # ==================== 侧边栏参数设置 ====================
 st.sidebar.header("📌 策略参数")
@@ -25,10 +25,13 @@ lookback = st.sidebar.number_input("突破周期 (lookback)", value=20, min_valu
 rr_ratio = st.sidebar.number_input("盈亏比 (止盈/止损)", value=2.5, min_value=1.0, max_value=5.0, step=0.1)
 min_hold = st.sidebar.number_input("最小持有K线数 (min_hold)", value=3, min_value=1, max_value=10, step=1)
 
-# 信号过滤参数
-break_threshold = st.sidebar.number_input("突破阈值 (比例)", value=0.002, format="%.4f", step=0.0005)
-body_threshold = st.sidebar.number_input("实体强度阈值 (body_threshold)", value=0.45, min_value=0.1, max_value=0.9, step=0.05)
-vol_ma_period = st.sidebar.number_input("成交量均线周期 (vol_ma_period)", value=20, min_value=5, max_value=100, step=1)
+# 信号过滤参数（调整这些参数可显著改变交易频率）
+break_threshold = st.sidebar.number_input("突破阈值 (比例)", value=0.002, format="%.4f", step=0.0005,
+                                          help="突破幅度要求，降低此值会增加信号数量")
+body_threshold = st.sidebar.number_input("实体强度阈值 (body_threshold)", value=0.45, min_value=0.1, max_value=0.9, step=0.05,
+                                          help="K线实体占波动的比例要求，降低此值会增加信号数量")
+vol_ma_period = st.sidebar.number_input("成交量均线周期 (vol_ma_period)", value=20, min_value=5, max_value=100, step=1,
+                                        help="成交量确认使用的均线周期，缩短此值会增加信号数量")
 
 # 手续费与滑点
 st.sidebar.header("💰 交易成本")
@@ -384,4 +387,4 @@ else:
         # 显示回撤面积图（用 area_chart 模拟）
         st.area_chart(equity_df[['回撤']])
 
-st.success("模拟完成（多参数自动调整版）")
+st.success("模拟完成（最终优化版）")
