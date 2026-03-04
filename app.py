@@ -31,11 +31,31 @@ def get_candles(limit=300, bar="15m"):
 
         df["time"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
         df[["o","h","l","c","v"]] = df[["o","h","l","c","v"]].astype(float)
+
         return df
 
     except Exception as e:
         st.error(f"获取失败: {e}")
         return pd.DataFrame()
+
+
+# ========================= 期望值计算 =========================
+def expectancy(samples):
+    if samples is None or len(samples) < 10:
+        return 0
+
+    win = samples[samples > 0]
+    loss = samples[samples <= 0]
+
+    win_rate = len(win) / len(samples)
+    avg_win = win.mean() if len(win) > 0 else 0
+    avg_loss = abs(loss.mean()) if len(loss) > 0 else 0
+
+    if avg_loss == 0:
+        return 0
+
+    rr = avg_win / avg_loss
+    return (win_rate * rr) - (1 - win_rate)
 
 
 # ========================= 主逻辑 =========================
@@ -58,13 +78,18 @@ def main():
     # ===== 双均线趋势 =====
     df["ma_fast"] = df["c"].rolling(trend_fast).mean()
     df["ma_slow"] = df["c"].rolling(trend_slow).mean()
+
     df["trend_up"] = df["ma_fast"] > df["ma_slow"]
     df["trend_down"] = df["ma_fast"] < df["ma_slow"]
 
     # ===== 量能 =====
     df["vol_ma"] = df["v"].rolling(lookback).mean()
     df["vol_median"] = df["v"].rolling(lookback).median()
-    df["vol_break"] = (df["v"] > df["vol_ma"] * volume_mult) & (df["v"] > df["vol_median"])
+
+    df["vol_break"] = (
+        (df["v"] > df["vol_ma"] * volume_mult) &
+        (df["v"] > df["vol_median"])
+    )
 
     # ===== 实体 =====
     df["body"] = abs(df["c"] - df["o"]) / df["o"]
@@ -94,19 +119,6 @@ def main():
 
     up_samples = df[df["valid_break_up"]]["future_return"].dropna()
     down_samples = df[df["valid_break_down"]]["future_return"].dropna()
-
-    def expectancy(samples):
-        if len(samples) < 5:
-            return 0
-        win = samples[samples > 0]
-        loss = samples[samples <= 0]
-        win_rate = len(win) / len(samples)
-        avg_win = win.mean() if len(win) else 0
-        avg_loss = abs(loss.mean()) if len(loss) else 0
-        if avg_loss == 0:
-            return 0
-        rr = avg_win / avg_loss
-        return (win_rate * rr) - (1 - win_rate)
 
     exp_up = expectancy(up_samples)
     exp_down = expectancy(down_samples)
@@ -142,18 +154,22 @@ def main():
     # 有效突破点
     up = df[df["valid_break_up"]]
     down = df[df["valid_break_down"]]
-    fig.add_trace(go.Scatter(
-        x=up["time"], y=up["c"],
-        mode="markers",
-        marker=dict(symbol="triangle-up", size=12),
-        name="有效突破上"
-    ))
-    fig.add_trace(go.Scatter(
-        x=down["time"], y=down["c"],
-        mode="markers",
-        marker=dict(symbol="triangle-down", size=12),
-        name="有效突破下"
-    ))
+
+    if not up.empty:
+        fig.add_trace(go.Scatter(
+            x=up["time"], y=up["c"],
+            mode="markers",
+            marker=dict(symbol="triangle-up", size=12),
+            name="有效突破上"
+        ))
+
+    if not down.empty:
+        fig.add_trace(go.Scatter(
+            x=down["time"], y=down["c"],
+            mode="markers",
+            marker=dict(symbol="triangle-down", size=12),
+            name="有效突破下"
+        ))
 
     fig.update_layout(xaxis_rangeslider_visible=False, height=500)
     st.plotly_chart(fig, use_container_width=True)
@@ -161,7 +177,14 @@ def main():
     # ===== 最近信号 =====
     st.subheader("🔔 最近有效突破")
     signals = df[(df["valid_break_up"] | df["valid_break_down"])].tail(10)
-    st.dataframe(signals[["time","c","valid_break_up","valid_break_down","vol_break","body"]])
+
+    if signals.empty:
+        st.info("暂无有效突破")
+    else:
+        st.dataframe(
+            signals[["time","c","valid_break_up","valid_break_down","vol_break","body"]],
+            use_container_width=True
+        )
 
 
 if __name__ == "__main__":
