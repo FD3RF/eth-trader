@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-终极实战优化版
+终极实盘友好版
 核心：
 - 多周期趋势
 - ATR动态止损
-- 放量突破
-- 过滤低质量单
-- 降低交易频率
+- 放量过滤
+- 低频高质量
+- 风控
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="终极实战版", layout="wide")
-st.title("🚀 终极实战优化")
+st.set_page_config(page_title="终极实盘版", layout="wide")
+st.title("🚀 终极实盘优化")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
@@ -72,7 +72,7 @@ df.dropna(inplace=True)
 # ================================
 df['signal'] = 0
 
-# 多头：
+# 多头：突破 + 放量 + 顺势
 df.loc[
     (df['close'] > df['high_max']) &
     (df['volume'] > df['vol_threshold']) &
@@ -80,7 +80,7 @@ df.loc[
     'signal'
 ] = 1
 
-# 空头：
+# 空头：跌破 + 放量 + 顺势
 df.loc[
     (df['close'] < df['low_min']) &
     (df['volume'] > df['vol_threshold']) &
@@ -89,7 +89,7 @@ df.loc[
 ] = -1
 
 # ================================
-# 回测（实盘友好）
+# 回测（实盘逻辑）
 # ================================
 def backtest(df):
     equity = [0]
@@ -97,6 +97,7 @@ def backtest(df):
     position = 0
     entry = 0
 
+    # 风控
     risk_pct = 0.01
     rr = 2.0
 
