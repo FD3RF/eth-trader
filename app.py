@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纯K线形态策略回测（看涨/看跌吞没） - 修复显示错误版
+K线吞没形态 + 成交量 + 均线 多空策略（修复版）
 """
 
 import streamlit as st
@@ -8,10 +8,10 @@ import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 纯K线形态策略回测（吞没形态）")
+st.title("📈 K线吞没 + 成交量 + 均线 策略")
 
 # ====== 上传数据 ======
-file = st.file_uploader("上传CSV文件（需包含 open, high, low, close, datetime）", type=["csv"])
+file = st.file_uploader("上传CSV文件（需包含 open, high, low, close, volume, datetime）", type=["csv"])
 if file is None:
     st.info("请上传数据文件")
     st.stop()
@@ -37,15 +37,30 @@ def load_data(file):
         if col not in df.columns:
             st.error(f"缺少必要字段: {col}")
             st.stop()
+
+    # 成交量字段兼容
+    if 'volume' in df.columns:
+        df['volume'] = df['volume']
+    elif 'vol' in df.columns:
+        df['volume'] = df['vol']
+    elif 'tick_volume' in df.columns:
+        df['volume'] = df['tick_volume']
+    else:
+        st.error("缺少成交量字段：volume / vol / tick_volume")
+        st.stop()
+
     return df
 
 df = load_data(file)
 st.success(f"数据加载成功，共 {len(df)} 根K线")
 
-# ====== 特征工程：识别吞没形态 ======
-def identify_engulfing(df):
-    """识别看涨吞没和看跌吞没"""
+# ====== 特征工程：识别吞没形态 + 成交量 + 均线 ======
+def prepare_features(df):
     df = df.copy()
+
+    # 计算20日均线和20日均量
+    df['ma20'] = df['close'].rolling(20).mean()
+    df['vol_ma20'] = df['volume'].rolling(20).mean()
 
     # 前一根K线数据
     df['prev_open'] = df['open'].shift(1)
@@ -62,7 +77,7 @@ def identify_engulfing(df):
     )
     df['bull_engulf'] = bull_condition.astype(int)
 
-    # 看跌吞没条件（当前阴线完全覆盖前一根阳线）
+    # 看跌吞没条件（当前阴线完全覆盖前一根阳线）——用于反向平仓
     bear_condition = (
         (df['prev_close'] > df['prev_open']) &          # 前一根阳线
         (df['close'] < df['open']) &                    # 当前阴线
@@ -71,80 +86,77 @@ def identify_engulfing(df):
     )
     df['bear_engulf'] = bear_condition.astype(int)
 
-    # 去掉前几行NaN
+    # 附加过滤条件：价格在均线上方 & 成交量放大
+    df['price_above_ma'] = (df['close'] > df['ma20']).astype(int)
+    df['vol_surge'] = (df['volume'] > df['vol_ma20']).astype(int)
+
+    # 最终做多信号：前一根K线满足看涨吞没 + 价格在均线上 + 放量
+    # 注意：我们使用前一根K线的过滤条件，因此需要将当前K线的条件shift到下一根？
+    # 在回测中，我们将基于前一根K线的最终信号入场，所以这里生成一个综合信号列（基于当前K线）
+    df['signal_raw'] = (
+        (df['bull_engulf'] == 1) &
+        (df['price_above_ma'] == 1) &
+        (df['vol_surge'] == 1)
+    ).astype(int)
+
+    # 去掉前20行NaN（均线计算导致）
     df.dropna(inplace=True)
     return df
 
-df = identify_engulfing(df)
-st.success("吞没形态识别完成")
+df = prepare_features(df)
+st.success("特征工程完成")
 
 # ====== 回测函数 ======
-def backtest_engulfing(df):
+def backtest_strategy(df):
     """
     回测逻辑：
-    - 做多信号：前一根K线出现看涨吞没，且当前无持仓，则在本根K线开盘买入
+    - 做多信号：前一根K线的 signal_raw == 1，且当前无持仓，则在本根K线开盘买入
     - 止损价 = 信号K线的最低价（即前一根K线的最低价）
     - 平仓条件：
         1. 价格跌破止损价：若某根K线收盘价 < 止损价，则下一根开盘平仓
         2. 出现反向信号：若前一根K线出现看跌吞没，则本根开盘平仓
     """
-    equity = [0]          # 权益曲线
-    trades = []           # 每笔交易的盈亏
-    position = 0          # 0-空仓，1-持有多头
-    entry_price = 0.0     # 入场价
-    stop_loss = 0.0       # 止损价
-    entry_idx = -1        # 入场时的索引（用于定位信号K线）
+    equity = [0]
+    trades = []
+    position = 0
+    entry_price = 0.0
+    stop_loss = 0.0
 
     for i in range(1, len(df)):
-        # 当前K线数据（用于确定入场/出场价）
         current = df.iloc[i]
-        # 前一根K线数据（用于判断信号）
         prev = df.iloc[i-1]
 
         # ----- 平仓检查 -----
         if position == 1:
-            # 条件1：止损触发（前一根K线收盘价 < 止损价）
             stop_triggered = (prev['close'] < stop_loss)
-            # 条件2：反向信号（前一根K线出现看跌吞没）
             reverse_signal = (prev['bear_engulf'] == 1)
 
             if stop_triggered or reverse_signal:
-                # 在本根K线开盘价平仓
                 exit_price = current['open']
                 pnl = exit_price - entry_price
                 trades.append(pnl)
                 equity.append(equity[-1] + pnl)
                 position = 0
-                # 重置止损
-                stop_loss = 0.0
-                entry_idx = -1
-                # 平仓后跳过本次开仓（避免同一根K线先平后开）
                 continue
 
-        # ----- 开仓检查（基于前一根K线的信号） -----
+        # ----- 开仓检查 -----
         if position == 0:
-            if prev['bull_engulf'] == 1:
-                # 入场价 = 当前K线开盘价
+            if prev['signal_raw'] == 1:
                 entry_price = current['open']
-                # 止损价 = 信号K线（即前一根K线）的最低价
-                stop_loss = prev['low']
+                stop_loss = prev['low']  # 信号K线的最低价
                 position = 1
-                entry_idx = i   # 记录入场时的索引（暂未使用）
-                # 开仓时不立即计入权益，持仓期间权益不变
                 equity.append(equity[-1])
             else:
-                # 无信号，权益不变
                 equity.append(equity[-1])
         else:
-            # 已有持仓且未平仓，权益不变
             equity.append(equity[-1])
 
-    # 最后如果还有持仓，以最后收盘价平仓（强制平仓）
+    # 强制平仓
     if position == 1:
         final_price = df.iloc[-1]['close']
         pnl = final_price - entry_price
         trades.append(pnl)
-        equity[-1] += pnl   # 更新最后权益
+        equity[-1] += pnl
 
     return {
         "交易次数": len(trades),
@@ -154,9 +166,9 @@ def backtest_engulfing(df):
         "trades": trades
     }
 
-# ====== 运行回测（使用全部数据，不分割） ======
+# ====== 运行回测 ======
 with st.spinner("回测进行中..."):
-    result = backtest_engulfing(df)
+    result = backtest_strategy(df)
 
 # ====== 展示结果 ======
 st.header("📊 回测结果")
@@ -169,18 +181,15 @@ if result["交易次数"] > 0:
     st.subheader("权益曲线")
     st.line_chart(pd.Series(result["equity"]))
 else:
-    st.warning("没有产生任何交易，请检查数据或调整形态定义")
+    st.warning("没有产生任何交易，请检查数据或调整过滤条件")
 
-# ====== 显示最近几笔交易示例 ======
+# ====== 交易明细 ======
 if result["交易次数"] > 0:
     st.subheader("交易明细（最近5笔）")
-    # 取最后5笔交易
     last_n = 5
     trades_list = result["trades"][-last_n:]
-    # 生成对应的交易序号（从1开始计数的自然序号）
     start_idx = max(1, len(result["trades"]) - last_n + 1)
     trade_indices = list(range(start_idx, len(result["trades"]) + 1))
-    # 如果不足5笔，按实际长度显示
     last_trades = pd.DataFrame({
         "交易序号": trade_indices,
         "盈亏": trades_list
