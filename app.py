@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-纯K线形态策略回测（看涨/看跌吞没）
+纯K线形态策略回测（看涨/看跌吞没） - 修复KeyError版
 """
 
 import streamlit as st
@@ -118,8 +118,7 @@ def backtest_engulfing(df):
                 # 重置止损
                 stop_loss = 0.0
                 entry_idx = -1
-                # 注意：平仓后，本根K线不再开仓（避免同一根K线先平后开）
-                # 但我们可以允许开仓（基于前一根信号），因为本根开盘已平仓，之后还可以开新仓？如果前一根有开仓信号，理论上可以在本根开盘平仓后立即开新仓，但为了简化，我们不在同一根K线同时操作。这里保持简单：先平后不立即开，下一根再处理。所以跳过本次开仓部分。
+                # 平仓后跳过本次开仓（避免同一根K线先平后开）
                 continue
 
         # ----- 开仓检查（基于前一根K线的信号） -----
@@ -151,7 +150,8 @@ def backtest_engulfing(df):
         "交易次数": len(trades),
         "胜率": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
         "盈利": sum(trades),
-        "equity": equity
+        "equity": equity,
+        "trades": trades   # 新增这一行，用于显示交易明细
     }
 
 # ====== 运行回测（使用全部数据，不分割） ======
