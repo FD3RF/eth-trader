@@ -1,134 +1,138 @@
 # -*- coding: utf-8 -*-
+"""
+K线 + 成交量 + 突破策略（极简可跑版）
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 
 st.set_page_config(layout="wide")
-st.title("📈 K线突破 + 放量 多空回测")
+st.title("📈 K线 + 成交量 策略")
 
-uploaded = st.file_uploader("上传 CSV", type=["csv"])
-if uploaded is None:
+# ======================
+# 上传
+# ======================
+file = st.file_uploader("上传 CSV", type=["csv"])
+if file is None:
+    st.info("上传文件")
     st.stop()
 
+# ======================
+# 加载兼容字段
+# ======================
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
     df.columns = [c.lower() for c in df.columns]
+
+    # 时间
     if 'datetime' in df.columns:
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
     df.sort_index(inplace=True)
-    return df
 
-df = load_data(uploaded)
-
-required = ['open','high','low','close','volume']
-for col in required:
-    if col not in df.columns:
-        st.error(f"缺少字段: {col}")
+    # 成交量字段兼容
+    if 'volume' in df.columns:
+        df['volume'] = df['volume']
+    elif 'vol' in df.columns:
+        df['volume'] = df['vol']
+    elif 'tick_volume' in df.columns:
+        df['volume'] = df['tick_volume']
+    elif 'quote_volume' in df.columns:
+        df['volume'] = df['quote_volume']
+    else:
+        st.error("缺少成交量字段：volume / vol / tick_volume / quote_volume")
+        st.write(df.columns.tolist())
         st.stop()
 
-st.success(f"数据行数: {len(df)}")
+    return df
 
-# ====== 参数 ======
-rr = st.slider("盈亏比", 1.0, 4.0, 2.0, 0.5)
-vol_mult = st.slider("放量倍数", 1.0, 3.0, 1.5, 0.1)
-fee_rate = st.slider("单边手续费 (%)", 0.0, 0.1, 0.04) / 100
-atr_mult = st.slider("ATR止损倍数", 1.0, 3.0, 1.5, 0.1)
+df = load_data(file)
+st.success(f"数据：{len(df)} 行")
 
-# ====== ATR ======
-df['tr'] = np.maximum(
-    df['high'] - df['low'],
-    np.maximum(
-        abs(df['high'] - df['close'].shift()),
-        abs(df['low'] - df['close'].shift())
-    )
-)
-df['atr'] = df['tr'].rolling(14).mean()
+# 必须字段
+for c in ['open','high','low','close','volume']:
+    if c not in df.columns:
+        st.error(f"缺少字段: {c}")
+        st.stop()
 
-# ====== 放量 ======
-df['vol_ma20'] = df['volume'].rolling(20).mean()
+# ======================
+# 特征：K线突破 + 放量
+# ======================
+def build(df):
+    df = df.copy()
 
-trades = []
-equity = [0]
+    # 单K线突破：当前收盘 > 前一根高点
+    df['break_high'] = df['close'] > df['high'].shift(1)
 
-for i in range(200, len(df)-1):
+    # 放量：当前量 > 最近20均量 * 倍数
+    df['vol_ma20'] = df['volume'].rolling(20).mean()
+    df['vol_spike'] = df['volume'] > df['vol_ma20'] * 1.5
 
-    prev = df.iloc[i-1]
-    curr = df.iloc[i]
+    # 多头信号
+    df['signal'] = (df['break_high'] & df['vol_spike']).astype(int)
 
-    # ====== 多头突破 ======
-    breakout_long = curr['high'] > prev['high']
-    vol_ok = curr['volume'] > curr['vol_ma20'] * vol_mult
+    df.dropna(inplace=True)
+    return df
 
-    if breakout_long and vol_ok:
+df = build(df)
+st.write("特征完成")
 
-        entry = df.iloc[i+1]['open']
-        stop = entry - curr['atr'] * atr_mult
-        risk = entry - stop
-        target = entry + risk * rr
+# ======================
+# 分割
+# ======================
+n = len(df)
+train = df.iloc[:int(n*0.6)]
+test = df.iloc[int(n*0.6):]
 
-        for j in range(i+1, len(df)):
+# ======================
+# 回测
+# ======================
+def backtest(df):
+    equity = [0]
+    trades = []
 
-            future = df.iloc[j]
+    position = 0
+    entry = 0
 
-            if future['low'] <= stop:
-                pnl = stop - entry
-                pnl -= entry * fee_rate * 2
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                break
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i-1]
+        price = row['open']
 
-            if future['high'] >= target:
-                pnl = target - entry
-                pnl -= entry * fee_rate * 2
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                break
+        # 平仓条件：跌破均线或信号消失
+        if position == 1 and (row['close'] < row['close'].rolling(20).mean().iloc[i] or prev['signal'] == 0):
+            pnl = price - entry
+            trades.append(pnl)
+            equity.append(equity[-1] + pnl)
+            position = 0
 
-    # ====== 空头突破 ======
-    breakout_short = curr['low'] < prev['low']
+        # 开仓：前一根突破+放量
+        if prev['signal'] == 1 and position == 0:
+            entry = price
+            position = 1
 
-    if breakout_short and vol_ok:
+        equity.append(equity[-1])
 
-        entry = df.iloc[i+1]['open']
-        stop = entry + curr['atr'] * atr_mult
-        risk = stop - entry
-        target = entry - risk * rr
+    return {
+        "trades": len(trades),
+        "win_rate": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
+        "total": sum(trades),
+        "equity": equity
+    }
 
-        for j in range(i+1, len(df)):
+res = backtest(test)
 
-            future = df.iloc[j]
+# ======================
+# 输出
+# ======================
+st.header("回测")
+st.metric("交易次数", res['trades'])
+st.metric("胜率", f"{res['win_rate']*100:.2f}%")
+st.metric("盈利", f"{res['total']:.2f}")
 
-            if future['high'] >= stop:
-                pnl = entry - stop
-                pnl -= entry * fee_rate * 2
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                break
+if res['trades'] > 0:
+    st.line_chart(pd.Series(res['equity']))
 
-            if future['low'] <= target:
-                pnl = entry - target
-                pnl -= entry * fee_rate * 2
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
-                break
-
-if len(trades) == 0:
-    st.warning("无交易")
-    st.stop()
-
-win_rate = sum(1 for t in trades if t > 0) / len(trades)
-profit = sum(trades)
-
-st.header("回测结果")
-st.metric("交易次数", len(trades))
-st.metric("胜率", f"{win_rate*100:.2f}%")
-st.metric("总盈利", f"{profit:.2f}")
-
-st.line_chart(pd.Series(equity))
-
-st.subheader("统计")
-st.write("平均盈利:", np.mean(trades))
-st.write("最大盈利:", np.max(trades))
-st.write("最大亏损:", np.min(trades))
+st.success("完成")
