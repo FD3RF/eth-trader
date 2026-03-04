@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-强化滚动验证（更大样本）
-纯K结构
+纸交易模拟版（纯K）
+用于实盘验证，不下单
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="强化滚动验证", layout="wide")
-st.title("🚀 强化滚动验证（更大样本）")
+st.set_page_config(page_title="纸交易模拟", layout="wide")
+st.title("🚀 纸交易模拟（实盘验证）")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
@@ -26,9 +26,9 @@ df['volume'] = df['vol']
 
 st.write(f"数据行: {len(df)}")
 
-# ================================
+# =========================
 # 纯K特征
-# ================================
+# =========================
 def build_features(df):
     df = df.copy()
     lookback = 20
@@ -45,18 +45,17 @@ def build_features(df):
 
 df = build_features(df)
 
-# ================================
-# 回测函数
-# ================================
-def backtest(df):
-    equity = [0]
-    trades = []
+# =========================
+# 模拟交易记录
+# =========================
+records = []
+
+def simulate(df):
     position = 0
     entry = 0
-
+    hold = 0
     rr = 2.5
     min_hold = 3
-    hold = 0
 
     for i in range(1, len(df)):
         row = df.iloc[i]
@@ -84,18 +83,15 @@ def backtest(df):
             take = entry + (entry - stop) * rr
 
             if low <= stop:
-                trades.append(stop - entry)
-                equity.append(equity[-1] + (stop - entry))
+                records.append({"pnl": stop - entry})
                 position = 0
 
             elif high >= take:
-                trades.append(take - entry)
-                equity.append(equity[-1] + (take - entry))
+                records.append({"pnl": take - entry})
                 position = 0
 
             elif hold >= min_hold and signal == -1:
-                trades.append(price - entry)
-                equity.append(equity[-1] + (price - entry))
+                records.append({"pnl": price - entry})
                 position = 0
 
         # 平空
@@ -104,18 +100,15 @@ def backtest(df):
             take = entry - (stop - entry) * rr
 
             if high >= stop:
-                trades.append(entry - stop)
-                equity.append(equity[-1] + (entry - stop))
+                records.append({"pnl": entry - stop})
                 position = 0
 
             elif low <= take:
-                trades.append(entry - take)
-                equity.append(equity[-1] + (entry - take))
+                records.append({"pnl": entry - take})
                 position = 0
 
             elif hold >= min_hold and signal == 1:
-                trades.append(entry - price)
-                equity.append(equity[-1] + (entry - price))
+                records.append({"pnl": entry - price})
                 position = 0
 
         # 开仓
@@ -127,51 +120,32 @@ def backtest(df):
                 entry = price
                 position = -1
 
-        equity.append(equity[-1])
+    return records
 
-    return trades, equity
+# =========================
+# 执行模拟
+# =========================
+records = simulate(df)
 
-# ================================
-# 强滚动验证
-# ================================
-n = len(df)
-
-# 滚动块：20%
-fold = int(n * 0.2)
-results = []
-
-# 更多区段
-for i in range(0, n - fold, fold):
-    test = df.iloc[i:i+fold]
-    trades, equity = backtest(test)
-
-    if trades:
-        results.append({
-            "start": i,
-            "end": i+fold,
-            "trades": len(trades),
-            "win_rate": sum(1 for p in trades if p > 0) / len(trades),
-            "total": sum(trades),
-            "avg": np.mean(trades),
-            "max_loss": min(trades),
-            "max_profit": max(trades)
-        })
-
-# ================================
+# =========================
 # 统计
-# ================================
-st.header("滚动验证结果")
+# =========================
+st.header("模拟结果")
 
-if results:
-    df_res = pd.DataFrame(results)
-    st.write(df_res)
+if records:
+    df_rec = pd.DataFrame(records)
+    st.write(df_rec)
 
-    st.write("区段数量:", len(results))
-    st.write("平均胜率:", df_res['win_rate'].mean())
-    st.write("平均单笔:", df_res['avg'].mean())
-    st.write("胜率波动:", df_res['win_rate'].std())
-    st.write("单笔波动:", df_res['avg'].std())
+    st.metric("交易数", len(df_rec))
+    st.metric("胜率", f"{(df_rec['pnl'] > 0).mean() * 100:.2f}%")
+    st.metric("总盈利", df_rec['pnl'].sum())
+    st.metric("平均单笔", df_rec['pnl'].mean())
+    st.metric("最大盈利", df_rec['pnl'].max())
+    st.metric("最大亏损", df_rec['pnl'].min())
 
-    st.success("验证完成")
+    st.line_chart(df_rec['pnl'].cumsum())
+
 else:
-    st.write("无结果")
+    st.write("无交易记录")
+
+st.success("模拟完成（纸交易）")
