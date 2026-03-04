@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-纸交易模拟（优化版，无matplotlib依赖）
+纸交易模拟（优化版）
 功能：
 - 支持手续费与滑点模拟
 - 计算最大回撤、夏普比率等风控指标
 - 可选样本外测试（训练/测试集划分）
 - 权益曲线与回撤可视化（纯Streamlit实现）
+- 适配 CSV 文件列名：ts, open, high, low, close, vol
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy import stats
 
 st.set_page_config(page_title="纸交易模拟(优化版)", layout="wide")
 st.title("📈 纸交易模拟（优化版：手续费+回撤+样本外）")
@@ -41,14 +41,19 @@ if uploaded_file is None:
     st.stop()
 
 df = pd.read_csv(uploaded_file)
+# 统一列名为小写
 df.columns = [c.lower() for c in df.columns]
 
-# 统一列名（假设可能包含 'vol' 或 'volume'）
+# 处理时间戳列：如果存在 'ts' 列，转换为 datetime 并设为索引（可选，但不影响模拟）
+if 'ts' in df.columns:
+    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+    df.set_index('datetime', inplace=True)
+    df.drop('ts', axis=1, inplace=True)
+
+# 统一成交量列名：如果存在 'vol' 则改为 'volume'
 if 'vol' in df.columns:
     df['volume'] = df['vol']
-elif 'volume' not in df.columns:
-    st.error("数据中缺少成交量列（需要 'vol' 或 'volume'）")
-    st.stop()
+    df.drop('vol', axis=1, inplace=True)
 
 required_cols = ['open', 'high', 'low', 'close', 'volume']
 if not all(col in df.columns for col in required_cols):
@@ -257,7 +262,10 @@ def compute_stats(records, equity_series, name="策略"):
     stats_dict[f"{name}_最大盈利"] = records['pnl'].max()
     stats_dict[f"{name}_最大亏损"] = records['pnl'].min()
     stats_dict[f"{name}_胜率"] = (records['pnl'] > 0).mean() * 100
-    stats_dict[f"{name}_盈亏比"] = records[records['pnl'] > 0]['pnl'].mean() / abs(records[records['pnl'] < 0]['pnl'].mean()) if len(records[records['pnl'] < 0]) > 0 else np.inf
+    # 盈亏比（平均盈利/平均亏损）
+    avg_win = records[records['pnl'] > 0]['pnl'].mean()
+    avg_loss = records[records['pnl'] < 0]['pnl'].mean()
+    stats_dict[f"{name}_盈亏比"] = avg_win / abs(avg_loss) if avg_loss != 0 else np.inf
 
     # 连续亏损
     losses = (records['pnl'] < 0).astype(int)
