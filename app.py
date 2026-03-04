@@ -1,4 +1,4 @@
-# kline_strategy_local.py
+# kline_strategy_local_complete.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,36 +8,77 @@ from plotly.subplots import make_subplots
 # 页面配置
 st.set_page_config(layout="wide", page_title="纯K线策略回测（本地数据）")
 
-st.title("📈 纯K线形态策略回测（本地CSV数据）")
-st.markdown("本工具使用本地CSV文件进行K线吞没形态策略回测。")
+st.title("📈 纯K线形态策略回测（本地CSV文件）")
+st.markdown("上传您的K线CSV文件，回测基于吞没形态的简单策略。")
 
-# ---------- 数据加载（支持上传或默认文件）----------
+# ---------- 数据加载函数 ----------
 @st.cache_data
-def load_data_from_csv(uploaded_file=None):
-    """从上传的CSV或默认文件加载数据"""
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-    else:
-        # 尝试读取默认文件（请将你的CSV文件放在同目录下）
-        try:
-            df = pd.read_csv("Okex_ETHBTC_d.csv")
-        except FileNotFoundError:
-            st.warning("未找到默认CSV文件，请上传文件。")
-            return pd.DataFrame()
-    
-    # 统一列名（假设CSV包含: timestamp, open, high, low, close, volume）
-    # 如果列名不同，请根据实际情况修改
-    expected_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in expected_cols):
-        st.error(f"CSV文件必须包含列: {expected_cols}")
+def load_data_from_csv(uploaded_file):
+    """
+    从上传的CSV文件加载数据，尝试自动映射常见列名到标准列名。
+    期望最终列名：timestamp, open, high, low, close, volume
+    """
+    if uploaded_file is None:
         return pd.DataFrame()
-    
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"读取CSV文件失败: {e}")
+        return pd.DataFrame()
+
+    # 常见列名映射（可根据需要扩展）
+    column_mapping = {
+        'timestamp': ['timestamp', 'date', '时间', 'datetime', '日期'],
+        'open': ['open', '开盘', '开盘价'],
+        'high': ['high', '最高', '最高价'],
+        'low': ['low', '最低', '最低价'],
+        'close': ['close', '收盘', '收盘价'],
+        'volume': ['volume', '成交量', '成交额', 'vol']
+    }
+
+    # 将现有列名统一为标准列名
+    new_columns = {}
+    for std_name, possible_names in column_mapping.items():
+        for col in df.columns:
+            if col.lower() in [p.lower() for p in possible_names]:
+                new_columns[col] = std_name
+                break
+
+    if len(new_columns) < 6:
+        st.error("无法识别必要的列（timestamp, open, high, low, close, volume）。请确保列名包含这些字段的常见名称。")
+        st.write("当前文件列名：", list(df.columns))
+        return pd.DataFrame()
+
+    df.rename(columns=new_columns, inplace=True)
+
+    # 只保留需要的列
+    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
+    # 转换时间戳
+    try:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    except Exception as e:
+        st.error(f"时间戳列转换失败: {e}")
+        return pd.DataFrame()
+
     df.set_index('timestamp', inplace=True)
+    # 确保数值列为浮点型
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.dropna(inplace=True)  # 删除无效行
+
     return df
 
 # ---------- 形态识别函数 ----------
 def detect_bullish_engulfing(df, body_ratio=1.0):
+    """
+    看涨吞没：
+    1. 前一根为阴线 (close < open)
+    2. 当前为阳线 (close > open)
+    3. 当前阳线实体完全吞没前一根阴线实体 (open < prev_close 且 close > prev_open)
+    可选实体比例要求：当前实体 >= 前实体 * body_ratio
+    """
     prev_close = df['close'].shift(1)
     prev_open = df['open'].shift(1)
     prev_body = abs(prev_close - prev_open)
@@ -51,6 +92,12 @@ def detect_bullish_engulfing(df, body_ratio=1.0):
     return prev_is_bear & curr_is_bull & engulf & body_cond
 
 def detect_bearish_engulfing(df, body_ratio=1.0):
+    """
+    看跌吞没：
+    1. 前一根为阳线
+    2. 当前为阴线
+    3. 当前阴线实体完全吞没前一根阳线实体 (open > prev_close 且 close < prev_open)
+    """
     prev_close = df['close'].shift(1)
     prev_open = df['open'].shift(1)
     prev_body = abs(prev_close - prev_open)
@@ -63,13 +110,20 @@ def detect_bearish_engulfing(df, body_ratio=1.0):
 
     return prev_is_bull & curr_is_bear & engulf & body_cond
 
-# ---------- 简化回测（只做多）----------
+# ---------- 回测函数（只做多）----------
 def backtest(df, long_signals, short_signals, initial_capital=10000, commission=0.001):
+    """
+    简化回测：
+    - 出现 long_signals 时全仓买入（开多）
+    - 出现 short_signals 时平多
+    - 手续费双边扣除
+    """
     df = df.copy()
     df['signal'] = 0
     df.loc[long_signals, 'signal'] = 1
     df.loc[short_signals, 'signal'] = -1
 
+    # 生成持仓序列
     df['position'] = 0
     in_position = False
     for i in range(len(df)):
@@ -82,9 +136,11 @@ def backtest(df, long_signals, short_signals, initial_capital=10000, commission=
         else:
             df.iloc[i, df.columns.get_loc('position')] = 1 if in_position else 0
 
+    # 计算策略收益率
     df['returns'] = df['close'].pct_change()
     df['strategy_returns'] = df['position'].shift(1) * df['returns']
 
+    # 扣除手续费（信号变化时）
     trades = df['signal'].diff().fillna(0) != 0
     df.loc[trades, 'strategy_returns'] -= commission
 
@@ -93,11 +149,10 @@ def backtest(df, long_signals, short_signals, initial_capital=10000, commission=
 
     return df
 
-# ---------- 侧边栏 ----------
+# ---------- 侧边栏参数 ----------
 with st.sidebar:
     st.header("⚙️ 参数设置")
     
-    # 文件上传
     uploaded_file = st.file_uploader("上传CSV文件", type=['csv'])
     
     st.subheader("📐 吞没形态参数")
@@ -113,6 +168,10 @@ with st.sidebar:
 
 # ---------- 主逻辑 ----------
 if run_button:
+    if uploaded_file is None:
+        st.warning("请先上传CSV文件。")
+        st.stop()
+
     with st.spinner("加载数据并回测中..."):
         df = load_data_from_csv(uploaded_file)
         if df.empty:
@@ -130,11 +189,11 @@ if run_button:
         # 回测
         result_df = backtest(df, long_signal, short_signal, initial_capital, commission)
 
-        # 绩效指标
+        # 计算绩效指标
         total_return = (result_df['equity'].iloc[-1] / initial_capital - 1) * 100
 
-        # 粗略年化（假设日线数据）
-        periods_per_year = 252  # 如果是日线，用252；若数据周期不同，可手动调整
+        # 粗略年化（假设为日线，如果是其他周期请手动调整）
+        periods_per_year = 252  # 默认按日线计算夏普比率
         strategy_returns = result_df['strategy_returns']
         sharpe = np.sqrt(periods_per_year) * strategy_returns.mean() / strategy_returns.std() if strategy_returns.std() != 0 else 0
         max_drawdown = (result_df['equity'] / result_df['equity'].cummax() - 1).min()
@@ -151,6 +210,7 @@ if run_button:
             subplot_titles=("K线图与信号", "持仓状态", "权益曲线")
         )
 
+        # K线图
         fig.add_trace(go.Candlestick(
             x=result_df.index,
             open=result_df['open'],
@@ -161,6 +221,7 @@ if run_button:
             showlegend=False
         ), row=1, col=1)
 
+        # 买入信号
         buy_points = result_df[long_signal]
         if not buy_points.empty:
             fig.add_trace(go.Scatter(
@@ -171,6 +232,7 @@ if run_button:
                 name='看涨吞没 (开多)'
             ), row=1, col=1)
 
+        # 卖出信号
         sell_points = result_df[short_signal]
         if not sell_points.empty:
             fig.add_trace(go.Scatter(
@@ -181,6 +243,7 @@ if run_button:
                 name='看跌吞没 (平多)'
             ), row=1, col=1)
 
+        # 持仓状态
         fig.add_trace(go.Scatter(
             x=result_df.index,
             y=result_df['position'],
@@ -190,6 +253,7 @@ if run_button:
         ), row=2, col=1)
         fig.update_yaxes(title_text="持仓", row=2, col=1, tickvals=[0, 1], ticktext=["空仓", "持仓"])
 
+        # 权益曲线
         fig.add_trace(go.Scatter(
             x=result_df.index,
             y=result_df['equity'],
@@ -220,7 +284,7 @@ else:
     st.info("👈 请上传CSV文件并设置参数后点击『运行回测』")
     st.markdown("""
     ### 📖 使用说明
-    1. **上传CSV文件**：文件需包含列：`timestamp`, `open`, `high`, `low`, `close`, `volume`。
+    1. **上传CSV文件**：文件需包含K线数据，常见列名（如 open, high, low, close, volume, timestamp/date）会被自动识别。
     2. **策略逻辑**：
        - 看涨吞没 → 开多
        - 看跌吞没 → 平多（暂不做空）
