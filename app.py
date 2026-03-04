@@ -1,23 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-终极纯K：价格行为 + 结构突破
-不加指标
+滚动验证（walk-forward）
+纯K结构
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="终极纯K", layout="wide")
-st.title("🚀 终极纯 K（价格行为）")
+st.set_page_config(page_title="滚动验证", layout="wide")
+st.title("🚀 滚动验证（Walk Forward）")
 
 file = st.file_uploader("上传 CSV", type=["csv"])
 if file is None:
     st.stop()
 
-# ================================
-# 加载
-# ================================
 df = pd.read_csv(file)
 df.columns = [c.lower() for c in df.columns]
 
@@ -30,46 +27,26 @@ df['volume'] = df['vol']
 st.write(f"数据行: {len(df)}")
 
 # ================================
-# 结构：前高/前低（关键）
+# 纯K特征
 # ================================
-lookback = 20
+def build_features(df):
+    df = df.copy()
+    lookback = 20
 
-df['high_max'] = df['high'].rolling(lookback).max().shift(1)
-df['low_min'] = df['low'].rolling(lookback).min().shift(1)
+    df['high_max'] = df['high'].rolling(lookback).max().shift(1)
+    df['low_min'] = df['low'].rolling(lookback).min().shift(1)
 
-# K线实体
-df['body'] = (df['close'] - df['open']).abs()
-df['range'] = df['high'] - df['low']
-df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
+    df['body'] = (df['close'] - df['open']).abs()
+    df['range'] = df['high'] - df['low']
+    df['body_ratio'] = df['body'] / (df['range'] + 1e-9)
 
-# 强实体（避免十字）
-strong_body = df['body_ratio'] > 0.35
+    df.dropna(inplace=True)
+    return df
 
-df.dropna(inplace=True)
-
-# ================================
-# 信号（纯价格）
-# ================================
-df['signal'] = 0
-
-# 多头：
-df.loc[
-    (df['close'] > df['high_max']) &
-    strong_body &
-    (df['close'] > df['open']),
-    'signal'
-] = 1
-
-# 空头：
-df.loc[
-    (df['close'] < df['low_min']) &
-    strong_body &
-    (df['close'] < df['open']),
-    'signal'
-] = -1
+df = build_features(df)
 
 # ================================
-# 回测（实盘逻辑）
+# 回测函数
 # ================================
 def backtest(df):
     equity = [0]
@@ -92,90 +69,102 @@ def backtest(df):
         else:
             hold = 0
 
-        # ===== 平多 =====
+        strong_body = row['body_ratio'] > 0.35
+
+        # 信号
+        signal = 0
+        if (row['close'] > row['high_max']) and strong_body and (row['close'] > row['open']):
+            signal = 1
+        elif (row['close'] < row['low_min']) and strong_body and (row['close'] < row['open']):
+            signal = -1
+
+        # 平多
         if position == 1:
             stop = entry - (row['range'] * 0.5)
             take = entry + (entry - stop) * rr
 
             if low <= stop:
-                pnl = stop - entry
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
+                trades.append(stop - entry)
+                equity.append(equity[-1] + (stop - entry))
                 position = 0
 
             elif high >= take:
-                pnl = take - entry
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
+                trades.append(take - entry)
+                equity.append(equity[-1] + (take - entry))
                 position = 0
 
-            # 防假突破：最低持仓
-            elif hold >= min_hold and row['signal'] == -1:
-                pnl = price - entry
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
+            elif hold >= min_hold and signal == -1:
+                trades.append(price - entry)
+                equity.append(equity[-1] + (price - entry))
                 position = 0
 
-        # ===== 平空 =====
+        # 平空
         if position == -1:
             stop = entry + (row['range'] * 0.5)
             take = entry - (stop - entry) * rr
 
             if high >= stop:
-                pnl = entry - stop
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
+                trades.append(entry - stop)
+                equity.append(equity[-1] + (entry - stop))
                 position = 0
 
             elif low <= take:
-                pnl = entry - take
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
+                trades.append(entry - take)
+                equity.append(equity[-1] + (entry - take))
                 position = 0
 
-            elif hold >= min_hold and row['signal'] == 1:
-                pnl = entry - price
-                trades.append(pnl)
-                equity.append(equity[-1] + pnl)
+            elif hold >= min_hold and signal == 1:
+                trades.append(entry - price)
+                equity.append(equity[-1] + (entry - price))
                 position = 0
 
-        # ===== 开仓 =====
+        # 开仓
         if position == 0:
-            if row['signal'] == 1:
+            if signal == 1:
                 entry = price
                 position = 1
-
-            elif row['signal'] == -1:
+            elif signal == -1:
                 entry = price
                 position = -1
 
         equity.append(equity[-1])
 
-    return {
-        "trades": len(trades),
-        "win_rate": sum(1 for p in trades if p > 0) / len(trades) if trades else 0,
-        "total": sum(trades),
-        "avg": np.mean(trades) if trades else 0,
-        "max_loss": min(trades) if trades else 0,
-        "max_profit": max(trades) if trades else 0,
-        "equity": equity
-    }
+    return trades, equity
+
+# ================================
+# 滚动验证
+# ================================
+n = len(df)
+fold = int(n * 0.2)
+
+results = []
+
+for i in range(0, n - fold, fold):
+    test = df.iloc[i:i+fold]
+    trades, equity = backtest(test)
+
+    if trades:
+        results.append({
+            "start": i,
+            "trades": len(trades),
+            "win_rate": sum(1 for p in trades if p > 0) / len(trades),
+            "total": sum(trades),
+            "avg": np.mean(trades)
+        })
 
 # ================================
 # 展示
 # ================================
-res = backtest(df)
+st.header("滚动验证结果")
 
-st.header("回测结果")
-st.metric("交易", res["trades"])
-st.metric("胜率", f"{res['win_rate']*100:.2f}%")
-st.metric("盈利", f"{res['total']:.2f}")
+if results:
+    df_res = pd.DataFrame(results)
+    st.write(df_res)
 
-st.write("平均单笔:", res["avg"])
-st.write("最大盈利:", res["max_profit"])
-st.write("最大亏损:", res["max_loss"])
+    st.write("平均胜率:", df_res['win_rate'].mean())
+    st.write("平均单笔:", df_res['avg'].mean())
+    st.write("总区段:", len(results))
+else:
+    st.write("无结果")
 
-if res["trades"] > 0:
-    st.line_chart(pd.Series(res["equity"]))
-
-st.success("运行完毕")
+st.success("验证完毕")
