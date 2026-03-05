@@ -1,33 +1,46 @@
 # ==========================================
-# 语音与战报
+# 语音与战报（对口诀与状态完全对齐）
 # ==========================================
 def build_report(curr, upper, lower):
+    """
+    根据当前价格与锚点生成战报与语音。
+    对口诀：
+    - 缩量回踩企稳 → 做多
+    - 放量下跌 → 空头占优
+    - 突破前高 → 多头总攻
+    - 跌破低点 → 空头突袭
+    """
     c = curr["c"]
 
+    # 多头突破
     if c > upper:
         return {
             "status": "🚀 多头总攻",
             "voice": "放量突破前高，多头总攻，考虑做多"
         }
 
+    # 空头跌破
     if c < lower:
         return {
             "status": "❄️ 空头突袭",
             "voice": "跌破低点，空头突袭，观望或反手"
         }
 
+    # 缩量回踩企稳（买入信号）
     if curr.get("buy_sig") is True:
         return {
             "status": "🟢 缩量回踩企稳",
             "voice": "缩量回踩低点不破，下影企稳，准备动手做多"
         }
 
+    # 放量下跌（卖出信号）
     if curr.get("sell_sig") is True:
         return {
             "status": "🔴 放量下跌",
             "voice": "放量下跌，空头占优，暂不做多"
         }
 
+    # 默认震荡
     return {
         "status": "💎 窄幅震荡",
         "voice": "窄幅震荡，无方向，等待缩量回踩"
@@ -36,8 +49,8 @@ def build_report(curr, upper, lower):
 
 def speak_voice(voice: str):
     """
-    浏览器 TTS：必须由用户交互触发。
-    Streamlit 按钮点击后执行。
+    浏览器 TTS（必须用户交互触发）。
+    Streamlit 按钮或状态变化触发。
     """
     js = f"""
     <script>
@@ -59,7 +72,7 @@ def speak_voice(voice: str):
 
 
 # ==========================================
-# 主界面：更新部分（稳定版）
+# 主界面更新（Series 对齐与语音稳定版）
 # ==========================================
 def update_dashboard():
     try:
@@ -69,7 +82,7 @@ def update_dashboard():
 
         df, anchors = apply_warrior_logic(df, params)
 
-        # —— 修复 Series 对齐错误：使用 .iloc 或 values ——
+        # 当前最新行（避免 Series 对齐错误）
         curr = df.iloc[-1]
 
         upper = float(anchors["upper"])
@@ -96,16 +109,15 @@ def update_dashboard():
         with voice_area.container():
             st.info(f"语音战报：{voice}")
 
-            # 手动播报按钮（用户触发）
+            # 手动播报按钮
             if st.button("🔊 手动播报语音"):
                 speak_voice(voice)
 
-            # 自动播报：仅在内容变化时触发（避免无限循环）
+            # 自动播报（内容变化触发一次）
             last = st.session_state.get("last_voice", "")
 
             if voice != last:
                 st.session_state.last_voice = voice
-                # 自动触发语音
                 speak_voice(voice)
 
         # 指标卡
@@ -117,7 +129,7 @@ def update_dashboard():
             c3.metric("多头锚点", f"${lower:.2f}")
             c4.metric("空头锚点", f"${upper:.2f}")
 
-        # 图表
+        # 图表（60根K线）
         with chart_area.container():
             df_p = df.tail(60)
 
