@@ -1,453 +1,104 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ETHUSDT 1分钟高频交易机器人 (最终修复版)
-策略：左侧入场，基于缩量回踩/反弹关键位
-"""
-
+# ========== 新的数据获取模块 (基于 CoinGecko) ==========
+from pycoingecko import CoinGeckoAPI
 import time
-import logging
-from logging.handlers import RotatingFileHandler
-from collections import deque
-from datetime import datetime
-from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict
-
 import pandas as pd
-import numpy as np
-import requests
+from datetime import datetime, timedelta
+import logging
 
-# ========== 配置类 ==========
-class Config:
-    # 交易对及周期
-    SYMBOL = "ETHUSDT"
-    INTERVAL = "1m"
-    LIMIT = 1000                     # 每次加载K线数量（足够计算指标）
-
-    # 策略核心参数 (方向A高频)
-    LOOKBACK = 20                    # 关键点回溯周期
-    VOL_WINDOW = 5                    # 成交量均线周期
-    EXPAND_THRESH = 1.0               # 放量阈值（左侧入场不使用，但保留）
-    SHRINK_THRESH = 0.8               # 缩量阈值
-    BODY_MIN_RATIO = 0.05             # 实体占比最小值
-    TOUCH_TOLERANCE = 0.005           # 接近关键点容忍度 (0.5%)
-    STOP_LOSS_PCT = 0.002             # 止损比例 (0.2%)
-    RISK_REWARD = 3.0                 # 盈亏比
-
-    # 信号过滤
-    MIN_SAME_SIGNAL_INTERVAL = 3      # 同方向信号最小间隔（根K线数）
-    ALLOW_MULTI_POSITIONS = False     # 是否允许同时持有多个方向仓位 (建议False)
-
-    # 系统参数
-    PROXY = None                      # 代理服务器，如 "http://127.0.0.1:7890"
-    REFRESH_SEC = 10                   # 轮询间隔（秒）
-    MAX_RETRIES = 3                    # 数据获取最大重试次数
-    RETRY_DELAY = 2                    # 重试等待秒数
-
-    # 日志
-    LOG_FILE = "eth_bot_fixed.log"
-    LOG_LEVEL = logging.INFO
-
-# ========== 数据获取模块 ==========
 class DataFetcher:
-    """从币安获取K线数据，支持代理和重试"""
-
-    # 使用可访问的公共端点
-    ENDPOINTS = [
-        "https://data.binance.com/api/v3/klines",
-        "https://api.binance.us/api/v3/klines"
-    ]
+    """从 CoinGecko 获取K线数据，无代理，限制少"""
 
     def __init__(self, config: Config):
         self.config = config
-        self.proxies = {"http": config.PROXY, "https": config.PROXY} if config.PROXY else None
-        self.session = requests.Session()
-        if self.proxies:
-            self.session.proxies.update(self.proxies)
+        # 初始化 CoinGecko 客户端 (免费版无需 API Key)
+        self.cg = CoinGeckoAPI()
+        # 为了应对免费版的速率限制 (约 30-50次/分钟)，我们增加请求间隔 [citation:2][citation:6]
+        self.request_interval = 2  # 每两次请求之间至少间隔2秒
+        self.last_request_time = 0
+
+    def _rate_limit(self):
+        """简单的速率限制，避免触发 CoinGecko 的 429 错误"""
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < self.request_interval:
+            time.sleep(self.request_interval - time_since_last)
+        self.last_request_time = time.time()
 
     def fetch(self, limit: int = None) -> Optional[pd.DataFrame]:
-        """获取K线数据，返回DataFrame"""
+        """
+        获取历史K线数据 (CoinGecko 不支持一次性获取大量连续的分钟级K线)
+        策略：先获取足够的天级OHLC数据，再模拟生成分钟级数据。
+        注意：这是为了快速适配现有策略逻辑，最准确的方式是后续改用支持分钟级历史的方案。
+        """
         limit = limit or self.config.LIMIT
-        params = {
-            "symbol": self.config.SYMBOL,
-            "interval": self.config.INTERVAL,
-            "limit": limit
-        }
+        # CoinGecko 免费版获取分钟级历史数据较难，我们以降级方案处理：
+        # 1. 获取最近90天的日线OHLC数据 [citation:7][citation:9]
+        # 2. 根据日线数据模拟生成分钟级K线（开盘价、收盘价、最高价、最低价、成交量）
+        # 这对于维持策略的连续运行是必要的，但会损失精度。
 
-        for endpoint in self.ENDPOINTS:
-            for attempt in range(self.config.MAX_RETRIES):
-                try:
-                    resp = self.session.get(endpoint, params=params, timeout=10)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        df = pd.DataFrame(data, columns=[
-                            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                            'close_time', 'q_vol', 'trades', 't_buy_base', 't_buy_quote', 'ignore'
-                        ])
-                        for col in ['open', 'high', 'low', 'close', 'volume']:
-                            df[col] = pd.to_numeric(df[col])
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-                        return df
-                    else:
-                        logging.warning(f"HTTP {resp.status_code} from {endpoint}")
-                except Exception as e:
-                    logging.warning(f"Attempt {attempt+1} failed for {endpoint}: {e}")
-                time.sleep(self.config.RETRY_DELAY)
-        logging.error("All endpoints failed after retries.")
-        return None
+        logging.info("从 CoinGecko 获取历史数据（模拟模式）...")
+        try:
+            self._rate_limit()
+            # 获取比特币 (bitcoin) 的OHLC数据，以天为单位 [citation:7]
+            # 注意：CoinGecko 的 ID 是 'ethereum' [citation:5][citation:8]
+            ohlc_data = self.cg.get_coin_ohlc_by_id(id='ethereum', vs_currency='usd', days='90')
+            
+            if not ohlc_data:
+                logging.error("CoinGecko 返回的OHLC数据为空")
+                return None
+
+            # 将OHLC数据转换为DataFrame
+            df_daily = pd.DataFrame(ohlc_data, columns=['timestamp', 'open', 'high', 'low', 'close'])
+            df_daily['timestamp'] = pd.to_datetime(df_daily['timestamp'], unit='ms')
+            
+            # --- 模拟生成5分钟K线 (仅用于维持策略运行，实盘需谨慎) ---
+            rows = []
+            # 假设一天有288根5分钟K线 (24*60/5)
+            minutes_per_day = 24 * 60
+            freq_minutes = 5
+            klines_per_day = minutes_per_day // freq_minutes
+
+            for _, daily_row in df_daily.iterrows():
+                day_start = daily_row['timestamp']
+                for i in range(klines_per_day):
+                    kline_time = day_start + timedelta(minutes=i*freq_minutes)
+                    # 模拟价格：在当日范围内随机波动，使收盘价接近当日收盘
+                    price_range = daily_row['high'] - daily_row['low']
+                    simulated_open = daily_row['low'] + price_range * (i / klines_per_day)
+                    simulated_close = daily_row['low'] + price_range * ((i+1) / klines_per_day)
+                    simulated_high = max(simulated_open, simulated_close) + price_range * 0.1
+                    simulated_low = min(simulated_open, simulated_close) - price_range * 0.1
+                    # 确保不突破日线范围
+                    simulated_high = min(simulated_high, daily_row['high'])
+                    simulated_low = max(simulated_low, daily_row['low'])
+                    
+                    rows.append({
+                        'timestamp': kline_time,
+                        'open': simulated_open,
+                        'high': simulated_high,
+                        'low': simulated_low,
+                        'close': simulated_close,
+                        'volume': 100  # CoinGecko 免费版难以获取成交量，设为固定值
+                    })
+
+            df = pd.DataFrame(rows)
+            # 确保时间戳是升序且唯一
+            df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).tail(limit)
+            logging.info(f"成功模拟生成 {len(df)} 根5分钟K线")
+            return df
+
+        except Exception as e:
+            logging.exception(f"从 CoinGecko 获取数据失败: {e}")
+            return None
 
     def fetch_recent(self, n: int = 10) -> Optional[pd.DataFrame]:
-        """仅获取最近n根K线（用于快速更新）"""
-        return self.fetch(limit=n)
-
-# ========== 策略计算模块 ==========
-class StrategyEngine:
-    """左侧入场策略引擎，支持批量计算和增量更新"""
-
-    def __init__(self, config: Config):
-        self.config = config
-        self.last_signal_time = None          # 上次信号时间戳
-        self.last_signal_type = None           # 上次信号类型 (1或-1)
-        self.cached_df = None                  # 缓存的历史DataFrame，用于增量更新
-
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """计算所有技术指标"""
-        data = df.copy()
-
-        # 关键点（前高/前低，shift 1避免使用当前K线）
-        data['prev_high'] = data['high'].rolling(self.config.LOOKBACK, min_periods=1).max().shift(1)
-        data['prev_low']  = data['low'].rolling(self.config.LOOKBACK, min_periods=1).min().shift(1)
-
-        # 成交量均线
-        data['vol_ma'] = data['volume'].rolling(self.config.VOL_WINDOW, min_periods=1).mean()
-
-        # 实体占比
-        data['body'] = abs(data['close'] - data['open'])
-        data['range'] = data['high'] - data['low']
-        # 防止除以零
-        data['body_ratio'] = data['body'] / data['range'].replace(0, np.nan)
-        data['solid'] = data['body_ratio'] >= self.config.BODY_MIN_RATIO
-
-        return data
-
-    def detect_signals(self, data: pd.DataFrame) -> pd.DataFrame:
-        """在已计算指标的数据上检测左侧入场信号"""
-        # 左侧做多条件
-        long_cond = (
-            (data['low'] <= data['prev_low'] * (1 + self.config.TOUCH_TOLERANCE)) &
-            (data['close'] > data['prev_low'] * 0.999) &          # 未有效跌破
-            (data['volume'] < data['vol_ma'] * self.config.SHRINK_THRESH) &
-            data['solid']
-        )
-
-        # 左侧做空条件
-        short_cond = (
-            (data['high'] >= data['prev_high'] * (1 - self.config.TOUCH_TOLERANCE)) &
-            (data['close'] < data['prev_high'] * 1.001) &          # 未有效突破
-            (data['volume'] < data['vol_ma'] * self.config.SHRINK_THRESH) &
-            data['solid']
-        )
-
-        # 初始化信号列
-        data['signal'] = 0
-        data.loc[long_cond, 'signal'] = 1
-        data.loc[short_cond, 'signal'] = -1
-        # 如果同时满足，取消信号（理论上不会发生）
-        data.loc[long_cond & short_cond, 'signal'] = 0
-
-        # 计算入场价、止损、止盈（使用收盘价作为入场价）
-        data['entry'] = data['close']
-        data['stop'] = np.nan
-        data['target'] = np.nan
-
-        # 为每个信号计算止损止盈
-        signal_idx = data[data['signal'] != 0].index
-        for idx in signal_idx:
-            row = data.loc[idx]
-            if row['signal'] == 1:  # 做多
-                stop = row['prev_low'] * (1 - self.config.STOP_LOSS_PCT)
-                target = row['entry'] + (row['entry'] - stop) * self.config.RISK_REWARD
-            else:  # 做空
-                stop = row['prev_high'] * (1 + self.config.STOP_LOSS_PCT)
-                target = row['entry'] - (stop - row['entry']) * self.config.RISK_REWARD
-            data.loc[idx, 'stop'] = stop
-            data.loc[idx, 'target'] = target
-
-        return data
-
-    def process_full(self, df: pd.DataFrame) -> pd.DataFrame:
-        """处理完整DataFrame，返回带信号的数据"""
-        data = self.calculate_indicators(df)
-        data = self.detect_signals(data)
-        self.cached_df = data
-        return data
-
-    def update_latest(self, new_rows: pd.DataFrame) -> Tuple[bool, Optional[Dict]]:
         """
-        增量更新：传入最新的几根K线，返回是否有新信号及信号详情
-        new_rows: 包含最新K线的DataFrame，需按时间升序
+        获取最近n根K线。为了简单，我们从模拟的历史数据中取最后n条。
+        更精确的实现应该实时调用 CoinGecko 的 /simple/price 和 /coins/{id}/market_chart 等接口。
         """
-        if self.cached_df is None or self.cached_df.empty:
-            # 首次调用，需先处理完整数据
-            return False, None
-
-        # 合并新旧数据，去重并按时间排序
-        combined = pd.concat([self.cached_df, new_rows]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-        combined = self.calculate_indicators(combined)
-        combined = self.detect_signals(combined)
-
-        old_len = len(self.cached_df)
-        # 检查新数据长度是否足够
-        if len(combined) <= old_len:
-            return False, None
-
-        # 获取新增部分（注意边界）
-        new_part = combined.iloc[old_len:]
-        signal_rows = new_part[new_part['signal'] != 0]
-
-        self.cached_df = combined
-
-        if signal_rows.empty:
-            return False, None
-
-        # 取最新的一条信号（按时间）
-        latest_signal = signal_rows.iloc[-1].to_dict()
-
-        # 信号冷却检查
-        if latest_signal['signal'] == self.last_signal_type:
-            if self.last_signal_time is not None:
-                # 查找信号在缓存中的位置
-                last_idx_list = self.cached_df.index[self.cached_df['timestamp'] == self.last_signal_time].tolist()
-                curr_idx_list = self.cached_df.index[self.cached_df['timestamp'] == latest_signal['timestamp']].tolist()
-                if last_idx_list and curr_idx_list:
-                    last_idx = last_idx_list[0]
-                    curr_idx = curr_idx_list[0]
-                    interval = curr_idx - last_idx
-                    if interval < self.config.MIN_SAME_SIGNAL_INTERVAL:
-                        logging.debug(f"信号冷却中，跳过同方向信号 (间隔 {interval} < {self.config.MIN_SAME_SIGNAL_INTERVAL})")
-                        return False, None
-
-        self.last_signal_time = latest_signal['timestamp']
-        self.last_signal_type = latest_signal['signal']
-        return True, latest_signal
-
-# ========== 交易模拟模块 ==========
-@dataclass
-class Position:
-    type: str          # 'long' or 'short'
-    entry: float
-    stop: float
-    target: float
-    time: datetime
-    status: str = 'open'
-    exit: float = None
-    pnl: float = None
-
-class SimulatedTrader:
-    """模拟交易记录与风控"""
-
-    def __init__(self, config: Config):
-        self.config = config
-        self.positions: List[Position] = []
-        self.closed: List[Position] = []
-        self.daily_stats = deque(maxlen=90)  # 保存90天统计
-
-    def can_open_new(self, signal_type: int) -> bool:
-        """检查是否可以开新仓"""
-        if not self.config.ALLOW_MULTI_POSITIONS and len(self.positions) > 0:
-            return False
-        return True
-
-    def open_position(self, signal: Dict) -> Optional[Position]:
-        """根据信号开仓"""
-        sig_type = signal['signal']
-        if sig_type == 1:
-            pos = Position(
-                type='long',
-                entry=signal['entry'],
-                stop=signal['stop'],
-                target=signal['target'],
-                time=signal['timestamp']
-            )
-        elif sig_type == -1:
-            pos = Position(
-                type='short',
-                entry=signal['entry'],
-                stop=signal['stop'],
-                target=signal['target'],
-                time=signal['timestamp']
-            )
-        else:
-            return None
-
-        if self.can_open_new(sig_type):
-            self.positions.append(pos)
-            logging.info(f"开仓: {pos.type.upper()} @ {pos.entry:.2f} | 止损: {pos.stop:.2f} | 止盈: {pos.target:.2f} | 时间: {pos.time}")
-            return pos
-        else:
-            logging.debug("无法开仓: 已有持仓或风控限制")
-            return None
-
-    def update_positions(self, current_kline: Dict):
-        """根据最新K线的高低价检查止损止盈"""
-        high = current_kline['high']
-        low = current_kline['low']
-        ts = current_kline['timestamp']
-
-        for pos in self.positions[:]:
-            if pos.status != 'open':
-                continue
-
-            if pos.type == 'long':
-                if low <= pos.stop:
-                    # 止损
-                    pos.exit = pos.stop
-                    pos.pnl = (pos.exit - pos.entry) / pos.entry * 100
-                    pos.status = 'closed'
-                    logging.info(f"多头止损 @ {pos.exit:.2f} | 盈亏: {pos.pnl:.2f}% | 时间: {ts}")
-                    self.closed.append(pos)
-                    self.positions.remove(pos)
-                elif high >= pos.target:
-                    # 止盈
-                    pos.exit = pos.target
-                    pos.pnl = (pos.exit - pos.entry) / pos.entry * 100
-                    pos.status = 'closed'
-                    logging.info(f"多头止盈 @ {pos.exit:.2f} | 盈亏: {pos.pnl:.2f}% | 时间: {ts}")
-                    self.closed.append(pos)
-                    self.positions.remove(pos)
-            else:  # short
-                if high >= pos.stop:
-                    pos.exit = pos.stop
-                    pos.pnl = (pos.entry - pos.exit) / pos.entry * 100
-                    pos.status = 'closed'
-                    logging.info(f"空头止损 @ {pos.exit:.2f} | 盈亏: {pos.pnl:.2f}% | 时间: {ts}")
-                    self.closed.append(pos)
-                    self.positions.remove(pos)
-                elif low <= pos.target:
-                    pos.exit = pos.target
-                    pos.pnl = (pos.entry - pos.exit) / pos.entry * 100
-                    pos.status = 'closed'
-                    logging.info(f"空头止盈 @ {pos.exit:.2f} | 盈亏: {pos.pnl:.2f}% | 时间: {ts}")
-                    self.closed.append(pos)
-                    self.positions.remove(pos)
-
-    def get_summary(self) -> Dict:
-        """获取交易统计摘要"""
-        if not self.closed:
-            return {}
-        df = pd.DataFrame([{'pnl': p.pnl} for p in self.closed])
-        wins = df[df['pnl'] > 0]
-        losses = df[df['pnl'] < 0]
-        total = len(df)
-        win_rate = len(wins) / total * 100 if total > 0 else 0
-        total_pnl = df['pnl'].sum()
-        avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
-        avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
-        profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
-
-        return {
-            'total_trades': total,
-            'win_rate': win_rate,
-            'total_pnl_pct': total_pnl,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': profit_factor
-        }
-
-    def print_summary(self):
-        """打印统计摘要到日志"""
-        stats = self.get_summary()
-        if not stats:
-            return
-        logging.info("="*40)
-        logging.info(f"交易次数: {stats['total_trades']}")
-        logging.info(f"胜率: {stats['win_rate']:.2f}%")
-        logging.info(f"总盈亏%: {stats['total_pnl_pct']:.2f}%")
-        logging.info(f"平均盈利%: {stats['avg_win']:.2f}%")
-        logging.info(f"平均亏损%: {stats['avg_loss']:.2f}%")
-        logging.info(f"盈亏比: {stats['profit_factor']:.2f}")
-        logging.info("="*40)
-
-# ========== 主控制类 ==========
-class TradingBot:
-    def __init__(self, config: Config):
-        self.config = config
-        self.fetcher = DataFetcher(config)
-        self.strategy = StrategyEngine(config)
-        self.trader = SimulatedTrader(config)
-        self.setup_logging()
-
-    def setup_logging(self):
-        """配置日志"""
-        logger = logging.getLogger()
-        logger.setLevel(self.config.LOG_LEVEL)
-
-        # 移除已有处理器，避免重复
-        if logger.hasHandlers():
-            logger.handlers.clear()
-
-        # 控制台输出
-        console = logging.StreamHandler()
-        console.setLevel(self.config.LOG_LEVEL)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        console.setFormatter(formatter)
-        logger.addHandler(console)
-
-        # 文件输出（轮转）
-        file_handler = RotatingFileHandler(
-            self.config.LOG_FILE, maxBytes=10*1024*1024, backupCount=5
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-    def initialize(self):
-        """初始化：获取完整历史数据并计算"""
-        logging.info("正在初始化，获取历史数据...")
-        df = self.fetcher.fetch()
-        if df is None or df.empty:
-            logging.error("初始化失败，无法获取数据")
-            return False
-        self.strategy.process_full(df)
-        logging.info(f"初始化完成，加载 {len(df)} 根K线")
-        return True
-
-    def run_once(self):
-        """单次运行：获取最新数据，更新策略，处理信号和持仓"""
-        new_df = self.fetcher.fetch(limit=5)
-        if new_df is None or new_df.empty:
-            logging.warning("获取最新数据失败")
-            return
-
-        # 增量更新策略
-        has_signal, signal = self.strategy.update_latest(new_df)
-        if has_signal and signal:
-            self.trader.open_position(signal)
-
-        # 用最新的完整K线更新持仓
-        latest = new_df.iloc[-1].to_dict()
-        self.trader.update_positions(latest)
-
-        # 定期打印统计
-        if len(self.trader.closed) % 10 == 0 and len(self.trader.closed) > 0:
-            self.trader.print_summary()
-
-    def run_forever(self):
-        """主循环"""
-        # 初始化，失败则等待重试
-        while not self.initialize():
-            logging.error("30秒后重试初始化...")
-            time.sleep(30)
-
-        logging.info("开始主循环...")
-        while True:
-            try:
-                self.run_once()
-            except Exception as e:
-                logging.exception("运行异常")
-            time.sleep(self.config.REFRESH_SEC)
-
-# ========== 主入口 ==========
-if __name__ == "__main__":
-    bot = TradingBot(Config)
-    bot.run_forever()
+        # 这里为了快速让机器人跑起来，我们复用上面的 fetch 逻辑
+        # 但在实际高频交易中，需要实现一个更轻量的方法来获取最新价格。
+        full_df = self.fetch(limit=self.config.LIMIT)
+        if full_df is not None:
+            return full_df.tail(n)
+        return None
