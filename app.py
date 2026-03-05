@@ -29,7 +29,7 @@ if "http_client" not in st.session_state:
     )
 
 # ==========================================
-# CSS（精细化 UI + 图表美化）
+# CSS（精细化 UI）
 # ==========================================
 st.markdown("""
 <style>
@@ -43,7 +43,6 @@ header {visibility:hidden;}
     max-width:100%;
 }
 
-/* 指标卡：现代化轻质感 */
 [data-testid="stMetric"]{
     background: linear-gradient(180deg, #111827 0%, #0f172a 100%);
     border: 1px solid #1f2937;
@@ -53,7 +52,6 @@ header {visibility:hidden;}
     box-shadow: 0 4px 12px rgba(0,0,0,0.25);
 }
 
-/* 状态卡：强调左边缘 */
 .status-card{
     background:#111827;
     border-radius:14px;
@@ -62,13 +60,11 @@ header {visibility:hidden;}
     box-shadow: 0 4px 12px rgba(0,0,0,0.25);
 }
 
-/* Plotly 过渡与圆角 */
 .js-plotly-plot{
     transition:opacity .2s ease;
     border-radius:14px;
 }
 
-/* 信息框美化 */
 div[data-testid="stAlert"] {
     border-radius: 12px;
 }
@@ -118,46 +114,41 @@ def fetch_data(symbol):
 
 
 # ==========================================
-# 策略核心（量价 + 缩量回踩）
+# 策略核心（缩量回踩）
 # ==========================================
 def apply_warrior_logic(df, p):
 
     df = df.copy().dropna().reset_index(drop=True)
 
-    # 均量与放量
     df["ma_v"] = df["v"].rolling(p["ma_len"], min_periods=1).mean()
     df["is_expand"] = df["v"] > df["ma_v"] * (p["expand_p"] / 100)
 
-    # 实体比率
     df["body_size"] = abs(df["c"] - df["o"])
     df["total_size"] = (df["h"] - df["l"]).replace(0, 1e-9)
     df["body_ratio"] = df["body_size"] / df["total_size"]
 
-    # 缩量回踩判定
+    # 缩量回踩
     df["is_shrink"] = df["v"] < df["ma_v"] * 0.8
     df["is_pinbar"] = (df["l"] < df["o"]) & (df["l"] < df["c"]) & ((df["c"] - df["l"]) > (df["h"] - df["c"]))
 
-    # 做多信号：缩量 + 企稳 + 下影
     df["buy_sig"] = (
         df["is_shrink"] &
         df["is_pinbar"] &
         (df["c"] > df["o"])
     )
 
-    # 做空信号：放量下跌
     df["sell_sig"] = (
         df["is_expand"] &
         (df["c"] < df["o"]) &
         (df["body_ratio"] > p["body_r"])
     )
 
-    # 锚点：30周期高低与放量节点
     window = df.tail(30)
     upper = window["h"].max()
     lower = window["l"].min()
 
     down = window[window["c"] < window["o"]]
-    up = window[window["c"] > window["o"]]
+    up = window[window["c"] > df["o"]]
 
     if not down.empty:
         upper = down.loc[down["v"].idxmax(), "h"]
@@ -169,32 +160,28 @@ def apply_warrior_logic(df, p):
 
 
 # ==========================================
-# 语音与战报（口诀对应）
+# 语音与战报
 # ==========================================
 def build_report(curr, upper, lower):
 
-    # 多头突破
     if curr["c"] > upper:
         return {
             "status": "🚀 多头总攻",
             "voice": "放量突破前高，多头总攻，考虑做多"
         }
 
-    # 空头跌破
     if curr["c"] < lower:
         return {
             "status": "❄️ 空头突袭",
             "voice": "跌破低点，空头突袭，观望或反手"
         }
 
-    # 缩量回踩企稳（口诀核心）
     if curr.get("buy_sig", False):
         return {
             "status": "🟢 缩量回踩企稳",
             "voice": "缩量回踩低点不破，下影企稳，准备动手做多"
         }
 
-    # 放量下跌
     if curr.get("sell_sig", False):
         return {
             "status": "🔴 放量下跌",
@@ -271,9 +258,29 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
-            # 语音战报
+            # 语音战报（TTS）
             with voice_area.container():
                 st.info(f"语音战报：{voice}")
+
+                # 浏览器 TTS
+                if "last_voice" not in st.session_state:
+                    st.session_state.last_voice = ""
+
+                if voice != st.session_state.last_voice:
+                    st.session_state.last_voice = voice
+
+                    st.components.v1.html(f"""
+                    <script>
+                    if ('speechSynthesis' in window) {{
+                        window.speechSynthesis.cancel();
+                        const msg = new SpeechSynthesisUtterance("{voice}");
+                        msg.lang = "zh-CN";
+                        msg.rate = 1.0;
+                        msg.pitch = 1.0;
+                        window.speechSynthesis.speak(msg);
+                    }}
+                    </script>
+                    """, height=0)
 
             # 指标卡
             with metric_area.container():
