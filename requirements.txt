@@ -1,6 +1,5 @@
 streamlit
+plotly
+httpx
 pandas
 numpy
-plotly
-requests
-streamlit-autorefresh
