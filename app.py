@@ -5,16 +5,17 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 import time
+import random
 
 # ------------------- 页面配置 -------------------
 st.set_page_config(
-    page_title="5分钟量价交易系统（最终版）",
+    page_title="5分钟量价交易系统（演示版）",
     page_icon="📊",
     layout="wide"
 )
 
-st.title("📈 5分钟合约全自动量价盯盘系统（最终优化版）")
-st.markdown("基于缩量/放量/横盘/突破口诀 + ATR动态风控 | 无外部指标库依赖")
+st.title("📈 5分钟合约全自动量价盯盘系统（演示版）")
+st.markdown("基于缩量/放量/横盘/突破口诀 + ATR动态风控 | 支持演示模式（无需交易所）")
 
 # ------------------- 初始化session_state -------------------
 if 'last_update' not in st.session_state:
@@ -26,14 +27,22 @@ if 'error_count' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 交易配置")
     
-    exchange_name = st.selectbox(
-        "选择交易所",
-        ["binance", "bybit", "okx", "bitget"],
-        index=1,  # 默认选 Bybit，避免 Binance 限制
-        help="如果 Binance 被限制，请使用 Bybit 或 OKX"
-    )
+    # 演示模式开关
+    demo_mode = st.checkbox("🎮 演示模式（使用模拟数据）", value=False,
+                            help="开启后无需连接交易所，使用本地生成的随机K线")
     
-    symbol = st.text_input("交易对", value="ETH/USDT")
+    if not demo_mode:
+        exchange_name = st.selectbox(
+            "选择交易所",
+            ["binance", "bybit", "okx", "bitget", "kucoin"],
+            index=1,
+            help="如果遇到地域屏蔽，请开启演示模式"
+        )
+        
+        symbol = st.text_input("交易对", value="ETH/USDT")
+    else:
+        exchange_name = "demo"
+        symbol = "DEMO/USDT"
     
     refresh_interval = st.slider(
         "自动刷新间隔（秒）", 
@@ -41,7 +50,7 @@ with st.sidebar:
         max_value=60, 
         value=10, 
         step=5,
-        help="每隔N秒重新获取数据"
+        help="每隔N秒重新生成数据"
     )
     
     st.markdown("---")
@@ -68,54 +77,48 @@ with st.sidebar:
     balance = st.number_input("账户余额 (U)", value=1000.0, step=100.0)
     risk_percent = st.slider("单笔风险 (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.1) / 100.0
 
-# ------------------- 初始化交易所（带友好错误提示） -------------------
+# ------------------- 初始化交易所（仅在非演示模式） -------------------
 @st.cache_resource
 def init_exchange(exchange_name):
     """初始化交易所客户端，并提供友好错误提示"""
     try:
         exchange_class = getattr(ccxt, exchange_name)
-        # 根据交易所调整参数
         params = {
             'enableRateLimit': True,
             'timeout': 30000,
         }
-        # 如果是币安，使用现货API（期货可能受限）
+        # 现货 vs 期货
         if exchange_name == 'binance':
-            params['options'] = {'defaultType': 'spot'}  # 改用现货
+            params['options'] = {'defaultType': 'spot'}  # 现货更稳定
         else:
-            params['options'] = {'defaultType': 'future'}  # 其他交易所用期货
+            params['options'] = {'defaultType': 'future'}
         
         exchange = exchange_class(params)
-        # 测试连接
-        exchange.fetch_time()
+        exchange.fetch_time()  # 测试连接
         return exchange
-    except ccxt.AuthenticationError:
-        st.error("🔑 API 密钥错误或需要认证（公开数据无需密钥）")
-    except ccxt.BadSymbol:
-        st.error(f"❌ 交易对 {symbol} 不存在，请检查格式（如 ETH/USDT, ETH-USDT）")
-    except ccxt.RequestTimeout:
-        st.error("⏱️ 连接超时，请检查网络")
     except Exception as e:
         error_msg = str(e).lower()
-        if "restricted location" in error_msg:
-            st.error("🌍 当前 IP 被 Binance 限制，请切换至 Bybit 或 OKX")
-            st.info("👉 在左侧边栏将交易所改为 bybit 或 okx")
+        if "restricted location" in error_msg or "cloudfront" in error_msg:
+            st.error("🌍 当前 IP 被交易所 CDN 屏蔽，请开启「演示模式」使用模拟数据")
         else:
             st.error(f"交易所初始化失败: {e}")
-    return None
+        return None
 
-exchange = init_exchange(exchange_name)
+exchange = None if demo_mode else init_exchange(exchange_name)
 
-# ------------------- 数据获取函数（带重试） -------------------
+# ------------------- 数据获取函数（真实或模拟） -------------------
 @st.cache_data(ttl=refresh_interval)
 def fetch_market_data(symbol, limit=100):
-    """获取K线数据，失败时返回None"""
+    """获取K线数据，演示模式返回模拟数据"""
+    if demo_mode:
+        return generate_demo_data(limit)
+    
     if exchange is None:
         return None
     try:
-        # 根据交易所调整交易对格式
+        # 调整交易对格式
         if exchange_name == 'okx' and '-' not in symbol:
-            symbol = symbol.replace('/', '-')  # OKX 需要 ETH-USDT 格式
+            symbol = symbol.replace('/', '-')
         klines = exchange.fetch_ohlcv(
             symbol=symbol, 
             timeframe='5m', 
@@ -137,12 +140,34 @@ def fetch_market_data(symbol, limit=100):
         st.session_state.error_count += 1
         st.error(f"数据获取失败 (尝试 {st.session_state.error_count}/3): {e}")
         if st.session_state.error_count >= 3:
-            st.warning("连续失败，请检查网络或交易所状态")
+            st.warning("连续失败，建议开启「演示模式」")
         return None
+
+def generate_demo_data(n_candles=100):
+    """生成模拟K线数据"""
+    np.random.seed(int(time.time()) % 1000)  # 每次刷新不同
+    base_price = 2000 + np.random.randn() * 50
+    closes = []
+    for i in range(n_candles):
+        change = np.random.randn() * 5
+        if i == 0:
+            closes.append(base_price)
+        else:
+            closes.append(closes[-1] + change)
+    
+    # 生成 OHLCV
+    dates = pd.date_range(end=datetime.now(), periods=n_candles, freq='5min')
+    df = pd.DataFrame(index=dates)
+    df['close'] = closes
+    df['open'] = df['close'].shift(1) + np.random.randn(n_candles) * 2
+    df['high'] = df[['open', 'close']].max(axis=1) + abs(np.random.randn(n_candles) * 3)
+    df['low'] = df[['open', 'close']].min(axis=1) - abs(np.random.randn(n_candles) * 3)
+    df['volume'] = np.abs(np.random.randn(n_candles) * 1000 + 5000)
+    df['timestamp'] = dates.astype(np.int64) // 10**6
+    return df
 
 # ------------------- 手动计算技术指标 -------------------
 def calculate_atr(df, period=14):
-    """手动计算平均真实波幅 ATR（使用SMA）"""
     high, low, close = df['high'], df['low'], df['close']
     df['tr'] = np.maximum(
         high - low,
@@ -155,7 +180,6 @@ def calculate_atr(df, period=14):
     return df
 
 def calculate_indicators(df):
-    """计算所有技术指标"""
     df = df.copy()
     df = calculate_atr(df, 14)
     df['ma_short'] = df['close'].rolling(5).mean()
@@ -163,9 +187,8 @@ def calculate_indicators(df):
     df['vol_ma'] = df['volume'].rolling(vol_window).mean()
     return df
 
-# ------------------- 状态识别函数 -------------------
+# ------------------- 状态识别函数（与之前相同） -------------------
 def detect_volume_state(df):
-    """识别成交量状态"""
     current_vol = df['volume'].iloc[-1]
     avg_vol = df['vol_ma'].iloc[-2] if len(df) > 1 and not pd.isna(df['vol_ma'].iloc[-2]) else current_vol
     if current_vol < avg_vol * 0.6:
@@ -179,7 +202,6 @@ def detect_volume_state(df):
         return "正常量"
 
 def detect_range_market(df, lookback=10, atr_multiplier=0.5):
-    """基于ATR识别横盘状态"""
     if len(df) < lookback:
         return "非横盘"
     recent = df.iloc[-lookback:]
@@ -202,14 +224,12 @@ def detect_range_market(df, lookback=10, atr_multiplier=0.5):
         return "非横盘"
 
 def get_key_levels(df, lookback=20):
-    """获取近期前高前低"""
     if len(df) < lookback:
         lookback = len(df)
     recent = df.iloc[-lookback:]
     return {'high': recent['high'].max(), 'low': recent['low'].min()}
 
 def detect_breakout(df, key_levels, use_close=False):
-    """识别突破"""
     current = df.iloc[-1]
     if use_close:
         price_for_high = current['close']
@@ -232,7 +252,6 @@ def detect_breakout(df, key_levels, use_close=False):
     return results
 
 def detect_volume_trap(df):
-    """识别放量滞涨/滞跌陷阱"""
     current = df.iloc[-1]
     body = abs(current['close'] - current['open'])
     atr = current['atr']
@@ -249,7 +268,6 @@ def detect_volume_trap(df):
     return None
 
 def detect_trend(df, lookback=30):
-    """基于斜率判断趋势"""
     if len(df) < lookback:
         lookback = len(df)
     close_prices = df['close'].values[-lookback:]
@@ -267,7 +285,6 @@ def detect_trend(df, lookback=30):
 
 # ------------------- 信号生成函数 -------------------
 def generate_signals(df, trend, range_state, trap_signal, breakout, vol_state):
-    """基于量价口诀生成交易信号"""
     long_reasons = []
     short_reasons = []
     score = 0
@@ -350,7 +367,7 @@ def generate_signals(df, trend, range_state, trap_signal, breakout, vol_state):
     full_reasons = reasons + warnings
     return final_signal, full_reasons, strength
 
-# ------------------- 仓位计算函数 -------------------
+# ------------------- 仓位计算 -------------------
 def calculate_position(entry, stop_loss, balance, risk_percent):
     risk_distance = abs(entry - stop_loss)
     if risk_distance <= 0:
@@ -364,6 +381,7 @@ chart_placeholder = st.empty()
 metrics_placeholder = st.empty()
 signal_placeholder = st.empty()
 
+# 获取数据
 df = fetch_market_data(symbol)
 
 if df is not None and len(df) > 20:
@@ -499,9 +517,9 @@ if df is not None and len(df) > 20:
             st.markdown(tip)
 
 else:
-    st.warning("数据不足，请检查交易所连接或稍后重试")
-    if exchange is None:
-        st.error("交易所初始化失败，请检查网络和交易所名称")
+    st.warning("数据不足，请检查连接或开启「演示模式」")
+    if exchange is None and not demo_mode:
+        st.error("交易所初始化失败，请尝试开启演示模式")
 
 st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
