@@ -3,3 +3,8 @@ plotly
 httpx
 pandas
 numpy
+streamlit
+httpx
+pandas
+numpy
+plotly
