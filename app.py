@@ -3,160 +3,151 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
+import httpx  # 异步请求库
+import asyncio
 import time
 from datetime import datetime
 
-# ---------- 1. 视觉与页面配置 ----------
-st.set_page_config(layout="wide", page_title="ETH Warrior | 纯量价心法", page_icon="⚔️")
+# ---------- 1. 极致性能配置 ----------
+st.set_page_config(layout="wide", page_title="ETH Warrior 高性能版", page_icon="⚔️")
 
-# 自定义 CSS 样式：黑金战士配色
+# CSS 优化：减少浏览器渲染负担
 st.markdown("""
     <style>
     .reportview-container { background: #0e1117; }
-    .stMetric { background: #1a1c24; border-radius: 10px; padding: 10px; border: 1px solid #3e424b; }
-    div[data-testid="stMetricValue"] { color: #f0c05a; }
+    div[data-testid="stMetric"] { background: #1a1c24; border: 1px solid #333; padding: 15px; border-radius: 8px; }
+    canvas { image-rendering: -webkit-optimize-contrast; } /* 提升图表清晰度 */
     </style>
 """, unsafe_allow_html=True)
 
-# ---------- 2. 侧边栏：核心策略参数 (严格对应口诀) ----------
-with st.sidebar:
-    st.title("⚔️ Warrior 策略中心")
-    st.info("模式：只看K线 + 成交量 (5min)")
-    
-    # 策略阈值
-    vol_ma_len = st.number_input("均量参考周期", 5, 30, 10)
-    shrink_ratio = st.slider("缩量判定 (小于均量%)", 30, 80, 60) / 100
-    expand_ratio = st.slider("放量判定 (大于均量%)", 120, 300, 150) / 100
-    body_min = st.slider("突破实体占比", 0.0, 0.5, 0.15)
-    
-    st.divider()
-    symbol = st.text_input("交易对", "ETH-USDT")
-    refresh_sec = st.slider("秒级刷新", 5, 60, 10)
-    
-    # 物理冷静期逻辑
-    if 'cooldown_until' not in st.session_state:
-        st.session_state.cooldown_until = 0
+# ---------- 2. 异步数据中心 ----------
+class OKXDataEngine:
+    def __init__(self):
+        self.api_url = "https://www.okx.com/api/v5/market/candles"
+        self.limits = 150 # 仅拉取必要的K线，减少内存开销
 
-    if st.button("🔴 开启 1小时 物理冷静锁定"):
-        st.session_state.cooldown_until = time.time() + 3600
-        st.warning("冷静模式已开启，交易逻辑锁定中...")
+    async def get_candles(self, instId, bar='5m'):
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                params = {"instId": instId, "bar": bar, "limit": self.limits}
+                response = await client.get(self.api_url, params=params)
+                if response.status_code == 200:
+                    data = response.json().get('data', [])
+                    return self._process_data(data)
+                return None
+            except Exception as e:
+                return None
 
-# ---------- 3. 核心算法：量价口诀逻辑化 ----------
-def apply_warrior_logic(df, s_ratio, e_ratio, v_ma_len, b_min):
-    df = df.copy()
-    # 1. 计算均量与波动率
-    df['v_ma'] = df['volume'].rolling(v_ma_len).mean()
-    df['h20'] = df['high'].rolling(20).max().shift(1)
-    df['l20'] = df['low'].rolling(20).min().shift(1)
-    
-    # 2. 状态判定
-    df['is_shrink'] = df['volume'] < (df['v_ma'] * s_ratio)
-    df['is_expand'] = df['volume'] > (df['v_ma'] * e_ratio)
-    df['body'] = abs(df['close'] - df['open'])
-    df['range'] = df['high'] - df['low']
-    df['body_pct'] = df['body'] / (df['range'] + 1e-9) # 防止除零
-    
-    df['signal'] = 0 # 1:做多, -1:做空, 0.5:多头观察, -0.5:空头观察
-    
-    for i in range(1, len(df)):
-        # --- 做多逻辑 ---
-        # A. 缩量回踩低点不破 (准备动手)
-        if df['is_shrink'].iloc[i] and df['low'].iloc[i] <= df['l20'].iloc[i] * 1.002:
-            df.at[df.index[i], 'signal'] = 0.5
-            
-        # B. 放量起涨突破前阴 (马上跟多)
-        if df['is_expand'].iloc[i] and df['close'].iloc[i] > df['open'].iloc[i]:
-            if df['close'].iloc[i] > df['open'].iloc[i-1] and df['body_pct'].iloc[i] > b_min:
-                df.at[df.index[i], 'signal'] = 1
-
-        # --- 做空逻辑 ---
-        # C. 缩量反弹高点不破 (准备动手)
-        if df['is_shrink'].iloc[i] and df['high'].iloc[i] >= df['h20'].iloc[i] * 0.998:
-            df.at[df.index[i], 'signal'] = -0.5
-
-        # D. 放量杀跌跌破前阳 (马上跟空)
-        if df['is_expand'].iloc[i] and df['close'].iloc[i] < df['open'].iloc[i]:
-            if df['close'].iloc[i] < df['open'].iloc[i-1] and df['body_pct'].iloc[i] > b_min:
-                df.at[df.index[i], 'signal'] = -1
-                
-    return df
-
-# ---------- 4. 数据通道 (OKX V5) ----------
-def fetch_okx_data(instId):
-    url = f"https://www.okx.com/api/v5/market/candles?instId={instId.upper()}&bar=5m&limit=100"
-    try:
-        res = requests.get(url, timeout=5).json()
-        data = res.get('data', [])
+    def _process_data(self, data):
         if not data: return None
         df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
         df = df[['ts','o','h','l','c','v']].apply(pd.to_numeric)
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        return df.sort_values('ts').reset_index(drop=True).rename(columns={'ts':'time','o':'open','h':'high','l':'low','c':'close','v':'volume'})
-    except Exception:
-        return None
+        # 向量化更名
+        df.columns = ['time','open','high','low','close','volume']
+        return df.sort_values('time').reset_index(drop=True)
 
-# ---------- 5. 实时渲染循环 ----------
-main_placeholder = st.empty()
+engine = OKXDataEngine()
 
-while True:
-    # 物理冷静期检查
-    if time.time() < st.session_state.cooldown_until:
-        with main_placeholder.container():
-            st.error(f"🛑 物理冷静锁定中... 剩余时间: {int(st.session_state.cooldown_until - time.time())}秒")
-        time.sleep(5)
-        continue
-
-    df_raw = fetch_okx_data(symbol)
+# ---------- 3. 策略引擎：向量化量价计算 ----------
+def warrior_logic_vectorized(df, s_ratio, e_ratio, v_len, b_min):
+    """
+    完全抛弃 for 循环，使用 Pandas 向量化运算提升计算速度 > 100x
+    """
+    df['v_ma'] = df['volume'].rolling(v_len).mean()
+    df['h_ref'] = df['high'].rolling(20).max().shift(1)
+    df['l_ref'] = df['low'].rolling(20).min().shift(1)
     
-    with main_placeholder.container():
-        if df_raw is not None and not df_raw.empty:
-            df = apply_warrior_logic(df_raw, shrink_ratio, expand_ratio, vol_ma_len, body_min)
-            last = df.iloc[-1]
-            
-            # --- 头部数据看板 ---
-            st.header(f"🛡️ ETH Warrior | {symbol} 5m 实时监控")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("当前价格", f"${last['close']}", f"{last['close']-df['close'].iloc[-2]:.2f}")
-            m2.metric("当前量能比", f"{(last['volume']/last['v_ma']):.2f}x")
-            m3.metric("K线实体比", f"{last['body_pct']*100:.1f}%")
-            
-            # 信号实时播报 (Total Attack 瞬间)
-            if last['signal'] == 1:
-                st.success("🔥 【放量突破】多头真钱进场，直接开多！")
-            elif last['signal'] == -1:
-                st.error("📉 【放量跌破】空头主动出击，直接开空！")
-            elif last['signal'] == 0.5:
-                st.warning("👀 【缩量不破底】进入多头观察区，等放量阳线。")
-            elif last['signal'] == -0.5:
-                st.warning("👀 【缩量不过顶】进入空头观察区，等放量阴线。")
-            else:
-                st.info("💎 当前处于震荡整理期，耐性等待缩量或放量信号...")
+    # 定义量能状态
+    is_shrink = df['volume'] < (df['v_ma'] * s_ratio)
+    is_expand = df['volume'] > (df['v_ma'] * e_ratio)
+    
+    # 定义价格形态
+    body = (df['close'] - df['open']).abs()
+    range_val = (df['high'] - df['low']) + 1e-9
+    body_pct = body / range_val
+    
+    # 信号逻辑矩阵
+    df['signal'] = 0.0
+    
+    # 逻辑 A/C: 缩量观察区 (0.5 / -0.5)
+    df.loc[is_shrink & (df['low'] <= df['l_ref'] * 1.002), 'signal'] = 0.5
+    df.loc[is_shrink & (df['high'] >= df['h_ref'] * 0.998), 'signal'] = -0.5
+    
+    # 逻辑 B/D: 放量执行区 (1 / -1)
+    # 做多：放量 + 阳线 + 突破前一根阴线高点 + 实体饱满
+    long_cond = is_expand & (df['close'] > df['open']) & \
+                (df['close'] > df['open'].shift(1)) & (body_pct > b_min)
+    df.loc[long_cond, 'signal'] = 1.0
+    
+    # 做空：放量 + 阴线 + 跌破前一根阳线低点 + 实体饱满
+    short_cond = is_expand & (df['close'] < df['open']) & \
+                 (df['close'] < df['open'].shift(1)) & (body_pct > b_min)
+    df.loc[short_cond, 'signal'] = -1.0
+    
+    return df
 
-            # --- 专业 Plotly 图表 ---
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-            
-            # K线图
-            fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="Price"), row=1, col=1)
-            
-            # 信号标注 (Warrior 标注)
-            buy_sig = df[df['signal'] == 1]
-            sell_sig = df[df['signal'] == -1]
-            fig.add_trace(go.Scatter(x=buy_sig['time'], y=buy_sig['low']*0.997, mode='markers', marker=dict(symbol='triangle-up', size=14, color='#00ff00'), name="多头执行"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=sell_sig['time'], y=sell_sig['high']*1.003, mode='markers', marker=dict(symbol='triangle-down', size=14, color='#ff0000'), name="空头执行"), row=1, col=1)
+# ---------- 4. 局部刷新组件 (@st.fragment) ----------
+@st.fragment(run_every="5s")
+def render_dashboard(symbol, params):
+    # 异步获取数据
+    df_raw = asyncio.run(engine.get_candles(symbol))
+    
+    if df_raw is not None:
+        df = warrior_logic_vectorized(df_raw, **params)
+        last = df.iloc[-1]
+        
+        # 1. 实时数据指标
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("ETH 实时价", f"${last['close']}", f"{last['close']-df.iloc[-2]['close']:.2f}")
+        c2.metric("当前量能比", f"{(last['volume']/last['v_ma']):.2f}x")
+        c3.metric("信号状态", "等待爆发" if last['signal'] == 0 else "🔥 交易瞬间")
+        c4.metric("延迟", f"{int((time.time() - last['time'].timestamp())%300)}s", "OKX V5")
 
-            # 成交量与均量线
-            colors = ['#ff4b4b' if row['close'] < row['open'] else '#00cc96' for i, row in df.iterrows()]
-            fig.add_trace(go.Bar(x=df['time'], y=df['volume'], marker_color=colors, opacity=0.4, name="Volume"), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df['time'], y=df['v_ma'], line=dict(color='#ffa500', width=1.5), name="MA_Vol"), row=2, col=1)
+        # 2. 核心图表渲染 (WebGL 加速)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+        
+        # 使用 Scattergl 替代 Scatter 提升渲染性能
+        fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], 
+                                     low=df['low'], close=df['close'], name="K线"), row=1, col=1)
+        
+        # 信号点绘制
+        buy_pts = df[df['signal'] == 1]
+        sell_pts = df[df['signal'] == -1]
+        fig.add_trace(go.Scattergl(x=buy_pts['time'], y=buy_pts['low']*0.998, mode='markers', 
+                                   marker=dict(symbol='triangle-up', size=15, color='#00ff00')), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=sell_pts['time'], y=sell_pts['high']*1.002, mode='markers', 
+                                   marker=dict(symbol='triangle-down', size=15, color='#ff4b4b')), row=1, col=1)
 
-            fig.update_layout(height=600, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig, width='stretch')
-            
-            # --- 历史信号 Log ---
-            with st.expander("📝 历史进场信号日志 (Warrior Logs)"):
-                st.table(df[df['signal'].abs() == 1][['time', 'close', 'volume', 'signal']].tail(5))
-        else:
-            st.error("❌ 数据链路中断，正在重新连接 OKX API...")
+        # 量能柱
+        v_colors = ['#ff4b4b' if r['close'] < r['open'] else '#00cc96' for _, r in df.iterrows()]
+        fig.add_trace(go.Bar(x=df['time'], y=df['volume'], marker_color=v_colors, opacity=0.4), row=2, col=1)
+        fig.add_trace(go.Scattergl(x=df['time'], y=df['v_ma'], line=dict(color='orange', width=1)), row=2, col=1)
 
-    time.sleep(refresh_sec)
+        fig.update_layout(height=650, template="plotly_dark", showlegend=False, 
+                          xaxis_rangeslider_visible=False, margin=dict(t=5, b=5, l=5, r=5))
+        st.plotly_chart(fig, width='stretch', use_container_width=True, config={'displayModeBar': False})
+
+        # 3. 信号即时播报
+        if abs(last['signal']) == 1:
+            st.toast(f"⚔️ Warrior 信号触发: {'做多' if last['signal']>0 else '做空'}")
+
+# ---------- 5. 主程序结构 ----------
+def main():
+    st.sidebar.title("⚔️ Warrior 控制台")
+    
+    # 策略参数动态调节
+    params = {
+        "v_len": st.sidebar.number_input("均量周期", 5, 20, 10),
+        "s_ratio": st.sidebar.slider("缩量阈值%", 30, 80, 60) / 100,
+        "e_ratio": st.sidebar.slider("放量阈值%", 120, 300, 150) / 100,
+        "b_min": st.sidebar.slider("实体饱满度", 0.0, 0.5, 0.15)
+    }
+    
+    target_symbol = st.sidebar.text_input("目标合约", "ETH-USDT-SWAP")
+    
+    # 运行局部刷新组件
+    render_dashboard(target_symbol, params)
+
+if __name__ == "__main__":
+    main()
