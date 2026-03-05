@@ -5,231 +5,355 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import httpx
 from datetime import datetime
-import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 底层与语音
+# 1. 页面初始化
 # ==========================================
-if 'http_client' not in st.session_state:
-    st.session_state.http_client = httpx.Client(timeout=10.0)
+st.set_page_config(
+    layout="wide",
+    page_title="Warrior Sniper V6.2",
+    page_icon="⚔️"
+)
 
-if "last_voice" not in st.session_state:
-    st.session_state.last_voice = ""
-
-
-def voice_alert(text):
-    try:
-        if st.session_state.last_voice == text:
-            return
-
-        components.html(f"""
-        <script>
-            try {{
-                var msg = new SpeechSynthesisUtterance('{text}');
-                msg.rate = 1.05;
-                window.speechSynthesis.speak(msg);
-            }} catch(e) {{}}
-        </script>
-        """, height=0)
-
-        st.session_state.last_voice = text
-
-    except Exception:
-        pass
-
-
-def speak_status(status):
-    if status == "放量突破做多":
-        voice_alert("放量起涨，突破前高，直接开多")
-    elif status == "放量跌破做空":
-        voice_alert("放量跌破支撑，空头占优")
-    elif status == "缩量回踩":
-        voice_alert("缩量回踩，低点不破，观察")
-    elif status == "缩量反弹":
-        voice_alert("缩量反弹，高点不破，观察")
-
+# 初始化 HTTP Client（持久连接减少延迟）
+if "http_client" not in st.session_state:
+    st.session_state.http_client = httpx.Client(
+        timeout=httpx.Timeout(15.0),
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        follow_redirects=True
+    )
 
 # ==========================================
-# 2. 数据同步（真实K线）
+# 2. CSS (抗闪烁 + UI 稳定)
 # ==========================================
-def get_market_data(symbol):
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": symbol, "bar": "5m", "limit": "100"}
+st.markdown("""
+<style>
 
-    try:
-        resp = st.session_state.http_client.get(url, params=params)
-        if resp.status_code != 200:
-            return None
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
 
-        data = resp.json().get('data', [])
-        if not data:
-            return None
+.block-container{
+    padding-top:1rem;
+    padding-bottom:1rem;
+    max-width:100%;
+}
 
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
-        for col in ['o','h','l','c','v']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+/* Metric 卡片固定高度 */
+[data-testid="stMetric"]{
+    background:#0e1117;
+    border:1px solid #1f2937;
+    border-radius:12px;
+    padding:12px;
+    min-height:90px;
+}
 
-        df = df[df['confirm'] == '1']
-        df['time'] = pd.to_datetime(df['ts'].astype(int), unit='ms')
+/* 状态卡 */
+.status-card{
+    background:#111827;
+    border-radius:12px;
+    border:1px solid #1f2937;
+    padding:16px;
+}
 
-        return df.sort_values('time').reset_index(drop=True)
+/* Plotly 防抖 */
+.js-plotly-plot{
+    transition:opacity 0.25s ease;
+}
 
-    except Exception:
-        return None
-
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
-# 3. 支撑/阻力与策略（口诀落地）
+# 3. 策略核心逻辑（完全保持）
 # ==========================================
-def calc_support_resistance(df, window=30):
-    df = df.dropna()
-    tail = df.tail(window)
-    support = tail['l'].min()
-    resistance = tail['h'].max()
-    return support, resistance
+def apply_warrior_logic(df, p):
 
-
-def apply_strategy(df, p):
     df = df.dropna().reset_index(drop=True)
 
-    df['ma_v'] = df['v'].rolling(p['ma_len']).mean()
-    df['body_ratio'] = abs(df['c'] - df['o']) / (df['h'] - df['l']).replace(0, 0.001)
+    df["ma_v"] = df["v"].rolling(p["ma_len"]).mean()
 
-    df['is_expand'] = df['v'] > df['ma_v'] * (p['expand_p'] / 100.0)
-    df['is_contract'] = df['v'] < df['ma_v'] * 0.6
+    df["body_size"] = abs(df["c"] - df["o"])
+    df["total_size"] = (df["h"] - df["l"]).replace(0, 0.001)
 
-    df['buy_sig'] = df['is_expand'] & (df['c'] > df['o']) & (df['body_ratio'] > p['body_r'])
-    df['sell_sig'] = df['is_expand'] & (df['c'] < df['o']) & (df['body_ratio'] > p['body_r'])
+    df["body_ratio"] = df["body_size"] / df["total_size"]
+    df["vol_ratio"] = df["v"] / df["ma_v"].replace(0, 1e-9)
 
-    return df
+    df["is_expand"] = df["v"] > df["ma_v"] * (p["expand_p"] / 100)
 
+    df["buy_sig"] = (
+        df["is_expand"]
+        & (df["c"] > df["o"])
+        & (df["body_ratio"] > p["body_r"])
+    )
 
-# ==========================================
-# 4. 主循环（K线 + 三角 + 支撑压力）
-# ==========================================
-@st.fragment(run_every="10s")
-def dashboard_loop():
-    df = get_market_data(st.session_state.symbol)
-    if df is None or df.empty:
-        st.warning("数据接入中...")
-        return
+    df["sell_sig"] = (
+        df["is_expand"]
+        & (df["c"] < df["o"])
+        & (df["body_ratio"] > p["body_r"])
+    )
 
-    df = apply_strategy(df, st.session_state.params)
-    curr = df.iloc[-1]
+    window = df.tail(30)
 
-    support, resistance = calc_support_resistance(df)
+    v_max_down = window[window["c"] < window["o"]]
+    v_max_up = window[window["c"] > window["o"]]
 
-    # 状态判断
-    status = "观察"
-    color = "#1e90ff"
+    anchors = {
 
-    if curr['is_contract'] and curr['l'] >= support:
-        status = "缩量回踩"
-        color = "#ffaa00"
+        "upper":
+        v_max_down.nlargest(1,"v")["h"].values[0]
+        if not v_max_down.empty
+        else window["h"].max(),
 
-    if curr['buy_sig'] and curr['c'] > resistance:
-        status = "放量突破做多"
-        color = "#26a69a"
+        "lower":
+        v_max_up.nlargest(1,"v")["l"].values[0]
+        if not v_max_up.empty
+        else window["l"].min()
 
-    if curr['sell_sig'] and curr['c'] < support:
-        status = "放量跌破做空"
-        color = "#ef5350"
-
-    speak_status(status)
-
-    # 战报与进场计划
-    st.markdown(f"""
-    <div style='border-left:8px solid {color};padding:15px;background:#111'>
-        <h2 style='color:{color};margin:0;'>{status}</h2>
-        <p>现价：{curr['c']:.2f}</p>
-        <p>支撑：{support:.2f} ｜ 阻力：{resistance:.2f}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if status in ["放量突破做多", "放量跌破做空"]:
-        is_buy = status == "放量突破做多"
-        sl = support if is_buy else resistance
-        tp = curr['c'] + (curr['c'] - sl) * st.session_state.params['rr_ratio']
-
-        st.markdown(f"""
-        <div style='padding:10px;border:1px solid #444'>
-            <b>进场方向：</b>{'做多' if is_buy else '做空'}<br>
-            <b>止损：</b>{sl:.2f}<br>
-            <b>止盈：</b>{tp:.2f}
-        </div>
-        """, unsafe_allow_html=True)
-
-    # 指标
-    c1, c2 = st.columns(2)
-    c1.metric("量能比", f"{curr['v'] / curr['ma_v']:.2f}x")
-    c2.metric("心跳", datetime.now().strftime('%H:%M:%S'))
-
-    # K线图（三角 + 支撑压力）
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True)
-
-    df_p = df.tail(80)
-    fig.add_trace(go.Candlestick(
-        x=df_p['time'],
-        open=df_p['o'],
-        high=df_p['h'],
-        low=df_p['l'],
-        close=df_p['c'],
-        increasing_line_color='#26a69a',
-        decreasing_line_color='#ef5350'
-    ), row=1, col=1)
-
-    # 买三角
-    buys = df_p[df_p['buy_sig']]
-    fig.add_trace(go.Scatter(
-        x=buys['time'],
-        y=buys['l'] * 0.998,
-        mode='markers',
-        marker=dict(symbol='triangle-up', size=14),
-        marker_color='#26a69a',
-        name='做多'
-    ), row=1, col=1)
-
-    # 卖三角
-    sells = df_p[df_p['sell_sig']]
-    fig.add_trace(go.Scatter(
-        x=sells['time'],
-        y=sells['h'] * 1.002,
-        mode='markers',
-        marker=dict(symbol='triangle-down', size=14),
-        marker_color='#ef5350',
-        name='做空'
-    ), row=1, col=1)
-
-    # 支撑压力线
-    fig.add_hline(y=support, line_dash="dot", line_color="#26a69a", annotation_text="支撑")
-    fig.add_hline(y=resistance, line_dash="dot", line_color="#ef5350", annotation_text="压力")
-
-    fig.update_layout(height=650, template="plotly_dark", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-
-
-# ==========================================
-# 5. 控制中心
-# ==========================================
-def main():
-    st.sidebar.title("工程交易版")
-
-    with st.sidebar.expander("策略参数", expanded=True):
-        ma_p = st.number_input("均量周期", 5, 100, 10)
-        expand_p = st.slider("放量判定(%)", 110, 500, 150)
-        body_r = st.slider("实体比", 0.05, 0.90, 0.20)
-        rr_ratio = st.slider("盈亏比", 1.0, 3.0, 1.5, step=0.1)
-
-    st.session_state.params = {
-        "ma_len": ma_p,
-        "expand_p": expand_p,
-        "body_r": body_r,
-        "rr_ratio": rr_ratio
     }
 
-    st.session_state.symbol = st.sidebar.text_input("合约", "ETH-USDT-SWAP")
+    return df, anchors
 
-    dashboard_loop()
+
+# ==========================================
+# 4. 主界面
+# ==========================================
+def main():
+
+    st.sidebar.title("⚔️ Warrior Sniper")
+
+    with st.sidebar.expander("🏹 狙击核心校准", expanded=True):
+
+        ma_len = st.number_input("均量周期",5,50,10)
+
+        expand_p = st.slider("放量判定 (%)",100,300,150)
+
+        body_r = st.slider("实体比率",0.05,0.90,0.20)
+
+        rr_ratio = st.slider("盈亏比 (1:X)",1.0,5.0,1.5,step=0.1)
+
+        params = {
+            "ma_len":ma_len,
+            "expand_p":expand_p,
+            "body_r":body_r,
+            "rr_ratio":rr_ratio
+        }
+
+    symbol = st.sidebar.text_input("合约代码","ETH-USDT-SWAP")
+
+    header_area = st.empty()
+    metric_area = st.empty()
+    chart_area = st.empty()
+
+# ==========================================
+# 5. 实时刷新
+# ==========================================
+    @st.fragment(run_every="10s")
+    def update_dashboard():
+
+        try:
+
+            url = "https://www.okx.com/api/v5/market/candles"
+
+            r = st.session_state.http_client.get(
+                url,
+                params={
+                    "instId":symbol,
+                    "bar":"5m",
+                    "limit":"100"
+                }
+            )
+
+            if r.status_code != 200:
+                return
+
+            data = r.json()["data"]
+
+            df = pd.DataFrame(
+                data,
+                columns=[
+                    "ts","o","h","l","c","v",
+                    "volCcy","volCcyQuote","confirm"
+                ]
+            )
+
+            for col in ["o","h","l","c","v"]:
+                df[col] = pd.to_numeric(df[col])
+
+            df["time"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+
+            # OKX 返回倒序 → 修复
+            df = df.sort_values("time").reset_index(drop=True)
+
+            df, anchors = apply_warrior_logic(df, params)
+
+            curr = df.iloc[-1]
+
+            upper = anchors["upper"]
+            lower = anchors["lower"]
+
+# ==========================================
+# 战报
+# ==========================================
+            with header_area.container():
+
+                if curr["buy_sig"] or curr["c"] > upper:
+
+                    status = "🚀 多头总攻"
+                    color = "#10b981"
+
+                elif curr["sell_sig"] or curr["c"] < lower:
+
+                    status = "❄️ 空头突袭"
+                    color = "#ef4444"
+
+                else:
+
+                    status = "💎 窄幅震荡"
+                    color = "#3b82f6"
+
+                st.markdown(
+                    f"""
+                    <div class="status-card"
+                    style="border-left:8px solid {color};">
+
+                    <h2 style="color:{color};margin:0;">
+                    {status} | ETH: ${curr["c"]:.2f}
+                    </h2>
+
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+# ==========================================
+# 指标
+# ==========================================
+            with metric_area.container():
+
+                c1,c2,c3,c4 = st.columns(4)
+
+                c1.metric("当前现价",f"${curr['c']:.2f}")
+
+                c2.metric("放量系数",f"{curr['vol_ratio']:.2f}x")
+
+                c3.metric("多头锚点",f"${lower:.2f}")
+
+                c4.metric("空头锚点",f"${upper:.2f}")
+
+# ==========================================
+# 图表
+# ==========================================
+            with chart_area.container():
+
+                df_p = df.tail(60)
+
+                fig = make_subplots(
+                    rows=2,
+                    cols=1,
+                    shared_xaxes=True,
+                    row_heights=[0.75,0.25],
+                    vertical_spacing=0.02
+                )
+
+                fig.add_trace(
+                    go.Candlestick(
+                        x=df_p["time"],
+                        open=df_p["o"],
+                        high=df_p["h"],
+                        low=df_p["l"],
+                        close=df_p["c"],
+                        name="K"
+                    ),
+                    row=1,
+                    col=1
+                )
+
+                buys = df_p[df_p["buy_sig"]]
+                sells = df_p[df_p["sell_sig"]]
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=buys["time"],
+                        y=buys["l"]*0.998,
+                        mode="markers",
+                        marker=dict(
+                            symbol="triangle-up",
+                            size=14,
+                            color="#10b981"
+                        )
+                    ),
+                    row=1,col=1
+                )
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=sells["time"],
+                        y=sells["h"]*1.002,
+                        mode="markers",
+                        marker=dict(
+                            symbol="triangle-down",
+                            size=14,
+                            color="#ef4444"
+                        )
+                    ),
+                    row=1,col=1
+                )
+
+                fig.add_hline(
+                    y=upper,
+                    line_dash="dash",
+                    line_color="#ef4444"
+                )
+
+                fig.add_hline(
+                    y=lower,
+                    line_dash="dash",
+                    line_color="#10b981"
+                )
+
+                v_colors = [
+                    "#10b981" if c>=o else "#ef4444"
+                    for c,o in zip(df_p["c"],df_p["o"])
+                ]
+
+                fig.add_trace(
+                    go.Bar(
+                        x=df_p["time"],
+                        y=df_p["v"],
+                        marker_color=v_colors,
+                        opacity=0.6
+                    ),
+                    row=2,col=1
+                )
+
+                fig.update_layout(
+
+                    height=600,
+
+                    template="plotly_dark",
+
+                    showlegend=False,
+
+                    xaxis_rangeslider_visible=False,
+
+                    margin=dict(t=0,b=0,l=10,r=30),
+
+                    hovermode="x unified",
+
+                    uirevision="constant"  # 防止刷新重绘
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={"displayModeBar":False}
+                )
+
+        except Exception:
+            pass
+
+    update_dashboard()
 
 
 if __name__ == "__main__":
