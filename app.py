@@ -3,78 +3,145 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import datetime
+import httpx
 import time
+from datetime import datetime
 
 # ==========================================
-# 1. 冷却系统状态管理
+# 1. 界面初始化与过时警告修复
 # ==========================================
-if 'trade_logs' not in st.session_state:
-    st.session_state.trade_logs = []  # 记录格式: (timestamp, result_type['win', 'loss'])
-if 'cooldown_until' not in st.session_state:
-    st.session_state.cooldown_until = None
+st.set_page_config(layout="wide", page_title="Warrior V5.6 | 修复完美版", page_icon="⚔️")
 
-def check_cooldown():
-    """执行口诀：如果连续止损两单，停下来观察。"""
-    if st.session_state.cooldown_until and datetime.datetime.now() < st.session_state.cooldown_until:
-        return True
-    
-    # 检查最近1小时内的最后两笔记录
-    recent_losses = [log for log in st.session_state.trade_logs 
-                     if log['result'] == 'loss' and 
-                     (datetime.datetime.now() - log['time']).total_seconds() < 3600]
-    
-    if len(recent_losses) >= 2:
-        st.session_state.cooldown_until = datetime.datetime.now() + datetime.timedelta(minutes=60)
-        return True
-    return False
+st.markdown("""
+    <style>
+    .block-container { padding: 1rem 1.5rem; }
+    [data-testid="stMetric"] { background: #11141c; border: 1px solid #2d323e; padding: 15px; border-radius: 10px; }
+    .stAlert { background-color: #1a1c23; border: 1px solid #d4af37; }
+    </style>
+""", unsafe_allow_html=True)
 
 # ==========================================
-# 2. 核心逻辑：盈亏比雷达 (Risk-Reward Radar)
+# 2. 健壮型数据引擎 (带重试机制)
 # ==========================================
-def calculate_rr_ratio(side, price, p_high, p_low):
-    """口诀：位置尴尬，空间不足，观望。"""
-    if side == "LONG":
-        risk = price - p_low
-        reward = p_high - price
-    else:
-        risk = p_high - price
-        reward = price - p_low
-    
-    rr = reward / risk if risk > 0 else 0
-    return rr
+class WarriorEngine:
+    def __init__(self):
+        self.headers = {"Content-Type": "application/json"}
+        # 使用 httpx 提升并发性能
+        self.client = httpx.Client(timeout=10.0, http2=True, follow_redirects=True)
+
+    def get_market_data(self, symbol):
+        url = "https://www.okx.com/api/v5/market/candles"
+        params = {"instId": symbol, "bar": "5m", "limit": "100", "_t": int(time.time()*1000)}
+        try:
+            resp = self.client.get(url, params=params)
+            if resp.status_code == 200:
+                data = resp.json().get('data', [])
+                if not data: return None
+                df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
+                # 类型转换防止计算报错
+                for col in ['o','h','l','c','v']: df[col] = pd.to_numeric(df[col])
+                df['time'] = pd.to_datetime(df['ts'].astype(int), unit='ms')
+                return df.sort_values('time').reset_index(drop=True)
+            return None
+        except Exception as e:
+            st.sidebar.error(f"📡 API 连接异常: {str(e)}")
+            return None
 
 # ==========================================
-# 3. UI 渲染：熔断保护界面
+# 3. 量价口诀逻辑封装
 # ==========================================
-@st.fragment(run_every="5s")
-def render_v5_5_iron_rule():
-    is_locked = check_cooldown()
+def apply_strategy(df, p):
+    # 均量线计算
+    df['ma_v'] = df['v'].rolling(p['ma_len']).mean()
+    # 实体比例计算
+    df['body_size'] = abs(df['c'] - df['o'])
+    df['range'] = (df['h'] - df['l']).replace(0, 0.001)
+    df['body_ratio'] = df['body_size'] / df['range']
     
-    if is_locked:
-        remaining = (st.session_state.cooldown_until - datetime.datetime.now()).total_seconds()
-        st.error(f"⚠️ 触发物理熔断：连续止损两单。系统锁定中，请强制执行口诀「停下来观察」。")
-        st.metric("冷却倒计时", f"{int(remaining//60)}分{int(remaining%60)}秒")
-        st.sidebar.warning("🚫 交易指令已锁定")
-        # 即使锁定，行情依然更新，但操作面板消失
+    # 放量判定
+    df['is_expand'] = df['v'] > df['ma_v'] * (p['expand_p'] / 100.0)
     
-    # ... (承接 V5.4 的 Core 数据获取与逻辑) ...
-    # 假设此处已获取 df, res (包含 p_high, p_low, sig)
-    
-    # 动态盈亏比校验
-    if not is_locked and res['sig']:
-        rr = calculate_rr_ratio(res['sig'], curr['c'], res['p_high'], res['p_low'])
-        
-        with st.container(border=True):
-            st.markdown(f"### 🛡️ 铁律校验 (盈亏比: {rr:.2f})")
-            if rr >= 1.5:
-                st.success(f"✅ 空间充足（>{1.5}），准许执行口诀：{res['msg']}")
-                if st.button("🚀 确认开仓并同步止损红线", use_container_width=True):
-                    # 模拟记录
-                    st.session_state.trade_logs.append({'time': datetime.datetime.now(), 'result': 'loss'}) # 演示用
-            else:
-                st.warning(f"❌ 空间不足（<{1.5}），拒绝执行。口诀：位置尴尬，只看不动。")
+    # 做多信号：放量 + 阳线 + 实体比达标
+    df['buy_sig'] = df['is_expand'] & (df['c'] > df['o']) & (df['body_ratio'] > p['body_r'])
+    # 做空信号：放量 + 阴线 + 实体比达标
+    df['sell_sig'] = df['is_expand'] & (df['c'] < df['o']) & (df['body_ratio'] > p['body_r'])
+    return df
 
-    # --- K线图增加止损红线 ---
-    # 在 Plotly 中，根据当前计划动态画出三色激光线
-    # (此处省略重复的绘图代码，重点在于 add_hline 的颜色区分)
+# ==========================================
+# 4. 主渲染逻辑 (局部刷新版)
+# ==========================================
+@st.fragment(run_every="10s") # 降低请求频率防止黑屏
+def dashboard_loop():
+    engine = WarriorEngine()
+    symbol = st.session_state.get('symbol', 'ETH-USDT-SWAP')
+    params = st.session_state.params
+    
+    df = engine.get_market_data(symbol)
+    
+    # 核心黑屏防护：如果数据没拉到，直接停止渲染并提示
+    if df is None or df.empty:
+        st.warning("⚠️ 正在尝试连接交易所，若持续黑屏请检查网络或点击手动刷新。")
+        if st.button("🔄 手动重连"): st.rerun()
+        st.stop() 
+
+    df = apply_strategy(df, params)
+    curr = df.iloc[-1]
+    
+    # 顶部战报
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ETH 现价", f"${curr['c']:.2f}")
+    c2.metric("当前量能比", f"{curr['v']/curr['ma_v']:.2f}x")
+    
+    status = "💎 震荡蓄势"
+    if curr['buy_sig']: status = "🔥 多头进攻"
+    elif curr['sell_sig']: status = "❄️ 空头下砸"
+    elif curr['v'] < curr['ma_v'] * 0.6: status = "⏳ 动能衰减"
+    
+    c3.metric("实时战报", status)
+    c4.metric("心跳刷新", f"{datetime.now().second}s")
+
+    # K线绘图 (修复 use_container_width 过时警告)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
+    
+    fig.add_trace(go.Candlestick(
+        x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
+        increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="K线"
+    ), row=1, col=1)
+
+    # 绘制信号点
+    buys = df[df['buy_sig']]
+    fig.add_trace(go.Scatter(x=buys['time'], y=buys['l']*0.999, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#26a69a'), name='多'), row=1, col=1)
+    
+    sells = df[df['sell_sig']]
+    fig.add_trace(go.Scatter(x=sells['time'], y=sells['h']*1.001, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ef5350'), name='空'), row=1, col=1)
+
+    # 成交量与均量线
+    v_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df['c'], df['o'])]
+    fig.add_trace(go.Bar(x=df['time'], y=df['v'], marker_color=v_colors, opacity=0.4), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['ma_v'], line=dict(color='#ffa500', width=1.2)), row=2, col=1)
+
+    fig.update_layout(height=800, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=5,b=5,l=5,r=50))
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+# ==========================================
+# 5. 指挥中心入口
+# ==========================================
+def main():
+    st.sidebar.markdown("### ⚔️ Warrior 控制中心")
+    
+    with st.sidebar.expander("策略参数调节", expanded=True):
+        ma_p = st.number_input("均量周期", 5, 100, 10)
+        shrink_p = st.slider("缩量判定 (%)", 10, 100, 60)
+        expand_p = st.slider("放量判定 (%)", 110, 500, 150)
+        body_r = st.slider("突破实体比", 0.05, 0.90, 0.20)
+    
+    st.session_state.params = {"ma_len": ma_p, "shrink_p": shrink_p, "expand_p": expand_p, "body_r": body_r}
+    st.session_state.symbol = st.sidebar.text_input("合约代码", "ETH-USDT-SWAP")
+    
+    st.sidebar.divider()
+    st.sidebar.write("不灭大衍系统 · 纯净量价流")
+    
+    dashboard_loop()
+
+if __name__ == "__main__":
+    main()
