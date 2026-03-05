@@ -11,18 +11,18 @@ import streamlit.components.v1 as components
 # ==========================================
 # 1. 顶级视觉初始化
 # ==========================================
-st.set_page_config(layout="wide", page_title="Warrior V6.0 | 离场靶心版", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="Warrior V6.0 | 双向靶心版", page_icon="⚔️")
 
 st.markdown("""
     <style>
     .block-container { padding: 1rem 1.5rem; }
     [data-testid="stMetric"] { background: #11141c; border: 1px solid #2d323e; padding: 15px; border-radius: 10px; }
-    .status-card { background: #1a1c23; border-left: 8px solid #d4af37; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+    .status-card { background: #1a1c23; border: 4px left solid #d4af37; padding: 20px; border-radius: 12px; margin-bottom: 20px; border-left: 5px solid #d4af37; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 语音咆哮引擎
+# 2. 语音咆哮引擎（双向播报控制）
 # ==========================================
 def voice_alert(text):
     components.html(f"""
@@ -58,12 +58,12 @@ def apply_warrior_logic(df, p):
     df['ma_v'] = df['v'].rolling(p['ma_len']).mean()
     df['body_ratio'] = abs(df['c'] - df['o']) / (df['h'] - df['l']).replace(0, 0.001)
     
-    # 信号判定逻辑
+    # 信号判定：量价共振
     df['is_expand'] = df['v'] > df['ma_v'] * (p['expand_p'] / 100.0)
     df['buy_sig'] = df['is_expand'] & (df['c'] > df['o']) & (df['body_ratio'] > p['body_r'])
     df['sell_sig'] = df['is_expand'] & (df['c'] < df['o']) & (df['body_ratio'] > p['body_r'])
     
-    # 锚点锁定：阴线高点与阳线低点
+    # 锚点锁定：阴高阳低
     big_down = df[(df['c'] < df['o']) & (df['v'] > df['ma_v'] * 1.3)].iloc[-1:]
     big_up = df[(df['c'] > df['o']) & (df['v'] > df['ma_v'] * 1.3)].iloc[-1:]
     
@@ -74,32 +74,26 @@ def apply_warrior_logic(df, p):
     return df, anchors
 
 # ==========================================
-# 4. 主渲染循环（核心回档+离场靶心）
+# 4. 实时战报渲染（包含双向语音逻辑）
 # ==========================================
-@st.fragment(run_every="10s")
-def dashboard_loop():
-    engine = WarriorEngine()
-    df = engine.get_market_data(st.session_state.symbol)
-    if df is None or df.empty:
-        st.warning("📡 正在接入 OKX 数据流...")
-        st.stop()
-
-    df, anchors = apply_warrior_logic(df, st.session_state.params)
-    curr = df.iloc[-1]
-    
-    # 1. 实时战报渲染
+def render_detailed_report(curr, anchors):
     vol_ratio = curr['v'] / curr['ma_v']
     price = curr['c']
     upper = anchors['down_high']
     lower = anchors['up_low']
 
+    # 做多播报逻辑
     if curr['buy_sig'] and price > upper:
-        status, detail, color = "🚀 核心突破", "放量起涨且突破阴线高点，多头总攻！", "#26a69a"
+        status, detail, color = "🚀 核心突破", "满足放量且突破阴线高点，多头总攻！", "#26a69a"
         voice_alert("放量起涨，突破前高，直接开多")
+    # 做空/止损播报逻辑
+    elif curr['sell_sig'] or price < lower:
+        status, detail, color = "❄️ 趋势转弱", "跌破支撑或出现放量阴线，执行空头保护。", "#ef5350"
+        voice_alert("趋势转弱，注意离场或反手做空")
     elif vol_ratio < 0.6:
         status, detail, color = "⏳ 动能衰减", "缩量回踩中，低点不破不入场。", "#888888"
     else:
-        status, detail, color = "💎 震荡蓄势", f"量能 {vol_ratio:.2f}x，观察支撑压力位。", "#1e90ff"
+        status, detail, color = "💎 震荡蓄势", f"量能 {vol_ratio:.2f}x，观察关键位支撑情况。", "#1e90ff"
 
     st.markdown(f"""
         <div class="status-card" style="border-left: 8px solid {color};">
@@ -108,41 +102,54 @@ def dashboard_loop():
         </div>
     """, unsafe_allow_html=True)
 
-    # 2. 指标矩阵
+# ==========================================
+# 5. 主图渲染（准星+靶心）
+# ==========================================
+@st.fragment(run_every="10s")
+def dashboard_loop():
+    engine = WarriorEngine()
+    df = engine.get_market_data(st.session_state.symbol)
+    if df is None or df.empty:
+        st.warning("📡 正在校准大衍系统...")
+        st.stop()
+
+    df, anchors = apply_warrior_logic(df, st.session_state.params)
+    curr = df.iloc[-1]
+    
+    render_detailed_report(curr, anchors)
+    
     c1, c2, c3 = st.columns(3)
     c1.metric("ETH 现价", f"${curr['c']:.2f}")
-    c2.metric("当前量能比", f"{vol_ratio:.2f}x")
-    c3.metric("刷新心跳", f"{datetime.now().strftime('%H:%M:%S')}")
+    c2.metric("当前量能比", f"{curr['v']/curr['ma_v']:.2f}x")
+    c3.metric("最后更新", f"{datetime.now().strftime('%H:%M:%S')}")
 
-    # 3. 绘图逻辑
+    # 绘图逻辑
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
                                  increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="K线"), row=1, col=1)
 
-    # A. 买卖信号三角
+    # A. 准星信号：三角回档
     buys = df[df['buy_sig']]
     fig.add_trace(go.Scatter(x=buys['time'], y=buys['l']*0.998, mode='markers',
                              marker=dict(symbol='triangle-up', size=15, color='#00ffcc', line=dict(width=1, color='white')),
-                             name='买入信号'), row=1, col=1)
+                             name='做多信号'), row=1, col=1)
     sells = df[df['sell_sig']]
     fig.add_trace(go.Scatter(x=sells['time'], y=sells['h']*1.002, mode='markers',
                              marker=dict(symbol='triangle-down', size=15, color='#ff3366', line=dict(width=1, color='white')),
-                             name='卖出信号'), row=1, col=1)
+                             name='做空信号'), row=1, col=1)
 
-    # B. 【新增】动态离场靶心 (Auto-Exit Lines)
+    # B. 离场靶心线
     if curr['buy_sig']:
-        sl_price = anchors['up_low'] # 止损锁定阳线低点
-        risk = price - sl_price
+        sl = anchors['up_low'] 
+        risk = curr['c'] - sl
         if risk > 0:
-            tp_price = price + (risk * st.session_state.params['rr_ratio'])
-            fig.add_hline(y=tp_price, line_dash="dash", line_color="#00ffcc", 
-                         annotation_text=f"🎯 止盈靶心: {tp_price:.2f}", row=1, col=1)
-            fig.add_hline(y=sl_price, line_dash="dash", line_color="#ef5350", 
-                         annotation_text=f"🛡️ 止损保护: {sl_price:.2f}", row=1, col=1)
+            tp = curr['c'] + (risk * st.session_state.params['rr_ratio'])
+            fig.add_hline(y=tp, line_dash="dash", line_color="#00ffcc", annotation_text="🎯 止盈靶心", row=1, col=1)
+            fig.add_hline(y=sl, line_dash="dash", line_color="#ef5350", annotation_text="🛡️ 止损保护", row=1, col=1)
 
-    # C. 基础锚点虚线
-    fig.add_hline(y=upper, line_dash="dot", line_color="#ef5350", annotation_text="压力:阴高", row=1, col=1)
-    fig.add_hline(y=lower, line_dash="dot", line_color="#26a69a", annotation_text="支撑:阳低", row=1, col=1)
+    # C. 压力支撑锚点
+    fig.add_hline(y=anchors['down_high'], line_dash="dot", line_color="#ef5350", annotation_text="压力:阴高", row=1, col=1)
+    fig.add_hline(y=anchors['up_low'], line_dash="dot", line_color="#26a69a", annotation_text="支撑:阳低", row=1, col=1)
 
     # D. 成交量
     v_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df['c'], df['o'])]
@@ -153,24 +160,22 @@ def dashboard_loop():
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 # ==========================================
-# 5. 指挥中心
+# 6. 控制中心
 # ==========================================
 def main():
     st.sidebar.title("⚔️ Warrior V6.0")
-    with st.sidebar.expander("策略参数", expanded=True):
-        ma_p = st.number_input("均量周期", 5, 100, 10)
-        expand_p = st.slider("放量判定 (%)", 110, 500, 150)
-        body_r = st.slider("突破实体比", 0.05, 0.90, 0.20)
-    
-    with st.sidebar.expander("盈亏靶心设置", expanded=True):
-        rr_ratio = st.slider("盈亏比 (1:X)", 1.0, 3.0, 1.5, step=0.1)
+    ma_p = st.sidebar.number_input("均量周期", 5, 100, 10)
+    expand_p = st.sidebar.slider("放量判定 (%)", 110, 500, 150)
+    body_r = st.sidebar.slider("突破实体比", 0.05, 0.90, 0.20)
+    rr_ratio = st.sidebar.slider("盈亏比 (1:X)", 1.0, 3.0, 1.5, step=0.1)
     
     st.session_state.params = {"ma_len": ma_p, "expand_p": expand_p, "body_r": body_r, "rr_ratio": rr_ratio}
     st.session_state.symbol = st.sidebar.text_input("合约代码", "ETH-USDT-SWAP")
     
     st.sidebar.divider()
-    st.sidebar.markdown("### 🏹 信号雷达：全功能开启")
-    st.sidebar.write("✅ 三角准星 ✅ 压力支撑 ✅ 离场靶心")
+    st.sidebar.markdown("### 🏹 战神状态")
+    st.sidebar.write("✅ 双向信号播报已开启")
+    st.sidebar.write("✅ 离场靶心自动测算")
     
     dashboard_loop()
 
