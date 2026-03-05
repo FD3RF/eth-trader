@@ -5,17 +5,17 @@ import plotly.graph_objects as go
 import httpx
 import streamlit.components.v1 as components
 from datetime import datetime
-import pytz  # 确保环境已安装 pytz
+import pytz
 
 # ==========================================
-# 1. 深度 UI 与 动态提醒样式 (完全保留)
+# 1. 终极 UI 渲染引擎 (包含全部截图细节)
 # ==========================================
 st.set_page_config(layout="wide", page_title="Warrior Sniper V6.2 Pro", page_icon="⚔️")
 
 st.markdown("""
     <style>
     .stApp { background-color: #05070a; color: #e6edf3; }
-    /* 顶部置顶战报 */
+    /* 置顶战报：毛玻璃与硬核边框 */
     .sticky-header {
         position: sticky; top: 0; z-index: 100;
         background: rgba(13, 17, 23, 0.95);
@@ -24,57 +24,53 @@ st.markdown("""
         backdrop-filter: blur(10px);
         box-shadow: 0 4px 20px rgba(0,0,0,0.5);
     }
-    /* 动态闪烁提醒 */
+    /* 核心警报：动态放量提醒 */
     .bull-alert { color: #10b981; border: 2px solid #10b981; padding: 12px; border-radius: 8px; animation: blink 0.8s infinite; background: rgba(16, 185, 129, 0.1); font-weight: bold; font-size: 1.5rem; }
     .bear-alert { color: #ef4444; border: 2px solid #ef4444; padding: 12px; border-radius: 8px; animation: blink 0.8s infinite; background: rgba(239, 68, 68, 0.1); font-weight: bold; font-size: 1.5rem; }
     @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
     
-    /* 历史战报卡片 */
+    /* 历史记录卡片 */
     .history-card {
         background: #0d1117; border-left: 5px solid #30363d;
         padding: 12px; margin-bottom: 8px; border-radius: 4px;
         border-top: 1px solid #161b22; border-right: 1px solid #161b22;
     }
-    /* 修正后的时间标签样式 */
     .bj-time-tag { color: #f0ad4e; font-family: monospace; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 核心“不删减”交易引擎 (时区锁定版)
+# 2. 核心交易引擎 (不删减 K-coefficient 与算法)
 # ==========================================
 def warrior_engine(data, p):
     df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
     for col in ['o','h','l','c','v']: df[col] = pd.to_numeric(df[col])
     
-    # --- 核心修正：强制转换为北京时间 ---
+    # 强制物理排序与北京时间锁定
     df['time'] = pd.to_datetime(df['ts'].astype(int), unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Shanghai')
     df = df.sort_values('time').reset_index(drop=True)
     
-    # ATR 波动率修正 (计算真实波幅 - 保留)
-    df['tr'] = np.maximum(df['h'] - df['l'], 
-                          np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
+    # ATR 与 动态锚点逻辑
+    df['tr'] = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
     df['atr'] = df['tr'].rolling(14).mean()
-    
-    # 均量比判定 (保留)
     ma_v = df['v'].rolling(p['ma_len']).mean()
     df['vol_r'] = df['v'] / ma_v.replace(0, 1e-9)
     
-    # 支撑压力动态锚点 (基于高成交量 K 线 - 保留)
+    # 支撑/压力动态搜索
     lookback = df.tail(30)
     v_dn = lookback[lookback['c'] < lookback['o']]
     v_up = lookback[lookback['c'] > lookback['o']]
     press = v_dn.nlargest(1, 'v')['h'].values[0] if not v_dn.empty else lookback['h'].max()
     supp = v_up.nlargest(1, 'v')['l'].values[0] if not v_up.empty else lookback['l'].min()
 
-    # 口诀同步判断逻辑 (K-coefficient 狩猎锁核心 - 保留)
+    # 口诀判定逻辑
     df['buy_tri'] = (df['vol_r'] > (p['exp']/100)) & (df['c'] > df['o']) & (df['c'] > press)
     df['sell_tri'] = (df['vol_r'] > (p['exp']/100)) & (df['c'] < df['o']) & (df['c'] < supp)
     
     return df, {'press': press, 'supp': supp, 'vol_r': df['vol_r'].iloc[-1]}
 
 # ==========================================
-# 3. 实时播报与战报同步系统 (全量 UI)
+# 3. 实时进程 (隔离同步补丁)
 # ==========================================
 def main():
     if "sig_history" not in st.session_state: st.session_state.sig_history = []
@@ -86,13 +82,14 @@ def main():
         ma_len = st.number_input("均量周期", 5, 60, 10)
         exp = st.slider("放量触发阈值%", 100, 300, 150)
         sym = st.text_input("合约代码", "ETH-USDT-SWAP")
-        st.info("当前时区：Asia/Shanghai (UTC+8)")
-        if st.button("清空战报历史"): st.session_state.sig_history = []; st.rerun()
+        st.success("时区校准：Asia/Shanghai (UTC+8)")
+        if st.button("清空战报历史"): 
+            st.session_state.sig_history = []
+            st.session_state.last_sig_ts = ""
+            st.rerun()
 
-    # 核心槽位定义
     report_slot = st.empty()
     chart_slot = st.empty()
-    
     st.markdown("### 📜 信号复盘历史 (北京时间同步)")
     history_container = st.container()
     voice_slot = st.empty()
@@ -105,10 +102,11 @@ def main():
                 df, res = warrior_engine(r.json()['data'], {"ma_len": ma_len, "exp": exp})
             
             curr = df.iloc[-1]
-            # 获取当前最新的北京时间显示
-            bj_now_str = curr['time'].strftime('%Y-%m-%d %H:%M:%S')
+            # 显式格式化，修复 17:30 撕裂
+            bj_now_full = curr['time'].strftime('%Y-%m-%d %H:%M:%S')
+            bj_now_hms = curr['time'].strftime('%H:%M:%S')
             
-            # --- 视觉战报与口诀同步 ---
+            # --- 战报逻辑判定 ---
             if curr['buy_tri']:
                 status_html = f"<div class='bull-alert'>🚀 多头全军突击 | ${curr['c']:.2f}</div>"
                 say_cmd = "放量起涨，多头全军突击，直接入场！" 
@@ -118,30 +116,30 @@ def main():
                 say_cmd = "放量破位，空头全面砸盘，果断撤退！" 
                 h_color = "#ef4444"
             else:
-                # 在震荡蓄势中加入北京时间校准
-                status_html = f"<div style='color:#3b82f6; font-size:1.5rem;'>💎 震荡蓄势中 | <span class='bj-time-tag'>{bj_now_str}</span></div>"
+                status_html = f"<div style='color:#3b82f6; font-size:1.5rem;'>💎 震荡蓄势中 | <span class='bj-time-tag'>{bj_now_full}</span></div>"
                 say_cmd = ""
                 h_color = "#30363d"
 
-            # 渲染置顶战报 (保留原有全部布局)
             report_slot.markdown(f"""
                 <div class='sticky-header'>
                     {status_html}
                     <div style='display:flex; justify-content:space-between; margin-top:12px; color:#8b949e; font-family:monospace;'>
-                        <span>北京时间: <b class='bj-time-tag'>{bj_now_str}</b></span>
+                        <span>实时量能比: <b style='color:white;'>{res['vol_r']:.2f}x</b></span>
                         <span>压力锚点: <b style='color:#ef4444;'>{res['press']}</b></span>
                         <span>支撑锚点: <b style='color:#10b981;'>{res['supp']}</b></span>
                     </div>
                 </div>
             """, unsafe_allow_html=True)
 
-            # --- 语音与历史记录同步 (使用修正后的北京时戳) ---
+            # --- 核心同步：物理固化北京时间 ---
+            # 使用原始 ts (string) 进行对比，确保唯一触发
             if say_cmd and st.session_state.last_sig_ts != str(curr['ts']):
+                # 存入历史前强制字符串化
                 st.session_state.sig_history.insert(0, {
-                    "t": curr['time'].strftime('%H:%M:%S'), 
-                    "msg": say_cmd, 
-                    "p": curr['c'], 
-                    "c": h_color
+                    "t": str(bj_now_hms), 
+                    "msg": str(say_cmd), 
+                    "p": float(curr['c']), 
+                    "c": str(h_color)
                 })
                 st.session_state.last_sig_ts = str(curr['ts'])
                 
@@ -156,28 +154,26 @@ def main():
                             </script>
                         """, height=0)
 
-            # --- K线主图 (保留多空三角 - 绝不删减) ---
+            # --- 图表渲染 ---
             with chart_slot:
                 fig = go.Figure(data=[go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="K线")])
                 b_pts = df[df['buy_tri']]; s_pts = df[df['sell_tri']]
                 fig.add_trace(go.Scatter(x=b_pts['time'], y=b_pts['l']*0.998, mode='markers', name="多", marker=dict(symbol='triangle-up', size=14, color='#10b981', line=dict(width=1, color='white'))))
                 fig.add_trace(go.Scatter(x=s_pts['time'], y=s_pts['h']*1.002, mode='markers', name="空", marker=dict(symbol='triangle-down', size=14, color='#ef4444', line=dict(width=1, color='white'))))
-                
                 fig.update_layout(height=500, template="plotly_dark", margin=dict(t=0,b=0,l=0,r=0), xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-            # --- 历史战报同步显示 (全量保留) ---
+            # --- 历史战报渲染 ---
             with history_container:
                 for item in st.session_state.sig_history[:10]:
                     st.markdown(f"""
                         <div class='history-card' style='border-left-color:{item['c']};'>
                             <span class='bj-time-tag'>[{item['t']}]</span> 
-                            <b style='color:{item['c']};'>{item['msg']}</b> | 
-                            价格: <code>{item['p']}</code>
+                            <b style='color:{item['c']};'>{item['msg']}</b> | 价格: <code>{item['p']}</code>
                         </div>
                     """, unsafe_allow_html=True)
 
-        except Exception as e: report_slot.error(f"同步中... {str(e)}")
+        except Exception as e: report_slot.error(f"连接中... {str(e)}")
 
     tick()
 
