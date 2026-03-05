@@ -8,14 +8,13 @@ from datetime import datetime
 import pytz
 
 # ==========================================
-# 1. 终极 UI 渲染引擎 (包含全部截图细节)
+# 1. 终极 UI 渲染引擎 (硬核边框与毛玻璃)
 # ==========================================
 st.set_page_config(layout="wide", page_title="Warrior Sniper V6.2 Pro", page_icon="⚔️")
 
 st.markdown("""
     <style>
     .stApp { background-color: #05070a; color: #e6edf3; }
-    /* 置顶战报：毛玻璃与硬核边框 */
     .sticky-header {
         position: sticky; top: 0; z-index: 100;
         background: rgba(13, 17, 23, 0.95);
@@ -24,12 +23,10 @@ st.markdown("""
         backdrop-filter: blur(10px);
         box-shadow: 0 4px 20px rgba(0,0,0,0.5);
     }
-    /* 核心警报：动态放量提醒 */
     .bull-alert { color: #10b981; border: 2px solid #10b981; padding: 12px; border-radius: 8px; animation: blink 0.8s infinite; background: rgba(16, 185, 129, 0.1); font-weight: bold; font-size: 1.5rem; }
     .bear-alert { color: #ef4444; border: 2px solid #ef4444; padding: 12px; border-radius: 8px; animation: blink 0.8s infinite; background: rgba(239, 68, 68, 0.1); font-weight: bold; font-size: 1.5rem; }
     @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
     
-    /* 历史记录卡片 */
     .history-card {
         background: #0d1117; border-left: 5px solid #30363d;
         padding: 12px; margin-bottom: 8px; border-radius: 4px;
@@ -40,41 +37,38 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 核心交易引擎 (不删减 K-coefficient 与算法)
+# 2. 核心交易引擎 (严格保留原始算法逻辑)
 # ==========================================
 def warrior_engine(data, p):
     df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
     for col in ['o','h','l','c','v']: df[col] = pd.to_numeric(df[col])
     
-    # 强制物理排序与北京时间锁定
-    df['time'] = pd.to_datetime(df['ts'].astype(int), unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Shanghai')
+    # 强制 UTC 转换北京时间，彻底切断时区回退隐患
+    df['time'] = pd.to_datetime(df['ts'].astype(np.int64), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
     df = df.sort_values('time').reset_index(drop=True)
     
-    # ATR 与 动态锚点逻辑
+    # ATR 与 动态锚点计算
     df['tr'] = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
     df['atr'] = df['tr'].rolling(14).mean()
     ma_v = df['v'].rolling(p['ma_len']).mean()
     df['vol_r'] = df['v'] / ma_v.replace(0, 1e-9)
     
-    # 支撑/压力动态搜索
     lookback = df.tail(30)
     v_dn = lookback[lookback['c'] < lookback['o']]
     v_up = lookback[lookback['c'] > lookback['o']]
     press = v_dn.nlargest(1, 'v')['h'].values[0] if not v_dn.empty else lookback['h'].max()
     supp = v_up.nlargest(1, 'v')['l'].values[0] if not v_up.empty else lookback['l'].min()
 
-    # 口诀判定逻辑
     df['buy_tri'] = (df['vol_r'] > (p['exp']/100)) & (df['c'] > df['o']) & (df['c'] > press)
     df['sell_tri'] = (df['vol_r'] > (p['exp']/100)) & (df['c'] < df['o']) & (df['c'] < supp)
     
     return df, {'press': press, 'supp': supp, 'vol_r': df['vol_r'].iloc[-1]}
 
 # ==========================================
-# 3. 实时进程 (隔离同步补丁)
+# 3. 实时进程 (内存级同步锁)
 # ==========================================
 def main():
     if "sig_history" not in st.session_state: st.session_state.sig_history = []
-    if "last_sig_ts" not in st.session_state: st.session_state.last_sig_ts = ""
 
     with st.sidebar:
         st.title("⚔️ Sniper Pro V6.2")
@@ -85,7 +79,6 @@ def main():
         st.success("时区校准：Asia/Shanghai (UTC+8)")
         if st.button("清空战报历史"): 
             st.session_state.sig_history = []
-            st.session_state.last_sig_ts = ""
             st.rerun()
 
     report_slot = st.empty()
@@ -102,11 +95,9 @@ def main():
                 df, res = warrior_engine(r.json()['data'], {"ma_len": ma_len, "exp": exp})
             
             curr = df.iloc[-1]
-            # 显式格式化，修复 17:30 撕裂
             bj_now_full = curr['time'].strftime('%Y-%m-%d %H:%M:%S')
             bj_now_hms = curr['time'].strftime('%H:%M:%S')
             
-            # --- 战报逻辑判定 ---
             if curr['buy_tri']:
                 status_html = f"<div class='bull-alert'>🚀 多头全军突击 | ${curr['c']:.2f}</div>"
                 say_cmd = "放量起涨，多头全军突击，直接入场！" 
@@ -131,17 +122,21 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-            # --- 核心同步：物理固化北京时间 ---
-            # 使用原始 ts (string) 进行对比，确保唯一触发
-            if say_cmd and st.session_state.last_sig_ts != str(curr['ts']):
-                # 存入历史前强制字符串化
+            # === 【终极防御锁】物理阻断重复刷屏 ===
+            is_duplicate = False
+            if st.session_state.sig_history:
+                # 直接探查历史列表第一项，无视 Streamlit 的变量同步延迟
+                last_record = st.session_state.sig_history[0]
+                if last_record["t"] == str(bj_now_hms) and last_record["msg"] == str(say_cmd):
+                    is_duplicate = True
+            
+            if say_cmd and not is_duplicate:
                 st.session_state.sig_history.insert(0, {
                     "t": str(bj_now_hms), 
                     "msg": str(say_cmd), 
                     "p": float(curr['c']), 
                     "c": str(h_color)
                 })
-                st.session_state.last_sig_ts = str(curr['ts'])
                 
                 if voice_on:
                     with voice_slot:
@@ -173,7 +168,8 @@ def main():
                         </div>
                     """, unsafe_allow_html=True)
 
-        except Exception as e: report_slot.error(f"连接中... {str(e)}")
+        except Exception as e: 
+            report_slot.error(f"信号连通中... 正在重试")
 
     tick()
 
