@@ -3,153 +3,127 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import httpx  # 异步请求库
+import httpx
 import asyncio
 import time
 from datetime import datetime
 
-# ---------- 1. 极致性能配置 ----------
-st.set_page_config(layout="wide", page_title="ETH Warrior 高性能版", page_icon="⚔️")
+# ---------- 1. 页面配置与黑金样式 ----------
+st.set_page_config(layout="wide", page_title="ETH Warrior 终极修复版", page_icon="⚔️")
 
-# CSS 优化：锁定布局，防止刷新闪烁，提升黑金视觉对比度
 st.markdown("""
     <style>
     .reportview-container { background: #0e1117; }
     div[data-testid="stMetric"] { background: #1a1c24; border: 1px solid #333; padding: 15px; border-radius: 8px; }
-    div[data-testid="stMetricValue"] { color: #f0c05a; font-family: 'Courier New', monospace; }
-    canvas { image-rendering: -webkit-optimize-contrast; } 
+    div[data-testid="stMetricValue"] { color: #f0c05a; }
     </style>
 """, unsafe_allow_html=True)
 
-# ---------- 2. 异步数据引擎 (OKX V5) ----------
-class OKXDataEngine:
+# ---------- 2. 高性能异步引擎 ----------
+class OKXEngine:
     def __init__(self):
-        self.api_url = "https://www.okx.com/api/v5/market/candles"
-        self.limits = 150 # 仅维护必要的窗口数据，节省内存
+        self.url = "https://www.okx.com/api/v5/market/candles"
 
-    async def get_candles(self, instId, bar='5m'):
+    async def fetch(self, instId):
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
             try:
-                params = {"instId": instId, "bar": bar, "limit": self.limits}
-                response = await client.get(self.api_url, params=params)
-                if response.status_code == 200:
-                    data = response.json().get('data', [])
-                    return self._process_data(data)
+                params = {"instId": instId, "bar": "5m", "limit": "150"}
+                resp = await client.get(self.url, params=params)
+                if resp.status_code == 200:
+                    data = resp.json().get('data', [])
+                    if not data: return None
+                    df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
+                    df = df[['ts','o','h','l','c','v']].apply(pd.to_numeric)
+                    df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+                    df.columns = ['time','open','high','low','close','volume']
+                    return df.sort_values('time').reset_index(drop=True)
+            except:
                 return None
-            except Exception:
-                return None
+        return None
 
-    def _process_data(self, data):
-        if not data: return None
-        # 批量向量化转换
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
-        df = df[['ts','o','h','l','c','v']].apply(pd.to_numeric)
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        df.columns = ['time','open','high','low','close','volume']
-        return df.sort_values('time').reset_index(drop=True)
+engine = OKXEngine()
 
-engine = OKXDataEngine()
-
-# ---------- 3. 策略内核：全向量化计算 (性能提升 > 100x) ----------
-def apply_warrior_vectorized(df, s_ratio, e_ratio, v_len, b_min):
-    """摒弃 for 循环，使用矩阵运算直接标记所有信号点"""
+# ---------- 3. 策略逻辑 (向量化修复) ----------
+def apply_strategy(df, s_ratio, e_ratio, v_len, b_min):
+    df = df.copy()
     df['v_ma'] = df['volume'].rolling(v_len).mean()
     df['h_ref'] = df['high'].rolling(20).max().shift(1)
     df['l_ref'] = df['low'].rolling(20).min().shift(1)
     
-    # 定义量能状态
-    is_shrink = df['volume'] < (df['v_ma'] * s_ratio)
-    is_expand = df['volume'] > (df['v_ma'] * e_ratio)
+    # 量能判定
+    df['is_shrink'] = df['volume'] < (df['v_ma'] * s_ratio)
+    df['is_expand'] = df['volume'] > (df['v_ma'] * e_ratio)
     
-    # 价格形态计算
+    # 实体占比判定
     body = (df['close'] - df['open']).abs()
     range_val = (df['high'] - df['low']) + 1e-9
-    body_pct = body / range_val
+    df['body_pct'] = body / range_val
     
     df['signal'] = 0.0
-    
-    # 状态 A/C: 缩量观察区 (0.5=多头预警, -0.5=空头预警)
-    df.loc[is_shrink & (df['low'] <= df['l_ref'] * 1.002), 'signal'] = 0.5
-    df.loc[is_shrink & (df['high'] >= df['h_ref'] * 0.998), 'signal'] = -0.5
-    
-    # 状态 B: 放量起涨 (做多执行)
-    long_cond = is_expand & (df['close'] > df['open']) & \
-                (df['close'] > df['open'].shift(1)) & (body_pct > b_min)
-    df.loc[long_cond, 'signal'] = 1.0
-    
-    # 状态 D: 放量杀跌 (做空执行)
-    short_cond = is_expand & (df['close'] < df['open']) & \
-                 (df['close'] < df['open'].shift(1)) & (body_pct > b_min)
-    df.loc[short_cond, 'signal'] = -1.0
-    
+    # 逻辑 A/C: 缩量预警
+    df.loc[df['is_shrink'] & (df['low'] <= df['l_ref'] * 1.002), 'signal'] = 0.5
+    df.loc[df['is_shrink'] & (df['high'] >= df['h_ref'] * 0.998), 'signal'] = -0.5
+    # 逻辑 B/D: 放量突破执行
+    df.loc[df['is_expand'] & (df['close'] > df['open']) & (df['close'] > df['open'].shift(1)) & (df['body_pct'] > b_min), 'signal'] = 1.0
+    df.loc[df['is_expand'] & (df['close'] < df['open']) & (df['close'] < df['open'].shift(1)) & (df['body_pct'] > b_min), 'signal'] = -1.0
     return df
 
-# ---------- 4. 局部刷新组件 (@st.fragment) ----------
+# ---------- 4. 局部刷新组件 (修复颜色与索引 Bug) ----------
 @st.fragment(run_every="5s")
-def render_live_monitor(symbol, params):
-    df_raw = asyncio.run(engine.get_candles(symbol))
+def render_warrior_ui(symbol, params):
+    df_raw = asyncio.run(engine.fetch(symbol))
     
-    if df_raw is not None:
-        df = apply_warrior_vectorized(df_raw, **params)
+    if df_raw is not None and len(df_raw) > 20:
+        df = apply_strategy(df_raw, **params)
         last = df.iloc[-1]
         
-        # --- 1. 核心看板 ---
+        # 1. 看板指标
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("ETH 现价", f"${last['close']}", f"{last['close']-df.iloc[-2]['close']:.2f}")
-        c2.metric("当前量能比", f"{(last['volume']/last['v_ma']):.2f}x")
+        c2.metric("当前量能", f"{(last['volume']/last['v_ma']):.2f}x")
         
-        sig_map = {1.0: "🔥 放量突破(多)", -1.0: "📉 放量跌破(空)", 
-                   0.5: "👀 缩量探底", -0.5: "👀 缩量摸顶", 0.0: "💎 震荡蓄势"}
-        c3.metric("实时战报", sig_map.get(last['signal']))
-        c4.metric("物理心跳", f"{int(time.time() % 60)}s")
+        status = {1.0: "🔥 放量起涨", -1.0: "📉 放量杀跌", 0.5: "👀 缩量探底", -0.5: "👀 缩量摸顶", 0.0: "💎 震荡"}
+        c3.metric("实时战况", status.get(last['signal'], "等待"))
+        c4.metric("刷新心跳", f"{int(time.time()%60)}s")
 
-        # --- 2. 深度可视化 (WebGL 加速) ---
+        # 2. 绘图 (修复 #ff4b4b55 颜色错误)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
         
-        # K线 (关闭 RangeSlider 减少前端压力)
         fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], 
                                      low=df['low'], close=df['close'], name="K"), row=1, col=1)
         
-        # 信号执行点 (Scattergl 渲染更快)
-        buy_pts = df[df['signal'] == 1]
-        sell_pts = df[df['signal'] == -1]
-        fig.add_trace(go.Scattergl(x=buy_pts['time'], y=buy_pts['low']*0.998, mode='markers', 
-                                   marker=dict(symbol='triangle-up', size=16, color='#00ff00'), name="多"), row=1, col=1)
-        fig.add_trace(go.Scattergl(x=sell_pts['time'], y=sell_pts['high']*1.002, mode='markers', 
-                                   marker=dict(symbol='triangle-down', size=16, color='#ff4b4b'), name="空"), row=1, col=1)
+        # 执行信号
+        buys = df[df['signal'] == 1.0]
+        sells = df[df['signal'] == -1.0]
+        fig.add_trace(go.Scattergl(x=buys['time'], y=buys['low']*0.998, mode='markers', 
+                                   marker=dict(symbol='triangle-up', size=15, color='#00ff00')), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=sells['time'], y=sells['high']*1.002, mode='markers', 
+                                   marker=dict(symbol='triangle-down', size=15, color='#ff4b4b')), row=1, col=1)
 
-        # 支撑/压力动态参考线
-        fig.add_hline(y=last['h_ref'], line_dash="dash", line_color="#ff4b4b55", row=1, col=1)
-        fig.add_hline(y=last['l_ref'], line_dash="dash", line_color="#00ff0055", row=1, col=1)
+        # 参考线 (修正点：使用 6 位 Hex)
+        fig.add_hline(y=last['h_ref'], line_dash="dash", line_color="#ff4b4b", opacity=0.3, row=1, col=1)
+        fig.add_hline(y=last['l_ref'], line_dash="dash", line_color="#00ff00", opacity=0.3, row=1, col=1)
 
-        # 量能视图
-        v_colors = ['#ff4b4b' if r['close'] < r['open'] else '#00cc96' for _, r in df.iterrows()]
-        fig.add_trace(go.Bar(x=df['time'], y=df['volume'], marker_color=v_colors, opacity=0.4), row=2, col=1)
-        fig.add_trace(go.Scattergl(x=df['time'], y=df['v_ma'], line=dict(color='orange', width=1.5)), row=2, col=1)
+        # 量能柱
+        v_clrs = ['#ff4b4b' if r['c'] < r['o'] else '#00cc96' for _, r in df_raw.iterrows()]
+        fig.add_trace(go.Bar(x=df['time'], y=df['volume'], marker_color=v_clrs, opacity=0.5), row=2, col=1)
 
-        fig.update_layout(height=650, template="plotly_dark", showlegend=False, 
-                          xaxis_rangeslider_visible=False, margin=dict(t=5, b=5, l=5, r=5))
-        st.plotly_chart(fig, width='stretch', use_container_width=True, config={'displayModeBar': False})
+        fig.update_layout(height=600, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=5, b=5, l=5, r=5))
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
     else:
-        st.error("数据源异常，请检查网络或代理...")
+        st.warning("⚠️ 正在等待 API 数据响应或数据量不足...")
 
-# ---------- 5. 主流程 ----------
+# ---------- 5. 主程序 ----------
 def main():
-    st.sidebar.title("⚔️ Warrior V2.0")
-    
-    with st.sidebar.expander("心法参数调节", expanded=True):
-        params = {
-            "v_len": st.number_input("均量周期 (MA)", 5, 30, 10),
-            "s_ratio": st.slider("缩量判定 (均量x%)", 30, 80, 60) / 100,
-            "e_ratio": st.slider("放量判定 (均量x%)", 120, 300, 150) / 100,
-            "b_min": st.slider("突破实体饱满度", 0.0, 0.5, 0.20)
-        }
-    
-    symbol = st.sidebar.text_input("监控合约", "ETH-USDT-SWAP")
-    st.sidebar.divider()
-    st.sidebar.caption("不灭大衍系统运行中...")
-    
-    render_live_monitor(symbol, params)
+    st.sidebar.title("⚔️ Warrior V2.0 修补版")
+    params = {
+        "v_len": st.sidebar.number_input("均量周期", 5, 30, 10),
+        "s_ratio": st.sidebar.slider("缩量判定%", 30, 80, 60) / 100,
+        "e_ratio": st.sidebar.slider("放量判定%", 120, 300, 150) / 100,
+        "b_min": st.sidebar.slider("实体饱满度", 0.0, 0.5, 0.20)
+    }
+    symbol = st.sidebar.text_input("合约代码", "ETH-USDT-SWAP")
+    render_warrior_ui(symbol, params)
 
 if __name__ == "__main__":
     main()
