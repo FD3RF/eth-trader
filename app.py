@@ -9,15 +9,15 @@ from datetime import datetime
 import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 初始化配置与顶级视觉
+# 1. 顶级视觉初始化
 # ==========================================
-st.set_page_config(layout="wide", page_title="Warrior V5.8 | 战神逻辑矩阵", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="Warrior V5.9 | 全装甲版", page_icon="⚔️")
 
 st.markdown("""
     <style>
     .block-container { padding: 1rem 1.5rem; }
     [data-testid="stMetric"] { background: #11141c; border: 1px solid #2d323e; padding: 15px; border-radius: 10px; }
-    .status-card { background: #1a1c23; border: 1px solid #d4af37; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+    .status-card { background: #1a1c23; border: 4px left solid #d4af37; padding: 20px; border-radius: 12px; margin-bottom: 20px; border-left: 5px solid #d4af37; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -33,7 +33,7 @@ def voice_alert(text):
     """, height=0)
 
 # ==========================================
-# 3. 数据与策略逻辑
+# 3. 核心引擎与逻辑
 # ==========================================
 class WarriorEngine:
     def __init__(self):
@@ -58,12 +58,12 @@ def apply_warrior_logic(df, p):
     df['ma_v'] = df['v'].rolling(p['ma_len']).mean()
     df['body_ratio'] = abs(df['c'] - df['o']) / (df['h'] - df['l']).replace(0, 0.001)
     
-    # 信号判定
+    # 信号判定逻辑
     df['is_expand'] = df['v'] > df['ma_v'] * (p['expand_p'] / 100.0)
     df['buy_sig'] = df['is_expand'] & (df['c'] > df['o']) & (df['body_ratio'] > p['body_r'])
     df['sell_sig'] = df['is_expand'] & (df['c'] < df['o']) & (df['body_ratio'] > p['body_r'])
     
-    # 锚点锁定：阴线高点与阳线低点
+    # 锚点锁定
     big_down = df[(df['c'] < df['o']) & (df['v'] > df['ma_v'] * 1.3)].iloc[-1:]
     big_up = df[(df['c'] > df['o']) & (df['v'] > df['ma_v'] * 1.3)].iloc[-1:]
     
@@ -74,7 +74,7 @@ def apply_warrior_logic(df, p):
     return df, anchors
 
 # ==========================================
-# 4. 实时战报：详细解析矩阵
+# 4. 实时战报渲染
 # ==========================================
 def render_detailed_report(curr, anchors):
     vol_ratio = curr['v'] / curr['ma_v']
@@ -82,7 +82,6 @@ def render_detailed_report(curr, anchors):
     upper = anchors['down_high']
     lower = anchors['up_low']
 
-    # 逻辑矩阵分级
     if curr['buy_sig'] and price > upper:
         status, detail, color = "🚀 核心突破", "放量起涨且突破阴线高点，多头总攻！", "#26a69a"
         voice_alert("放量起涨，突破前高，直接开多")
@@ -91,75 +90,85 @@ def render_detailed_report(curr, anchors):
     elif vol_ratio < 0.6:
         status, detail, color = "⏳ 动能衰减", "缩量回踩中，低点不破不入场，耐心潜伏。", "#888888"
     elif price < lower:
-        status, detail, color = "❄️ 趋势转弱", "跌破阳线支撑低点，口诀：果断止损。", "#ef5350"
+        status, detail, color = "❄️ 趋势转弱", "跌破阳线支撑低点，果断止损。", "#ef5350"
         voice_alert("跌破支撑，果断止损")
     else:
         status, detail, color = "💎 震荡蓄势", f"当前量能 {vol_ratio:.2f}x，观察支撑位 {lower:.2f}。", "#1e90ff"
 
     st.markdown(f"""
-        <div class="status-card">
-            <h2 style='color:{color}; margin:0;'>{status}</h2>
-            <p style='color:#ccc; font-size:18px; margin-top:10px;'><b>实战逻辑：</b>{detail}</p>
+        <div class="status-card" style="border-left: 8px solid {color};">
+            <h1 style='color:{color}; margin:0;'>{status}</h1>
+            <p style='color:#ccc; font-size:20px; margin-top:10px;'><b>实战逻辑：</b>{detail}</p>
         </div>
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 5. 主渲染循环
+# 5. 主图渲染（找回三角信号）
 # ==========================================
 @st.fragment(run_every="10s")
 def dashboard_loop():
     engine = WarriorEngine()
     df = engine.get_market_data(st.session_state.symbol)
-    
     if df is None or df.empty:
-        st.warning("📡 正在接入 OKX 数据流...")
+        st.warning("📡 数据同步中...")
         st.stop()
 
     df, anchors = apply_warrior_logic(df, st.session_state.params)
     curr = df.iloc[-1]
     
-    # 1. 详细战报区
     render_detailed_report(curr, anchors)
     
-    # 2. 核心指标区
     c1, c2, c3 = st.columns(3)
     c1.metric("ETH 现价", f"${curr['c']:.2f}")
     c2.metric("当前量能比", f"{curr['v']/curr['ma_v']:.2f}x")
     c3.metric("最后更新", f"{datetime.now().strftime('%H:%M:%S')}")
 
-    # 3. 绘图区
+    # 绘图逻辑开始
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
+    
+    # 1. K线图
     fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
                                  increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="K线"), row=1, col=1)
 
-    # 绘制锚点虚线
+    # 2. 【核心回档】买入三角
+    buys = df[df['buy_sig']]
+    fig.add_trace(go.Scatter(x=buys['time'], y=buys['l']*0.998, mode='markers',
+                             marker=dict(symbol='triangle-up', size=15, color='#00ffcc', line=dict(width=1, color='white')),
+                             name='做多信号'), row=1, col=1)
+
+    # 3. 【核心回档】卖出三角
+    sells = df[df['sell_sig']]
+    fig.add_trace(go.Scatter(x=sells['time'], y=sells['h']*1.002, mode='markers',
+                             marker=dict(symbol='triangle-down', size=15, color='#ff3366', line=dict(width=1, color='white')),
+                             name='做空信号'), row=1, col=1)
+
+    # 4. 压力支撑线
     fig.add_hline(y=anchors['down_high'], line_dash="dot", line_color="#ef5350", annotation_text="压力:阴高", row=1, col=1)
     fig.add_hline(y=anchors['up_low'], line_dash="dot", line_color="#26a69a", annotation_text="支撑:阳低", row=1, col=1)
 
-    # 成交量与均量
+    # 5. 成交量
     v_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df['c'], df['o'])]
     fig.add_trace(go.Bar(x=df['time'], y=df['v'], marker_color=v_colors, opacity=0.4), row=2, col=1)
     fig.add_trace(go.Scatter(x=df['time'], y=df['ma_v'], line=dict(color='#ffa500', width=1.5)), row=2, col=1)
 
-    fig.update_layout(height=700, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=10,b=10,l=10,r=50))
+    fig.update_layout(height=750, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=10,b=10,l=10,r=50))
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 # ==========================================
-# 6. 指挥中心
+# 6. 控制台
 # ==========================================
 def main():
-    st.sidebar.title("⚔️ Warrior V5.8")
+    st.sidebar.title("⚔️ Warrior V5.9")
     ma_p = st.sidebar.number_input("均量周期", 5, 100, 10)
     expand_p = st.sidebar.slider("放量判定 (%)", 110, 500, 150)
     body_r = st.sidebar.slider("突破实体比", 0.05, 0.90, 0.20)
-    
     st.session_state.params = {"ma_len": ma_p, "expand_p": expand_p, "body_r": body_r}
     st.session_state.symbol = st.sidebar.text_input("合约代码", "ETH-USDT-SWAP")
     
     st.sidebar.divider()
-    st.sidebar.markdown("### 📜 量价口诀检测中")
-    st.sidebar.write("✅ 缩量回踩：监控中")
-    st.sidebar.write("✅ 压力锁定：已开启")
+    st.sidebar.markdown("### 🏹 信号雷达：已锁定")
+    st.sidebar.write(f"✅ 多头三角：已找回")
+    st.sidebar.write(f"✅ 空头三角：已开启")
     
     dashboard_loop()
 
