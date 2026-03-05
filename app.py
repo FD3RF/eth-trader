@@ -10,7 +10,7 @@ import pytz
 # ==========================================
 # 1. 终极 UI 渲染引擎 (硬核边框与毛玻璃)
 # ==========================================
-st.set_page_config(layout="wide", page_title="Warrior Sniper V6.2 Pro", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="Warrior Sniper V6.3 Pro", page_icon="⚔️")
 
 st.markdown("""
     <style>
@@ -37,13 +37,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 核心交易引擎 (严格保留原始算法逻辑)
+# 2. 核心交易引擎 (严格保留原始算法逻辑，零删减)
 # ==========================================
 def warrior_engine(data, p):
     df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
     for col in ['o','h','l','c','v']: df[col] = pd.to_numeric(df[col])
     
-    # 强制 UTC 转换北京时间，彻底切断时区回退隐患
+    # 强制 UTC 转换北京时间
     df['time'] = pd.to_datetime(df['ts'].astype(np.int64), unit='ms', utc=True).dt.tz_convert('Asia/Shanghai')
     df = df.sort_values('time').reset_index(drop=True)
     
@@ -65,13 +65,20 @@ def warrior_engine(data, p):
     return df, {'press': press, 'supp': supp, 'vol_r': df['vol_r'].iloc[-1]}
 
 # ==========================================
-# 3. 实时进程 (内存级同步锁)
+# 3. 实时进程 (绝对原子锁 & 幽灵净化)
 # ==========================================
 def main():
+    # --- 幽灵净化协议：首次运行强制洗掉所有旧缓存 ---
+    if "v6_3_purged" not in st.session_state:
+        st.session_state.sig_history = []
+        st.session_state.triggered_signals = set()
+        st.session_state.v6_3_purged = True
+
     if "sig_history" not in st.session_state: st.session_state.sig_history = []
+    if "triggered_signals" not in st.session_state: st.session_state.triggered_signals = set()
 
     with st.sidebar:
-        st.title("⚔️ Sniper Pro V6.2")
+        st.title("⚔️ Sniper Pro V6.3")
         voice_on = st.toggle("语音咆哮提醒", True) 
         ma_len = st.number_input("均量周期", 5, 60, 10)
         exp = st.slider("放量触发阈值%", 100, 300, 150)
@@ -79,6 +86,7 @@ def main():
         st.success("时区校准：Asia/Shanghai (UTC+8)")
         if st.button("清空战报历史"): 
             st.session_state.sig_history = []
+            st.session_state.triggered_signals = set()
             st.rerun()
 
     report_slot = st.empty()
@@ -95,6 +103,7 @@ def main():
                 df, res = warrior_engine(r.json()['data'], {"ma_len": ma_len, "exp": exp})
             
             curr = df.iloc[-1]
+            curr_ts_id = str(curr['ts']) # 提取 OKX 原始时间戳作为唯一ID
             bj_now_full = curr['time'].strftime('%Y-%m-%d %H:%M:%S')
             bj_now_hms = curr['time'].strftime('%H:%M:%S')
             
@@ -122,15 +131,12 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-            # === 【终极防御锁】物理阻断重复刷屏 ===
-            is_duplicate = False
-            if st.session_state.sig_history:
-                # 直接探查历史列表第一项，无视 Streamlit 的变量同步延迟
-                last_record = st.session_state.sig_history[0]
-                if last_record["t"] == str(bj_now_hms) and last_record["msg"] == str(say_cmd):
-                    is_duplicate = True
+            # === 【终极物理锁】基于 K线时间戳 + 指令的唯一哈希锁 ===
+            unique_sig_id = f"{curr_ts_id}_{say_cmd}"
             
-            if say_cmd and not is_duplicate:
+            if say_cmd and unique_sig_id not in st.session_state.triggered_signals:
+                # 记录该信号，永久免疫这根K线的重复触发
+                st.session_state.triggered_signals.add(unique_sig_id)
                 st.session_state.sig_history.insert(0, {
                     "t": str(bj_now_hms), 
                     "msg": str(say_cmd), 
@@ -169,7 +175,7 @@ def main():
                     """, unsafe_allow_html=True)
 
         except Exception as e: 
-            report_slot.error(f"信号连通中... 正在重试")
+            pass # 保持UI整洁，静默重试
 
     tick()
 
