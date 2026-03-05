@@ -1,164 +1,3 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import httpx
-from datetime import datetime
-
-# ==========================================
-# 页面初始化
-# ==========================================
-st.set_page_config(
-    layout="wide",
-    page_title="Warrior Sniper V6.2",
-    page_icon="⚔️"
-)
-
-# ==========================================
-# HTTP Client（稳定连接池）
-# ==========================================
-if "http_client" not in st.session_state:
-    st.session_state.http_client = httpx.Client(
-        timeout=httpx.Timeout(10.0),
-        limits=httpx.Limits(
-            max_connections=20,
-            max_keepalive_connections=10
-        ),
-        follow_redirects=True
-    )
-
-# ==========================================
-# CSS（精细化 UI）
-# ==========================================
-st.markdown("""
-<style>
-#MainMenu {visibility:hidden;}
-footer {visibility:hidden;}
-header {visibility:hidden;}
-
-.block-container{
-    padding-top:1rem;
-    padding-bottom:1rem;
-    max-width:100%;
-}
-
-[data-testid="stMetric"]{
-    background: linear-gradient(180deg, #111827 0%, #0f172a 100%);
-    border: 1px solid #1f2937;
-    border-radius: 14px;
-    padding: 14px;
-    min-height: 92px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-}
-
-.status-card{
-    background:#111827;
-    border-radius:14px;
-    border:1px solid #1f2937;
-    padding:16px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-}
-
-.js-plotly-plot{
-    transition:opacity .2s ease;
-    border-radius:14px;
-}
-
-div[data-testid="stAlert"] {
-    border-radius: 12px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-# ==========================================
-# 数据获取
-# ==========================================
-@st.cache_data(ttl=8)
-def fetch_data(symbol):
-
-    try:
-        r = st.session_state.http_client.get(
-            "https://www.okx.com/api/v5/market/candles",
-            params={"instId": symbol, "bar": "5m", "limit": "120"}
-        )
-    except Exception:
-        return None
-
-    if r.status_code != 200:
-        return None
-
-    payload = r.json()
-    if not isinstance(payload, dict) or "data" not in payload:
-        return None
-
-    data = payload["data"]
-    if not data:
-        return None
-
-    try:
-        df = pd.DataFrame(
-            data,
-            columns=["ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"]
-        )
-    except Exception:
-        return None
-
-    for col in ["o","h","l","c","v"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["time"] = pd.to_datetime(df["ts"], unit="ms", errors="coerce")
-    df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
-    return df
-
-
-# ==========================================
-# 策略核心（缩量回踩）
-# ==========================================
-def apply_warrior_logic(df, p):
-
-    df = df.copy().dropna().reset_index(drop=True)
-
-    df["ma_v"] = df["v"].rolling(p["ma_len"], min_periods=1).mean()
-    df["is_expand"] = df["v"] > df["ma_v"] * (p["expand_p"] / 100)
-
-    df["body_size"] = abs(df["c"] - df["o"])
-    df["total_size"] = (df["h"] - df["l"]).replace(0, 1e-9)
-    df["body_ratio"] = df["body_size"] / df["total_size"]
-
-    # 缩量回踩
-    df["is_shrink"] = df["v"] < df["ma_v"] * 0.8
-    df["is_pinbar"] = (df["l"] < df["o"]) & (df["l"] < df["c"]) & ((df["c"] - df["l"]) > (df["h"] - df["c"]))
-
-    df["buy_sig"] = (
-        df["is_shrink"] &
-        df["is_pinbar"] &
-        (df["c"] > df["o"])
-    )
-
-    df["sell_sig"] = (
-        df["is_expand"] &
-        (df["c"] < df["o"]) &
-        (df["body_ratio"] > p["body_r"])
-    )
-
-    window = df.tail(30)
-    upper = window["h"].max()
-    lower = window["l"].min()
-
-    down = window[window["c"] < window["o"]]
-    up = window[window["c"] > df["o"]]
-
-    if not down.empty:
-        upper = down.loc[down["v"].idxmax(), "h"]
-
-    if not up.empty:
-        lower = up.loc[up["v"].idxmax(), "l"]
-
-    return df, dict(upper=upper, lower=lower)
-
-
 # ==========================================
 # 语音与战报
 # ==========================================
@@ -194,183 +33,160 @@ def build_report(curr, upper, lower):
     }
 
 
+def speak_voice(voice):
+
+    # 浏览器 TTS：必须用户交互触发（Streamlit 按钮可触发）
+    js = f"""
+    <script>
+    try {{
+        if ('speechSynthesis' in window) {{
+            window.speechSynthesis.cancel();
+            const msg = new SpeechSynthesisUtterance("{voice}");
+            msg.lang = "zh-CN";
+            msg.rate = 1.0;
+            msg.pitch = 1.0;
+            window.speechSynthesis.speak(msg);
+        }}
+    }} catch (e) {{
+        console.error(e);
+    }}
+    </script>
+    """
+    st.components.v1.html(js, height=0)
+
+
 # ==========================================
-# 主界面
+# 主界面：更新部分
 # ==========================================
-def main():
+def update_dashboard():
 
-    st.sidebar.title("⚔️ Warrior Sniper")
+    try:
+        df = fetch_data(symbol)
+        if df is None or df.empty:
+            return
 
-    with st.sidebar.expander("🏹 狙击核心校准", expanded=True):
+        df, anchors = apply_warrior_logic(df, params)
+        curr = df.iloc[-1]
 
-        ma_len = st.number_input("均量周期", 5, 50, 10)
-        expand_p = st.slider("放量判定 (%)", 150, 300, 200)
-        body_r = st.slider("实体比率", 0.05, 0.90, 0.20)
-        rr_ratio = st.slider("盈亏比 (1:X)", 1.0, 5.0, 1.5, step=0.1)
+        upper = anchors["upper"]
+        lower = anchors["lower"]
 
-        params = dict(
-            ma_len=ma_len,
-            expand_p=expand_p,
-            body_r=body_r,
-            rr_ratio=rr_ratio
-        )
+        report = build_report(curr, upper, lower)
+        status = report["status"]
+        voice = report["voice"]
 
-    symbol = st.sidebar.text_input("合约代码", "ETH-USDT-SWAP")
+        # 战报头
+        with header_area.container():
+            color = "#10b981" if "多头" in status else "#ef4444" if "空头" in status else "#3b82f6"
 
-    header_area = st.empty()
-    metric_area = st.empty()
-    chart_area = st.empty()
-    voice_area = st.empty()
+            st.markdown(f"""
+            <div class="status-card"
+            style="border-left:8px solid {color};">
+            <h2 style="color:{color};margin:0;">
+            {status} | 现价: ${curr["c"]:.2f}
+            </h2>
+            </div>
+            """, unsafe_allow_html=True)
 
-    # ==========================================
-    # 实时刷新
-    # ==========================================
-    @st.fragment(run_every="10s")
-    def update_dashboard():
+        # 语音战报区
+        with voice_area.container():
+            st.info(f"语音战报：{voice}")
 
-        try:
-            df = fetch_data(symbol)
-            if df is None or df.empty:
-                return
+            # 手动播报按钮（调试与用户交互触发）
+            if st.button("🔊 手动播报语音"):
+                speak_voice(voice)
 
-            df, anchors = apply_warrior_logic(df, params)
-            curr = df.iloc[-1]
+            # 自动播报：仅在内容变化时触发
+            if "last_voice" not in st.session_state:
+                st.session_state.last_voice = ""
 
-            upper = anchors["upper"]
-            lower = anchors["lower"]
+            if voice != st.session_state.last_voice:
+                st.session_state.last_voice = voice
+                speak_voice(voice)
 
-            report = build_report(curr, upper, lower)
-            status = report["status"]
-            voice = report["voice"]
+        # 指标卡
+        with metric_area.container():
+            c1, c2, c3, c4 = st.columns(4)
 
-            # 战报头
-            with header_area.container():
-                color = "#10b981" if "多头" in status else "#ef4444" if "空头" in status else "#3b82f6"
+            c1.metric("当前现价", f"${curr['c']:.2f}")
+            c2.metric("放量系数", f"{(curr['v']/curr['ma_v'] if curr['ma_v']>0 else 0):.2f}x")
+            c3.metric("多头锚点", f"${lower:.2f}")
+            c4.metric("空头锚点", f"${upper:.2f}")
 
-                st.markdown(f"""
-                <div class="status-card"
-                style="border-left:8px solid {color};">
+        # 图表（保持不变）
+        with chart_area.container():
 
-                <h2 style="color:{color};margin:0;">
-                {status} | 现价: ${curr["c"]:.2f}
-                </h2>
+            df_p = df.tail(60)
 
-                </div>
-                """, unsafe_allow_html=True)
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                row_heights=[0.75, 0.25],
+                vertical_spacing=0.02
+            )
 
-            # 语音战报（TTS）
-            with voice_area.container():
-                st.info(f"语音战报：{voice}")
+            fig.add_trace(
+                go.Candlestick(
+                    x=df_p["time"],
+                    open=df_p["o"],
+                    high=df_p["h"],
+                    low=df_p["l"],
+                    close=df_p["c"]
+                ),
+                row=1, col=1
+            )
 
-                # 浏览器 TTS
-                if "last_voice" not in st.session_state:
-                    st.session_state.last_voice = ""
+            buys = df_p[df_p["buy_sig"]]
+            sells = df_p[df_p["sell_sig"]]
 
-                if voice != st.session_state.last_voice:
-                    st.session_state.last_voice = voice
+            fig.add_trace(
+                go.Scatter(
+                    x=buys["time"],
+                    y=buys["l"] * 0.998,
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=14)
+                ),
+                row=1, col=1
+            )
 
-                    st.components.v1.html(f"""
-                    <script>
-                    if ('speechSynthesis' in window) {{
-                        window.speechSynthesis.cancel();
-                        const msg = new SpeechSynthesisUtterance("{voice}");
-                        msg.lang = "zh-CN";
-                        msg.rate = 1.0;
-                        msg.pitch = 1.0;
-                        window.speechSynthesis.speak(msg);
-                    }}
-                    </script>
-                    """, height=0)
+            fig.add_trace(
+                go.Scatter(
+                    x=sells["time"],
+                    y=sells["h"] * 1.002,
+                    mode="markers",
+                    marker=dict(symbol="triangle-down", size=14)
+                ),
+                row=1, col=1
+            )
 
-            # 指标卡
-            with metric_area.container():
-                c1, c2, c3, c4 = st.columns(4)
+            fig.add_hline(y=upper, line_dash="dash")
+            fig.add_hline(y=lower, line_dash="dash")
 
-                c1.metric("当前现价", f"${curr['c']:.2f}")
-                c2.metric("放量系数", f"{(curr['v']/curr['ma_v'] if curr['ma_v']>0 else 0):.2f}x")
-                c3.metric("多头锚点", f"${lower:.2f}")
-                c4.metric("空头锚点", f"${upper:.2f}")
+            fig.add_trace(
+                go.Bar(
+                    x=df_p["time"],
+                    y=df_p["v"],
+                    opacity=0.6
+                ),
+                row=2, col=1
+            )
 
-            # 图表
-            with chart_area.container():
+            fig.update_layout(
+                height=620,
+                template="plotly_dark",
+                showlegend=False,
+                xaxis_rangeslider_visible=False,
+                margin=dict(t=10, b=10, l=10, r=30),
+                hovermode="x unified",
+                uirevision="chart-lock"
+            )
 
-                df_p = df.tail(60)
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={"displayModeBar": False}
+            )
 
-                fig = make_subplots(
-                    rows=2,
-                    cols=1,
-                    shared_xaxes=True,
-                    row_heights=[0.75, 0.25],
-                    vertical_spacing=0.02
-                )
-
-                fig.add_trace(
-                    go.Candlestick(
-                        x=df_p["time"],
-                        open=df_p["o"],
-                        high=df_p["h"],
-                        low=df_p["l"],
-                        close=df_p["c"]
-                    ),
-                    row=1, col=1
-                )
-
-                buys = df_p[df_p["buy_sig"]]
-                sells = df_p[df_p["sell_sig"]]
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=buys["time"],
-                        y=buys["l"] * 0.998,
-                        mode="markers",
-                        marker=dict(symbol="triangle-up", size=14)
-                    ),
-                    row=1, col=1
-                )
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=sells["time"],
-                        y=sells["h"] * 1.002,
-                        mode="markers",
-                        marker=dict(symbol="triangle-down", size=14)
-                    ),
-                    row=1, col=1
-                )
-
-                fig.add_hline(y=upper, line_dash="dash")
-                fig.add_hline(y=lower, line_dash="dash")
-
-                fig.add_trace(
-                    go.Bar(
-                        x=df_p["time"],
-                        y=df_p["v"],
-                        opacity=0.6
-                    ),
-                    row=2, col=1
-                )
-
-                fig.update_layout(
-                    height=620,
-                    template="plotly_dark",
-                    showlegend=False,
-                    xaxis_rangeslider_visible=False,
-                    margin=dict(t=10, b=10, l=10, r=30),
-                    hovermode="x unified",
-                    uirevision="chart-lock"
-                )
-
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    config={"displayModeBar": False}
-                )
-
-        except Exception as e:
-            st.error(f"数据更新异常: {e}")
-
-    update_dashboard()
-
-
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        st.error(f"数据更新异常: {e}")
