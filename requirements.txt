@@ -1,6 +1,6 @@
 streamlit
-httpx[http2]
-h2
+httpx[http2]==0.27.0
+h2==4.1.0
 pandas
 numpy
 plotly
