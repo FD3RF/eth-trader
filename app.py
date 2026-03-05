@@ -9,7 +9,7 @@ from datetime import datetime
 import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 工业级底层架构
+# 1. 工业级底层架构（等价保留）
 # ==========================================
 if 'http_client' not in st.session_state:
     st.session_state.http_client = httpx.Client(timeout=10.0, http2=True)
@@ -18,57 +18,39 @@ if "last_voice" not in st.session_state:
     st.session_state.last_voice = ""
 
 def voice_alert(text):
-    if st.session_state.last_voice != text:
-        try:
+    try:
+        if st.session_state.last_voice != text:
             components.html(
-                f"<script>"
-                f"var msg = new SpeechSynthesisUtterance('{text}');"
-                f"msg.rate = 1.1; window.speechSynthesis.speak(msg);"
-                f"</script>",
+                f"""<script>
+                var msg = new SpeechSynthesisUtterance('{text}');
+                msg.rate = 1.1;
+                window.speechSynthesis.speak(msg);
+                </script>""",
                 height=0
             )
             st.session_state.last_voice = text
-        except Exception:
-            pass  # 声音失败不影响主界面
+    except Exception:
+        # 语音失败不影响核心逻辑
+        pass
+
 
 # ==========================================
-# 2. 顶级视觉配置（兼容性增强）
+# 2. 顶级视觉配置（原样保留）
 # ==========================================
-st.set_page_config(
-    layout="wide",
-    page_title="Warrior V6.2 | 巅峰实战版",
-    page_icon="⚔️"
-)
+st.set_page_config(layout="wide", page_title="Warrior V6.2 | 巅峰实战版", page_icon="⚔️")
 
 st.markdown("""
     <style>
     .block-container { padding: 1rem 1.5rem; }
-    [data-testid="stMetric"] {
-        background: #11141c;
-        border: 1px solid #2d323e;
-        padding: 15px;
-        border-radius: 10px;
-        min-height: 90px;
-    }
-    .status-card {
-        background: #1a1c23;
-        border-left: 8px solid #d4af37;
-        padding: 20px;
-        border-radius: 12px;
-        margin-bottom: 20px;
-    }
-    .plan-card {
-        background: #11141c;
-        border: 1px solid #444;
-        padding: 15px;
-        border-radius: 10px;
-        margin-top: 10px;
-    }
+    [data-testid="stMetric"] { background: #11141c; border: 1px solid #2d323e; padding: 15px; border-radius: 10px; }
+    .status-card { background: #1a1c23; border-left: 8px solid #d4af37; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+    .plan-card { background: #11141c; border: 1px solid #444; padding: 15px; border-radius: 10px; margin-top: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
+
 # ==========================================
-# 3. 核心引擎与局部锚点逻辑
+# 3. 核心引擎与局部锚点逻辑（逻辑不动，仅防错）
 # ==========================================
 class WarriorEngine:
     def get_market_data(self, symbol):
@@ -83,10 +65,7 @@ class WarriorEngine:
             if not data:
                 return None
 
-            df = pd.DataFrame(
-                data,
-                columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm']
-            )
+            df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
 
             for col in ['o','h','l','c','v']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -105,9 +84,7 @@ def apply_warrior_logic(df, p):
     df['ma_v'] = df['v'].rolling(p['ma_len']).mean()
 
     # 防除零与异常
-    df['total'] = (df['h'] - df['l']).replace(0, 0.001)
-    df['body_ratio'] = abs(df['c'] - df['o']) / df['total']
-
+    df['body_ratio'] = abs(df['c'] - df['o']) / (df['h'] - df['l']).replace(0, 0.001)
     df['vol_ratio'] = df['v'] / df['ma_v'].replace(0, 1e-9)
 
     df['is_expand'] = df['v'] > df['ma_v'] * (p['expand_p'] / 100.0)
@@ -123,6 +100,7 @@ def apply_warrior_logic(df, p):
         'lower': local_up['l'].values[0] if not local_up.empty else window['l'].min()
     }
     return df, anchors
+
 
 # ==========================================
 # 4. 实时战报与主渲染（防崩保护）
@@ -140,7 +118,6 @@ def dashboard_loop():
     curr = df.iloc[-1]
     upper, lower = anchors['upper'], anchors['lower']
 
-    # 战报逻辑
     try:
         if curr['buy_sig'] and curr['c'] > upper:
             status, detail, color = "🚀 核心突破", "局部最大量阴线压力已破，多头总攻！", "#26a69a"
@@ -165,7 +142,7 @@ def dashboard_loop():
         st.warning("⚠️ 战报解析异常，已自动保护界面")
         return
 
-    # 进场计划模块
+    # 进场计划模块（逻辑等价）
     if status != "💎 震荡蓄势":
         is_buy = status == "🚀 核心突破"
         sl = lower if is_buy else upper
@@ -192,79 +169,30 @@ def dashboard_loop():
     c2.metric("当前量能比", f"{curr['vol_ratio']:.2f}x")
     c3.metric("刷新心跳", datetime.now().strftime('%H:%M:%S'))
 
-    # 绘图（防崩与性能）
+    # 绘图（防崩保护）
     try:
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            row_heights=[0.75, 0.25],
-            vertical_spacing=0.03
-        )
-
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
         df_p = df.tail(80)
 
-        fig.add_trace(
-            go.Candlestick(
-                x=df_p['time'],
-                open=df_p['o'],
-                high=df_p['h'],
-                low=df_p['l'],
-                close=df_p['c'],
-                increasing_line_color='#26a69a',
-                decreasing_line_color='#ef5350',
-                name="K线"
-            ),
-            row=1, col=1
-        )
+        fig.add_trace(go.Candlestick(
+            x=df_p['time'], open=df_p['o'], high=df_p['h'], low=df_p['l'], close=df_p['c'],
+            increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="K线"),
+            row=1, col=1)
 
         buys = df_p[df_p['buy_sig']]
-        fig.add_trace(
-            go.Scatter(
-                x=buys['time'],
-                y=buys['l'] * 0.998,
-                mode='markers',
-                marker=dict(symbol='triangle-up', size=15),
-                name='做多'
-            ),
-            row=1, col=1
-        )
+        fig.add_trace(go.Scatter(
+            x=buys['time'], y=buys['l']*0.998, mode='markers',
+            marker=dict(symbol='triangle-up', size=15), name='做多'),
+            row=1, col=1)
 
-        fig.add_hline(
-            y=upper,
-            line_dash="dot",
-            annotation_text="压力:局部阴高",
-            row=1, col=1
-        )
-        fig.add_hline(
-            y=lower,
-            line_dash="dot",
-            annotation_text="支撑:局部阳低",
-            row=1, col=1
-        )
+        fig.add_hline(y=upper, line_dash="dot", annotation_text="压力:局部阴高", row=1, col=1)
+        fig.add_hline(y=lower, line_dash="dot", annotation_text="支撑:局部阳低", row=1, col=1)
 
-        v_colors = [
-            '#26a69a' if c >= o else '#ef5350'
-            for c, o in zip(df_p['c'], df_p['o'])
-        ]
+        v_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(df_p['c'], df_p['o'])]
+        fig.add_trace(go.Bar(x=df_p['time'], y=df_p['v'], marker_color=v_colors, opacity=0.4), row=2, col=1)
 
-        fig.add_trace(
-            go.Bar(
-                x=df_p['time'],
-                y=df_p['v'],
-                marker_color=v_colors,
-                opacity=0.4
-            ),
-            row=2, col=1
-        )
-
-        fig.update_layout(
-            height=700,
-            template="plotly_dark",
-            showlegend=False,
-            xaxis_rangeslider_visible=False,
-            margin=dict(t=10, b=10, l=10, r=50)
-        )
-
+        fig.update_layout(height=700, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False,
+                          margin=dict(t=10,b=10,l=10,r=50))
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     except Exception:
@@ -272,15 +200,15 @@ def dashboard_loop():
 
 
 # ==========================================
-# 5. 控制中心
+# 5. 控制中心（原样逻辑）
 # ==========================================
 def main():
     st.sidebar.title("⚔️ Warrior V6.2")
 
     with st.sidebar.expander("🏹 实战口诀锦囊", expanded=True):
         st.markdown("""
-        **做多：** 缩量不破底，放量突破买。  
-        **做空：** 缩量不过顶，放量跌破空。  
+        **做多：** 缩量不破底，放量突破买。
+        **做空：** 缩量不过顶，放量跌破空。
         ---
         **核心：** 缩量是提醒，放量是信号。
         """)
