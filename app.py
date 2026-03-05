@@ -18,9 +18,8 @@ with st.sidebar:
     p_vol_ma = st.slider("均量周期 (vol_ma)", 5, 30, 10)
     
     st.divider()
-    symbol = st.text_input("交易对", "ETHUSDT")
-    # Streamlit Cloud 通常不需要代理，如果是本地运行请填写
-    proxy_url = st.text_input("代理地址 (可选)", "")
+    # 已适配 OKX 的交易对格式
+    symbol = st.text_input("交易对", "ETH-USDT")
     refresh_rate = st.slider("刷新频率 (秒)", 5, 60, 15)
 
 # ---------- 3. 核心算法逻辑 ----------
@@ -47,33 +46,41 @@ def apply_strategy(df, body_min, vol_mult, vol_ma_len):
                 df.at[df.index[i], 'signal'] = -1
     return df
 
-# ---------- 4. 数据抓取 ----------
-def fetch_data(symbol, proxy):
-    url = "https://api.binance.com/api/v3/klines"
-    proxies = {"http": proxy, "https": proxy} if proxy else None
+# ---------- 4. 数据抓取 (全面升级为 OKX 接口) ----------
+def fetch_data_okx(inst_id):
+    url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id.upper()}&bar=5m&limit=100"
     try:
-        r = requests.get(url, params={"symbol": symbol.upper(), "interval": "5m", "limit": 100}, proxies=proxies, timeout=5)
-        df = pd.DataFrame(r.json(), columns=['ts','o','h','l','c','v','ct','qv','nt','tb','tq','i'])
+        r = requests.get(url, timeout=5)
+        # OKX 返回的数据在 'data' 字段中
+        data = r.json().get('data', [])
+        if not data:
+            return None
+            
+        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
         df = df[['ts','o','h','l','c','v']].apply(pd.to_numeric)
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+        
+        # OKX 默认返回是时间倒序的（最新的在最上面），必须反转一下匹配策略逻辑
+        df = df.sort_values('ts').reset_index(drop=True)
         df.columns = ['timestamp','open','high','low','close','volume']
         return df
-    except:
+    except Exception as e:
         return None
 
 # ---------- 5. 原生自动刷新循环 ----------
 placeholder = st.empty()
 
 while True:
-    raw_df = fetch_data(symbol, proxy_url)
+    raw_df = fetch_data_okx(symbol)
     
     with placeholder.container():
-        if raw_df is not None:
+        # 增加了一层严密的防御机制，防止 df 为空导致崩溃
+        if raw_df is not None and not raw_df.empty:
             df_sig = apply_strategy(raw_df, p_body, p_mult, p_vol_ma)
             last = df_sig.iloc[-1]
             
             # 状态看板
-            st.subheader(f"🛡️ ETH 5min 实时监控 | {datetime.now().strftime('%H:%M:%S')}")
+            st.subheader(f"🛡️ ETH 5min 实时监控 (OKX 数据源) | {datetime.now().strftime('%H:%M:%S')}")
             c1, c2, c3 = st.columns(3)
             c1.metric("价格", f"${last['close']}")
             c2.metric("量能比", f"{last['volume']/last['v_ma']:.2f}x")
@@ -99,7 +106,6 @@ while True:
             fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark", margin=dict(t=10, b=10))
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("等待数据连接...")
+            st.warning("🔄 正在连接底层行情通道，请稍候... (若持续无数据请检查交易对格式)")
     
-    # 原生等待，实现高频刷新
     time.sleep(refresh_rate)
