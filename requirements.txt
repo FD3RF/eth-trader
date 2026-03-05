@@ -1,6 +1,5 @@
-streamlit>=1.35.0
-httpx[http2]
-h2
+streamlit
 pandas
 numpy
 plotly
+httpx
