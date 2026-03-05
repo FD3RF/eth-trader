@@ -1,9 +1,8 @@
 import streamlit as st
 import ccxt
 import pandas as pd
-import pandas_ta as ta
-import plotly.graph_objects as go
 import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime
 import time
 
@@ -105,11 +104,26 @@ def fetch_market_data(symbol, limit=100):
         st.error(f"数据获取失败: {e}")
         return None
 
-# ------------------- 技术指标计算 -------------------
+# ------------------- 手动计算技术指标 -------------------
+def calculate_atr(df, period=14):
+    """手动计算平均真实波幅 ATR"""
+    high, low, close = df['high'], df['low'], df['close']
+    # 计算真实波幅 TR
+    df['tr'] = np.maximum(
+        high - low,
+        np.maximum(
+            np.abs(high - close.shift()),
+            np.abs(low - close.shift())
+        )
+    )
+    # 计算 ATR（简单移动平均）
+    df['atr'] = df['tr'].rolling(window=period, min_periods=1).mean()
+    return df
+
 def calculate_indicators(df):
-    """计算ATR、均线、成交量均线"""
+    """计算所有技术指标（不含pandas_ta）"""
     # ATR (14)
-    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    df = calculate_atr(df, 14)
     
     # 移动平均线
     df['ma_short'] = df['close'].rolling(5).mean()
