@@ -7,105 +7,143 @@ import requests
 import time
 from datetime import datetime
 
-# ---------- 1. 页面配置 ----------
-st.set_page_config(layout="wide", page_title="ETH高频量价监控")
+# ---------- 1. 视觉与页面配置 ----------
+st.set_page_config(layout="wide", page_title="ETH Warrior | 纯量价心法", page_icon="⚔️")
 
-# ---------- 2. 侧边栏参数 (基于回测 142.7 盈亏比组优化) ----------
+st.markdown("""
+    <style>
+    .reportview-container { background: #0e1117; }
+    .stMetric { background: #1a1c24; border-radius: 10px; padding: 10px; border: 1px solid #3e424b; }
+    </style>
+""", unsafe_allow_html=True)
+
+# ---------- 2. 侧边栏：核心策略参数 (严格对应口诀) ----------
 with st.sidebar:
-    st.header("⚙️ 策略执行参数")
-    p_body = st.slider("最低实体占比 (body)", 0.05, 0.4, 0.15)
-    p_mult = st.slider("放量倍数 (mult)", 1.1, 2.5, 1.4)
-    p_vol_ma = st.slider("均量周期 (vol_ma)", 5, 30, 10)
+    st.title("⚔️ Warrior 策略中心")
+    st.info("模式：只看K线 + 成交量 (5min)")
+    
+    # 策略阈值
+    vol_ma_len = st.number_input("均量参考周期", 5, 30, 10)
+    shrink_ratio = st.slider("缩量判定 (小于均量%)", 30, 80, 60) / 100
+    expand_ratio = st.slider("放量判定 (大于均量%)", 120, 300, 150) / 100
+    body_min = st.slider("突破实体占比", 0.0, 0.5, 0.15)
     
     st.divider()
-    # 已适配 OKX 的交易对格式
     symbol = st.text_input("交易对", "ETH-USDT")
-    refresh_rate = st.slider("刷新频率 (秒)", 5, 60, 15)
+    refresh_sec = st.slider("秒级刷新", 5, 60, 10)
+    
+    # 物理冷静期逻辑
+    st.warning("若连续亏损2笔，请点击下方开启物理冷静")
+    if st.button("🔴 开启 1小时 冷静锁定"):
+        st.session_state.cooldown = time.time() + 3600
 
-# ---------- 3. 核心算法逻辑 ----------
-def apply_strategy(df, body_min, vol_mult, vol_ma_len):
+# ---------- 3. 核心算法：量价口诀逻辑化 ----------
+def apply_warrior_logic(df, s_ratio, e_ratio, v_ma_len, b_min):
     df = df.copy()
+    # 1. 计算均量与波动率
+    df['v_ma'] = df['volume'].rolling(v_ma_len).mean()
     df['h20'] = df['high'].rolling(20).max().shift(1)
     df['l20'] = df['low'].rolling(20).min().shift(1)
-    df['v_ma'] = df['volume'].rolling(vol_ma_len).mean()
-    df['body_ratio'] = abs(df['close'] - df['open']) / (df['high'] - df['low'])
     
-    df['signal'] = 0
-    df['is_shrink'] = df['volume'] < df['v_ma'] * 0.85 
+    # 2. 状态判定
+    df['is_shrink'] = df['volume'] < (df['v_ma'] * s_ratio)
+    df['is_expand'] = df['volume'] > (df['v_ma'] * e_ratio)
+    df['body'] = abs(df['close'] - df['open'])
+    df['range'] = df['high'] - df['low']
+    df['body_pct'] = df['body'] / df['range']
     
-    for i in range(vol_ma_len, len(df)):
-        # 做多：缩量不破底 + 放量阳线
-        if df['is_shrink'].iloc[i-1] and df['low'].iloc[i-1] <= df['l20'].iloc[i-1] * 1.002:
-            if df['volume'].iloc[i] > df['v_ma'].iloc[i] * vol_mult and \
-               df['close'].iloc[i] > df['open'].iloc[i] and df['body_ratio'].iloc[i] > body_min:
+    df['signal'] = 0 # 1:做多, -1:做空, 0.5:多头观察, -0.5:空头观察
+    
+    for i in range(1, len(df)):
+        # --- 做多逻辑 ---
+        # A. 缩量回踩低点不破 (观察区)
+        if df['is_shrink'].iloc[i] and df['low'].iloc[i] <= df['l20'].iloc[i] * 1.002:
+            df.at[df.index[i], 'signal'] = 0.5
+            
+        # B. 放量起涨突破阴线 (执行区)
+        if df['is_expand'].iloc[i] and df['close'].iloc[i] > df['open'].iloc[i]:
+            if df['close'].iloc[i] > df['open'].iloc[i-1] and df['body_pct'].iloc[i] > b_min:
                 df.at[df.index[i], 'signal'] = 1
-        # 做空：缩量不过高 + 放量阴线
-        elif df['is_shrink'].iloc[i-1] and df['high'].iloc[i-1] >= df['h20'].iloc[i-1] * 0.998:
-            if df['volume'].iloc[i] > df['v_ma'].iloc[i] * vol_mult and \
-               df['close'].iloc[i] < df['open'].iloc[i] and df['body_ratio'].iloc[i] > body_min:
+
+        # --- 做空逻辑 ---
+        # C. 缩量反弹高点不破 (观察区)
+        if df['is_shrink'].iloc[i] and df['high'].iloc[i] >= df['h20'].iloc[i] * 0.998:
+            df.at[df.index[i], 'signal'] = -0.5
+
+        # D. 放量杀跌跌破阳线 (执行区)
+        if df['is_expand'].iloc[i] and df['close'].iloc[i] < df['open'].iloc[i]:
+            if df['close'].iloc[i] < df['open'].iloc[i-1] and df['body_pct'].iloc[i] > b_min:
                 df.at[df.index[i], 'signal'] = -1
+                
     return df
 
-# ---------- 4. 数据抓取 (全面升级为 OKX 接口) ----------
-def fetch_data_okx(inst_id):
-    url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id.upper()}&bar=5m&limit=100"
+# ---------- 4. 数据通道 (OKX V5) ----------
+def fetch_okx_data(instId):
+    url = f"https://www.okx.com/api/v5/market/candles?instId={instId.upper()}&bar=5m&limit=100"
     try:
-        r = requests.get(url, timeout=5)
-        # OKX 返回的数据在 'data' 字段中
-        data = r.json().get('data', [])
-        if not data:
-            return None
-            
+        res = requests.get(url, timeout=5).json()
+        data = res.get('data', [])
+        if not data: return None
         df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','volCcy','volCcyQuote','confirm'])
         df = df[['ts','o','h','l','c','v']].apply(pd.to_numeric)
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        
-        # OKX 默认返回是时间倒序的（最新的在最上面），必须反转一下匹配策略逻辑
-        df = df.sort_values('ts').reset_index(drop=True)
-        df.columns = ['timestamp','open','high','low','close','volume']
-        return df
-    except Exception as e:
+        return df.sort_values('ts').reset_index(drop=True).rename(columns={'ts':'time','o':'open','h':'high','l':'low','c':'close','v':'volume'})
+    except:
         return None
 
-# ---------- 5. 原生自动刷新循环 ----------
-placeholder = st.empty()
+# ---------- 5. 实时渲染循环 ----------
+main_placeholder = st.empty()
 
 while True:
-    raw_df = fetch_data_okx(symbol)
+    df_raw = fetch_okx_data(symbol)
     
-    with placeholder.container():
-        # 增加了一层严密的防御机制，防止 df 为空导致崩溃
-        if raw_df is not None and not raw_df.empty:
-            df_sig = apply_strategy(raw_df, p_body, p_mult, p_vol_ma)
-            last = df_sig.iloc[-1]
+    with main_placeholder.container():
+        if df_raw is not None and not df_raw.empty:
+            df = apply_warrior_logic(df_raw, shrink_ratio, expand_ratio, vol_ma_len, body_min)
+            last = df.iloc[-1]
             
-            # 状态看板
-            st.subheader(f"🛡️ ETH 5min 实时监控 (OKX 数据源) | {datetime.now().strftime('%H:%M:%S')}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("价格", f"${last['close']}")
-            c2.metric("量能比", f"{last['volume']/last['v_ma']:.2f}x")
+            # --- 头部数据看板 ---
+            st.header(f"⚔️ ETH Warrior 实时监控 | {symbol}")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("当前价格", f"${last['close']}", f"{last['close']-df['close'].iloc[-2]:.2f}")
+            m2.metric("当前量能比", f"{(last['volume']/last['v_ma']):.2f}x")
             
+            # 信号实时播报
             if last['signal'] == 1:
-                st.success("🟢 进场信号：做多！(缩量回踩+放量突破)")
+                st.success("🚀 【放量突破】多头真钱进场，直接开多！")
             elif last['signal'] == -1:
-                st.error("🔴 进场信号：做空！(缩量触顶+放量杀跌)")
+                st.error("📉 【放量跌破】空头主动出击，直接开空！")
+            elif last['signal'] == 0.5:
+                st.warning("👀 【缩量不破底】进入多头观察区，等放量阳线。")
+            elif last['signal'] == -0.5:
+                st.warning("👀 【缩量不过顶】进入空头观察区，等放量阴线。")
+            else:
+                st.write("💎 当前处于震荡整理期，耐性等待缩量或放量信号...")
 
-            # 图表渲染
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
-            fig.add_trace(go.Candlestick(x=df_sig['timestamp'], open=df_sig['open'], high=df_sig['high'], 
-                                         low=df_sig['low'], close=df_sig['close'], name="ETH"), row=1, col=1)
+            # --- 专业 Plotly 图表 ---
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
             
-            buys = df_sig[df_sig['signal'] == 1]
-            sells = df_sig[df_sig['signal'] == -1]
-            fig.add_trace(go.Scatter(x=buys['timestamp'], y=buys['low']*0.998, mode='markers', marker=dict(symbol='triangle-up', size=15, color='lime'), name="多"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=sells['timestamp'], y=sells['high']*1.002, mode='markers', marker=dict(symbol='triangle-down', size=15, color='red'), name="空"), row=1, col=1)
+            # K线图
+            fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="Price"), row=1, col=1)
             
-            fig.add_trace(go.Bar(x=df_sig['timestamp'], y=df_sig['volume'], name="量", marker_color='gray'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_sig['timestamp'], y=df_sig['v_ma'], line=dict(color='orange'), name="均量"), row=2, col=1)
+            # 信号标注
+            buy_sig = df[df['signal'] == 1]
+            sell_sig = df[df['signal'] == -1]
+            fig.add_trace(go.Scatter(x=buy_sig['time'], y=buy_sig['low']*0.997, mode='markers', marker=dict(symbol='triangle-up', size=14, color='#00ff00'), name="多头执行"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=sell_sig['time'], y=sell_sig['high']*1.003, mode='markers', marker=dict(symbol='triangle-down', size=14, color='#ff0000'), name="空头执行"), row=1, col=1)
 
-            fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark", margin=dict(t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            # 成交量与均量线
+            colors = ['red' if row['close'] < row['open'] else 'green' for i, row in df.iterrows()]
+            fig.add_trace(go.Bar(x=df['time'], y=df['volume'], marker_color=colors, opacity=0.4, name="Volume"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df['time'], y=df['v_ma'], line=dict(color='#ffa500', width=1.5), name="MA_Vol"), row=2, col=1)
+
+            fig.update_layout(height=650, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig, width='stretch')
+            
+            # --- 历史信号 Log ---
+            with st.expander("📝 历史进场信号日志"):
+                st.table(df[df['signal'].abs() == 1][['time', 'close', 'volume', 'signal']].tail(5))
         else:
-            st.warning("🔄 正在连接底层行情通道，请稍候... (若持续无数据请检查交易对格式)")
-    
-    time.sleep(refresh_rate)
+            st.error("❌ 数据链路中断，正在尝试重新连接 OKX API...")
+
+    time.sleep(refresh_sec)
