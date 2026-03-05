@@ -7,21 +7,29 @@ import httpx
 import time
 
 # ==========================================
-# 1. 顶级视觉配置
+# 1. 像素级视觉复刻 (CSS 深度定制)
 # ==========================================
-st.set_page_config(layout="wide", page_title="Warrior V5.2 | 实战指令", page_icon="⚔️")
+st.set_page_config(layout="wide", page_title="Warrior V5.3 | 控制中心", page_icon="⚔️")
 
 st.markdown("""
     <style>
     .block-container { padding: 1rem 1.5rem; }
-    [data-testid="stMetric"] { background: #0e1117; border: 1px solid #262730; padding: 10px; border-radius: 8px; }
-    .trade-plan { background: #1a1c23; border-left: 5px solid #d4af37; padding: 15px; border-radius: 5px; }
+    /* 复刻顶部指标块样式 */
+    [data-testid="stMetric"] { 
+        background: #161a25; 
+        border: 1px solid #2d323e; 
+        padding: 15px; 
+        border-radius: 10px; 
+    }
+    [data-testid="stMetricValue"] { color: #d4af37 !important; font-family: 'Courier New', monospace; }
     .modebar { display: none !important; }
+    /* 侧边栏底部文字 */
+    .sidebar-footer { position: fixed; bottom: 20px; left: 20px; font-size: 12px; color: #666; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 核心引擎与逻辑 (承袭 V5.1)
+# 2. 核心数据引擎 (同步高并发)
 # ==========================================
 class WarriorCore:
     _instance = None
@@ -34,7 +42,7 @@ class WarriorCore:
     def fetch_data(self, symbol):
         url = "https://www.okx.com/api/v5/market/candles"
         try:
-            params = {"instId": symbol, "bar": "5m", "limit": "100", "_t": time.time_ns()}
+            params = {"instId": symbol, "bar": "5m", "limit": "150", "_t": time.time_ns()}
             resp = self.client.get(url, params=params)
             if resp.status_code == 200:
                 data = resp.json().get('data', [])
@@ -45,123 +53,126 @@ class WarriorCore:
         except: return None
 
 # ==========================================
-# 3. 进场计划计算逻辑
+# 3. 稳定版量价逻辑 (精准信号锚点)
 # ==========================================
-def generate_trade_plan(side, entry, sl, rr=1.5, risk_amount=200):
-    """
-    根据口诀逻辑自动计算交易计划
-    """
-    if side == "LONG":
-        tp = entry + (entry - sl) * rr
-        dist = entry - sl
-    else:
-        tp = entry - (sl - entry) * rr
-        dist = sl - entry
+def apply_stable_logic(df, p):
+    df['ma_v'] = df['v'].rolling(p['ma_len']).mean()
     
-    qty = risk_amount / dist if dist > 0 else 0
-    return {"entry": entry, "sl": sl, "tp": tp, "qty": qty}
+    # 计算信号：九阴真经·量价流
+    # 缩量 = 当前量 < 均量 * 缩量判定比
+    # 放量 = 当前量 > 均量 * 放量判定比
+    shrink_thresh = p['shrink_p'] / 100.0
+    expand_thresh = p['expand_p'] / 100.0
+    
+    df['is_expand'] = df['v'] > (df['ma_v'] * expand_thresh)
+    df['is_shrink'] = df['v'] < (df['ma_v'] * shrink_thresh)
+    
+    # 判定信号点 (用于图表锚点)
+    # 做多锚点：放量阳线且实体占优
+    df['buy_sig'] = df['is_expand'] & (df['c'] > df['o']) & ((df['c']-df['o'])/(df['h']-df['l']) > p['body_r'])
+    # 做空锚点：放量阴线且实体占优
+    df['sell_sig'] = df['is_expand'] & (df['c'] < df['o']) & ((df['o']-df['c'])/(df['h']-df['l']) > p['body_r'])
+    
+    return df
 
 # ==========================================
-# 4. 实时动态扫描与指令 UI
+# 4. 主渲染模块
 # ==========================================
 @st.fragment(run_every="5s")
-def render_warrior_v5_2():
+def render_control_center():
     core = WarriorCore()
     symbol = st.session_state.get('symbol', 'ETH-USDT-SWAP')
-    df = core.fetch_data(symbol)
-    if df is None: return
-
-    # --- 逻辑运算 ---
-    df['v_ma5'] = df['v'].rolling(5).mean()
-    curr, last_v_ma = df.iloc[-1], df.iloc[-1]['v_ma5']
-    p_high = df['h'].iloc[-15:-1].max()
-    p_low = df['l'].iloc[-15:-1].min()
+    params = st.session_state.get('params')
     
-    # --- 信号判定 ---
-    is_expanding = curr['v'] > last_v_ma * 1.8
-    sig_long = is_expanding and curr['c'] > p_high
-    sig_short = is_expanding and curr['c'] < p_low
+    df = core.fetch_data(symbol)
+    if df is None or df.empty: return
 
-    # --- UI 布局 ---
-    t1, t2 = st.columns([1.2, 3])
+    df = apply_stable_logic(df, params)
+    last, prev = df.iloc[-1], df.iloc[-2]
+    
+    # --- 1. 顶部四大战术指标 ---
+    m1, m2, m3, m4 = st.columns(4)
+    
+    price_delta = ((last['c'] - prev['c']) / prev['c']) * 100
+    m1.metric("ETH 现价", f"${last['c']:.2f}", f"{price_delta:.2f}%")
+    
+    vol_ratio = last['v'] / last['ma_v']
+    m2.metric("当前量能比", f"{vol_ratio:.2f}x")
+    
+    # 实时战报逻辑
+    status = "💎 震荡蓄势"
+    if last['buy_sig']: status = "🔥 多头进攻"
+    elif last['sell_sig']: status = "❄️ 空头下砸"
+    elif last['is_shrink']: status = "⏳ 动能衰减"
+    m3.metric("实时战报", status)
+    
+    m4.metric("心跳刷新", f"{int(time.time()%60)}s")
 
-    with t1:
-        st.subheader("🎯 实时进场指令")
-        
-        # 信号触发表单
-        active_side = "NONE"
-        if sig_long: 
-            st.success("🔥 发现多头进攻信号！")
-            active_side = "LONG"
-        elif sig_short:
-            st.error("❄️ 发现空头下砸信号！")
-            active_side = "SHORT"
-        else:
-            st.info("💎 动能积蓄中，等待放量...")
+    # --- 2. 深度定制 K 线图 ---
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+    
+    # 主 K 线
+    fig.add_trace(go.Candlestick(
+        x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'],
+        increasing_line_color='#26a69a', decreasing_line_color='#ef5350', name="价格"
+    ), row=1, col=1)
 
-        if active_side != "NONE":
-            # 自动生成初版计划
-            entry_p = curr['c']
-            sl_p = p_low if active_side == "LONG" else p_high
-            plan = generate_trade_plan(active_side, entry_p, sl_p, risk_amount=st.session_state.risk)
+    # 绘制信号锚点 (精准三角形)
+    buy_df = df[df['buy_sig']]
+    fig.add_trace(go.Scatter(
+        x=buy_df['time'], y=buy_df['l'] * 0.998,
+        mode='markers', marker=dict(symbol='triangle-up', size=12, color='#26a69a'),
+        name='做多信号'
+    ), row=1, col=1)
 
-            with st.container(border=True):
-                st.markdown(f"**方向: {'做多' if active_side=='LONG' else '做空'}**")
-                st.write(f"建议入场: **{plan['entry']:.2f}**")
-                st.write(f"建议止损: **{plan['sl']:.2f}**")
-                st.write(f"建议止盈: **{plan['tp']:.2f}**")
-                st.write(f"建议头寸: **{plan['qty']:.3f} ETH**")
-                
-                if st.button("🚀 确认执行并记录战报", use_container_width=True):
-                    st.toast("战报已保存至系统缓存", icon="✅")
+    sell_df = df[df['sell_sig']]
+    fig.add_trace(go.Scatter(
+        x=sell_df['time'], y=sell_df['h'] * 1.002,
+        mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ef5350'),
+        name='做空信号'
+    ), row=1, col=1)
 
-        st.divider()
-        st.metric("前高压力", f"{p_high:.2f}")
-        st.metric("前低支撑", f"{p_low:.2f}")
+    # 现价基准线
+    fig.add_hline(y=last['c'], line_color="#d4af37", line_width=1, opacity=0.8, row=1, col=1)
 
-    with t2:
-        # K线图逻辑
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
-        
-        # K线
-        fig.add_trace(go.Candlestick(x=df['time'], open=df['o'], high=df['h'], low=df['l'], close=df['c'], name="Price"), row=1, col=1)
-        
-        # 价格锚点线 (如果有活动信号，画出计划线)
-        if active_side != "NONE":
-            fig.add_hline(y=plan['entry'], line_color="#d4af37", line_dash="dash", annotation_text="ENTRY", row=1, col=1)
-            fig.add_hline(y=plan['sl'], line_color="#ef5350", line_dash="dot", annotation_text="STOP LOSS", row=1, col=1)
-            fig.add_hline(y=plan['tp'], line_color="#26a69a", line_dash="dot", annotation_text="TAKE PROFIT", row=1, col=1)
-        else:
-            # 常驻现价金色准星
-            fig.add_hline(y=curr['c'], line_color="#d4af37", line_width=1, annotation_text=f"LIVE: {curr['c']:.2f}", row=1, col=1)
+    # 成交量与均量线
+    v_colors = ['#26a69a' if _c >= _o else '#ef5350' for _c, _o in zip(df['c'], df['o'])]
+    fig.add_trace(go.Bar(x=df['time'], y=df['v'], marker_color=v_colors, opacity=0.4), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['time'], y=df['ma_v'], line=dict(color='#ffa500', width=1.5)), row=2, col=1)
 
-        # 成交量
-        v_colors = ['#26a69a' if _c >= _o else '#ef5350' for _c, _o in zip(df['c'], df['o'])]
-        fig.add_trace(go.Bar(x=df['time'], y=df['v'], marker_color=v_colors, opacity=0.3), row=2, col=1)
-
-        fig.update_layout(height=750, template="plotly_dark", showlegend=False, 
-                          xaxis_rangeslider_visible=False, margin=dict(t=10,b=10,l=10,r=70),
-                          uirevision=symbol)
-        
-        st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
+    fig.update_layout(
+        height=780, template="plotly_dark", showlegend=False,
+        xaxis_rangeslider_visible=False, margin=dict(t=10, b=10, l=10, r=60),
+        uirevision=symbol
+    )
+    
+    st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
 
 # ==========================================
-# 5. 指挥中心主入口
+# 5. 指挥中心入口
 # ==========================================
 def main():
-    st.sidebar.title("⚔️ Warrior V5.2")
-    st.session_state.symbol = st.sidebar.text_input("目标合约", "ETH-USDT-SWAP")
-    st.session_state.risk = st.sidebar.number_input("单笔风险金额 (USDT)", 10, 5000, 200)
+    # 侧边栏：Warrior 控制中心
+    st.sidebar.title("⚔️ Warrior 控制中心")
+    
+    with st.sidebar.expander("策略参数调节", expanded=True):
+        ma_len = st.number_input("均量周期", 5, 60, 10)
+        shrink_p = st.slider("缩量判定 (%)", 20, 100, 60)
+        expand_p = st.slider("放量判定 (%)", 110, 300, 150)
+        body_r = st.slider("突破实体比", 0.05, 0.50, 0.20)
+    
+    st.session_state.params = {
+        "ma_len": ma_len, "shrink_p": shrink_p, 
+        "expand_p": expand_p, "body_r": body_r
+    }
     
     st.sidebar.divider()
-    st.sidebar.markdown("""
-    **九阴真经·实战状态：**
-    - 🟢 缩量回踩：监视中
-    - 🔴 放量突破：**检测引擎就绪**
-    - ⚠️ 陷阱防御：已开启
-    """)
+    st.session_state.symbol = st.sidebar.text_input("合约代码", "ETH-USDT-SWAP")
     
-    render_warrior_v5_2()
+    # 侧边栏页脚
+    st.sidebar.markdown('<div class="sidebar-footer">不灭大衍系统 · 纯净量价流</div>', unsafe_allow_html=True)
+    
+    render_control_center()
 
 if __name__ == "__main__":
     main()
