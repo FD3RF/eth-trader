@@ -11,12 +11,11 @@ st.set_page_config(page_title="ETH AI 终极播报", layout="wide")
 if "signal_memory" not in st.session_state:
     st.session_state.signal_memory = {"last_key": None}
 if "auto" not in st.session_state:
-    st.session_state.auto = False
+    st.session_state.auto = True   # ← 自动启动
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now()
 
 def ai_voice_broadcast(text):
-    """语音播报"""
     js = f"""
     <script>
     try {{
@@ -29,14 +28,14 @@ def ai_voice_broadcast(text):
     """
     st.components.v1.html(js, height=0)
 
-# ====== 数据源（重试+安全）======
+# ====== 数据源 ======
 @st.cache_resource
 def init_exchange():
     return ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 def fetch_data():
     ex = init_exchange()
-    for _ in range(3):  # 数据重试
+    for _ in range(3):
         try:
             bars = ex.fetch_ohlcv('ETH/USDT:USDT', timeframe='5m', limit=100)
             ticker = ex.fetch_ticker('ETH/USDT:USDT')
@@ -48,7 +47,7 @@ def fetch_data():
             time.sleep(1)
     return None, None
 
-# ====== 引擎（口诀对齐+均量保护）======
+# ====== 引擎 ======
 def ai_engine(df, ticker):
     curr = df.iloc[-1]
     price = curr['close']
@@ -71,7 +70,6 @@ def ai_engine(df, ticker):
         "flash": None
     }
 
-    # 放量突破（口诀）
     if vol_ratio > 1.6 and price > res_5m:
         status.update({
             "action": "直接开多",
@@ -80,7 +78,6 @@ def ai_engine(df, ticker):
             "voice": "放量起涨，突破前高，直接开多",
             "flash": "gold"
         })
-    # 放量跌破
     elif vol_ratio > 1.6 and price < sup_5m:
         status.update({
             "action": "直接开空",
@@ -89,7 +86,6 @@ def ai_engine(df, ticker):
             "voice": "放量下跌，跌破前低，直接开空",
             "flash": "purple"
         })
-    # 缩量回踩
     elif vol_ratio < 0.5 and price <= sup_5m * 1.002 and price < curr['open']:
         status.update({
             "action": "准备动手(多)",
@@ -97,7 +93,6 @@ def ai_engine(df, ticker):
             "color": "#0D47A1",
             "voice": "缩量回踩，低点不破，准备动手"
         })
-    # 缩量反弹
     elif vol_ratio < 0.5 and price >= res_5m * 0.998 and price > curr['open']:
         status.update({
             "action": "准备动手(空)",
@@ -108,7 +103,7 @@ def ai_engine(df, ticker):
 
     return status, vol_ratio, res_5m, sup_5m, lr, sr, h24, l24
 
-# ====== UI渲染（安全）======
+# ====== 渲染 ======
 def render():
     df, ticker = fetch_data()
     if df is None or ticker is None:
@@ -117,7 +112,6 @@ def render():
 
     status, vr, res, sup, lr, sr, h24, l24 = ai_engine(df, ticker)
 
-    # 防重复播报
     key = f"{status['action']}_{df.iloc[-1]['ts']}"
     if st.session_state.signal_memory["last_key"] != key and status.get("voice"):
         ai_voice_broadcast(status["voice"])
@@ -148,20 +142,13 @@ def render():
 
     st.caption(f"量比: {vr:.2f}x | 多盈亏比: {lr:.2f} | 空盈亏比: {sr:.2f}")
 
-# ====== 控制 ======
-if st.button("开始实时扫描"):
-    st.session_state.auto = True
+# ====== 自动扫描 ======
+render()
 
-if st.button("停止扫描"):
-    st.session_state.auto = False
+# 自动刷新（每5秒）
+now = datetime.now()
+if (now - st.session_state.last_refresh).total_seconds() < 5:
+    time.sleep(5)
 
-# ====== 自动刷新 ======
-if st.session_state.auto:
-    render()
-    now = datetime.now()
-    if (now - st.session_state.last_refresh).total_seconds() < 5:
-        time.sleep(5)
-    st.session_state.last_refresh = datetime.now()
-    st.rerun()
-else:
-    render()
+st.session_state.last_refresh = datetime.now()
+st.rerun()
