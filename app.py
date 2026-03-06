@@ -1,48 +1,32 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime
 
-st.set_page_config(page_title="ETH 5m AI量价策略（本地版）", layout="wide")
-st.title("📊 ETH 永续 5分钟 AI 量价策略（本地数据）")
+st.set_page_config(page_title="AI口诀实时播报", layout="wide")
+st.title("📢 AI 口诀实时播报（语音版）")
 
-# ====================== 数据加载 ======================
-@st.cache_data
+# ======= 数据 =======
 def load_data():
-    try:
-        df = pd.read_csv("ETHUSDT_5m_last_90days.csv")
-        df["open_time"] = pd.to_datetime(df["open_time"])
-        df["open"] = df["open"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["close"] = df["close"].astype(float)
-        df["volume"] = df["volume"].astype(float)
-        return df
-    except Exception:
-        # 如果没有 CSV → 生成示例数据
-        n = 200
-        rng = pd.date_range("2024-01-01", periods=n, freq="5min")
-        price = np.cumsum(np.random.randn(n)) + 2000
-        df = pd.DataFrame({
-            "open_time": rng,
-            "open": price + np.random.randn(n),
-            "high": price + np.random.rand(n) * 5,
-            "low": price - np.random.rand(n) * 5,
-            "close": price,
-            "volume": np.abs(np.random.randn(n) * 1000)
-        })
-        return df
+    n = 200
+    rng = pd.date_range("2024-01-01", periods=n, freq="5min")
+    price = np.cumsum(np.random.randn(n)) + 2000
+    return pd.DataFrame({
+        "open_time": rng,
+        "open": price + np.random.randn(n),
+        "high": price + np.random.rand(n) * 5,
+        "low": price - np.random.rand(n) * 5,
+        "close": price,
+        "volume": np.abs(np.random.randn(n) * 1000)
+    })
 
 df = load_data()
 
-# ====================== 策略逻辑 ======================
+# ======= 策略 =======
 def signal_logic(df):
-    if df is None or df.empty or len(df) < 2:
-        return "observe", "数据不足"
-
     last = df.iloc[-1]
-    prev = df.iloc[-51:-1] if len(df) > 51 else df
+    prev = df.iloc[-51:-1]
 
     recent_high = prev["high"].max()
     recent_low = prev["low"].min()
@@ -60,57 +44,60 @@ def signal_logic(df):
     drop_pct = (last["open"] - last["low"]) / last["open"]
 
     if is_expand and broke_high:
-        return "buy", "放量起涨，突破前高"
+        return "放量起涨，突破前高，直接开多"
     if is_expand and broke_low:
-        return "sell", "放量跌破前低"
+        return "放量下跌，跌破前低，直接开空"
     if is_expand and near_low and drop_pct > 0.012:
-        return "buy", "放量暴跌低点不破（机会）"
+        return "放量暴跌低点不破，这是机会"
     if is_expand and near_high:
-        return "sell", "放量急涨顶部不破（机会）"
+        return "放量急涨顶部不破，这是机会"
     if is_shrink and near_low:
-        return "observe", "缩量回踩低点不破"
+        return "缩量回踩，低点不破，准备动手"
     if is_shrink and near_high:
-        return "observe", "缩量反弹高点不破"
+        return "缩量反弹，高点不破，准备动手"
     if is_shrink:
-        return "observe", "缩量横盘，等待放量方向"
+        return "缩量横盘，等待放量方向"
 
-    return "observe", "量能不明"
+    return "量能不明"
 
-# ====================== 图表 ======================
-def plot_chart(df):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df["open_time"],
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"]
-    ))
-    fig.update_layout(
-        template="plotly_dark",
-        height=600,
-        title="ETH 5分钟K线（本地数据）"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ====================== 主流程 ======================
-signal, reason = signal_logic(df)
+# ======= 信号 =======
+motto = signal_logic(df)
 last = df.iloc[-1]
 
-plot_chart(df)
+# ======= 语音播报函数（浏览器语音）=======
+def speak(text):
+    js = f"""
+    <script>
+    var msg = new SpeechSynthesisUtterance("{text}");
+    msg.lang = 'zh-CN';
+    msg.rate = 1;
+    msg.pitch = 1;
+    window.speechSynthesis.speak(msg);
+    </script>
+    """
+    st.components.v1.html(js, height=0)
 
-st.subheader("🤖 策略播报")
+# ======= UI =======
+st.subheader("🤖 当前口诀")
+st.success(motto)
+
+if st.button("📢 语音播报"):
+    speak(motto)
+
+# ======= 图表 =======
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df["open_time"],
+    open=df["open"],
+    high=df["high"],
+    low=df["low"],
+    close=df["close"]
+))
+fig.update_layout(template="plotly_dark", height=500)
+st.plotly_chart(fig, use_container_width=True)
+
+# ======= 播报信息 =======
+st.subheader("📊 播报信息")
 st.write(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.write(f"信号：{signal}")
-st.write(f"原因：{reason}")
 st.write(f"当前价：{last['close']:.2f}")
-
-if signal == "buy":
-    st.success("📈 多单倾向")
-elif signal == "sell":
-    st.error("📉 空单倾向")
-else:
-    st.info("⏳ 观察区")
-
-st.subheader("📋 最近数据")
-st.dataframe(df.tail())
+st.write(f"状态：{motto}")
