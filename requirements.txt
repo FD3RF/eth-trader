@@ -1,9 +1,7 @@
 streamlit
-pandas
-numpy
-plotly
-ccxt==4.4.40
-scikit-learn
-joblib
 streamlit-autorefresh
-streamlit==1.32.2
+pandas
+ccxt
+plotly
+joblib
+scikit-learn
