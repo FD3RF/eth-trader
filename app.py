@@ -53,7 +53,7 @@ def fetch_data():
             bars = ex.fetch_ohlcv('ETH/USDT:USDT', timeframe='5m', limit=150)
             ticker = ex.fetch_ticker('ETH/USDT:USDT')
 
-            if bars is None or len(bars) < 60:
+            if not bars or len(bars) < 60:
                 continue
 
             df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
@@ -138,10 +138,8 @@ def detect_fake_breakout(df, res, sup):
 
     if curr['close'] > res and curr['vol'] < avg * 0.8 and prev['close'] < res:
         return "fake_up"
-
     if curr['close'] < sup and curr['vol'] < avg * 0.8 and prev['close'] > sup:
         return "fake_down"
-
     return None
 
 
@@ -220,19 +218,16 @@ def multi_tf_resonance():
     return "mixed"
 
 
-# ===== AI回测 =====
+# ===== 回测 =====
 def backtest_winrate(df):
     wins = trades = 0
-
     for i in range(60, len(df)-5):
         price = df['close'].iloc[i]
         future = df['close'].iloc[i+5]
-
         if df['vol'].iloc[i] > df['vol'].iloc[i-50:i].mean()*1.5:
             trades += 1
             if future > price:
                 wins += 1
-
     return round(wins/trades*100,2) if trades else 0
 
 
@@ -240,7 +235,6 @@ def backtest_winrate(df):
 def train_ai(df):
     X = []
     y = []
-
     for i in range(60,len(df)-5):
         vol_ratio = df['vol'].iloc[i] / df['vol'].iloc[i-50:i].mean()
         momentum = df['close'].diff().iloc[i-3:i].sum()
@@ -254,7 +248,10 @@ def train_ai(df):
 
 
 def load_model(df):
-    return joblib.load(MODEL_FILE) if os.path.exists(MODEL_FILE) else train_ai(df)
+    try:
+        return joblib.load(MODEL_FILE)
+    except Exception:
+        return train_ai(df)
 
 
 def ai_predict(df):
@@ -291,7 +288,7 @@ def ai_engine(df, ticker):
     dump = detect_dump(df)
     fake = detect_fake_breakout(df, res, sup)
     acc = detect_accumulation(df)
-    reversal = (trend(df) if trend(df) in ("up","down") else None)
+    reversal = trend(df) if trend(df) in ("up","down") else None
 
     status = {"action":"AI 扫描中","motto":"静观其变","color":"#121212","voice":None}
 
@@ -317,7 +314,7 @@ def ai_engine(df, ticker):
     short_prob = round(100-long_prob,2)
     score = min(int((vol_ratio>1.5)*25 + (strength>3)*25 + (long_prob>60)*25 + (resonance=="bull")*25),100)
 
-    return status,vol_ratio,res,sup,strength,resonance,winrate,long_prob,short_prob,score
+    return status,vol_ratio,res,sup,strength,resonance,winrate,long_prob,short_prob,score,reversal
 
 
 # ===== UI =====
@@ -327,7 +324,7 @@ def render():
         st.warning("数据异常")
         return
 
-    status,vr,res,sup,strength,resonance,winrate,long_prob,short_prob,score = ai_engine(df,ticker)
+    status,vr,res,sup,strength,resonance,winrate,long_prob,short_prob,score,reversal = ai_engine(df,ticker)
 
     key = status["action"]
     now = time.time()
