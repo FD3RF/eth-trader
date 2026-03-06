@@ -10,10 +10,12 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="ETH AI 终极盯盘", layout="wide")
 
-# 自动刷新
+# 自动刷新（5秒）
 st_autorefresh(interval=5000, key="refresh")
 
-# ===== 状态锁 =====
+# ======================
+# 状态锁
+# ======================
 if "signal_memory" not in st.session_state:
     st.session_state.signal_memory = {"last_key": None}
 
@@ -23,7 +25,9 @@ if "last_voice_time" not in st.session_state:
 MODEL_FILE = "ai_model.pkl"
 
 
-# ===== 语音 =====
+# ======================
+# 语音播报
+# ======================
 def ai_voice_broadcast(text):
     js = f"""
     <script>
@@ -38,13 +42,17 @@ def ai_voice_broadcast(text):
     st.components.v1.html(js, height=0)
 
 
-# ===== 交易所 =====
+# ======================
+# 交易所初始化
+# ======================
 @st.cache_resource
 def init_exchange():
     return ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 
-# ===== 数据 =====
+# ======================
+# 数据获取（重试+安全）
+# ======================
 def fetch_data():
     ex = init_exchange()
 
@@ -66,7 +74,9 @@ def fetch_data():
     return None, None
 
 
-# ===== 趋势 =====
+# ======================
+# 趋势与强度
+# ======================
 def trend(df):
     ma20 = df['close'].rolling(20).mean()
     ma50 = df['close'].rolling(50).mean()
@@ -78,7 +88,6 @@ def trend(df):
     return "side"
 
 
-# ===== 趋势强度 =====
 def trend_strength(df):
     ma20 = df['close'].rolling(20).mean()
     ma50 = df['close'].rolling(50).mean()
@@ -93,7 +102,9 @@ def trend_strength(df):
     return round(strength, 2)
 
 
-# ===== 背离 =====
+# ======================
+# 背离
+# ======================
 def is_bottom_divergence(df):
     if len(df) < 60 or trend(df) != "down":
         return False
@@ -130,7 +141,9 @@ def is_top_divergence(df):
     )
 
 
-# ===== 假突破 =====
+# ======================
+# 假突破
+# ======================
 def detect_fake_breakout(df, res, sup):
     curr = df.iloc[-1]
     prev = df.iloc[-2]
@@ -143,7 +156,9 @@ def detect_fake_breakout(df, res, sup):
     return None
 
 
-# ===== 主力吸筹 =====
+# ======================
+# 主力与庄家
+# ======================
 def detect_accumulation(df):
     if len(df) < 80:
         return False
@@ -157,7 +172,6 @@ def detect_accumulation(df):
     return price_flat and vol_expand
 
 
-# ===== 庄家拉升 =====
 def detect_whale_pump(df):
     if len(df) < 60:
         return False
@@ -169,7 +183,6 @@ def detect_whale_pump(df):
     return vol_expand and price_push and ma20.iloc[-1] > ma20.iloc[-3]
 
 
-# ===== 砸盘预警 =====
 def detect_dump(df):
     avg = df['vol'].iloc[-50:-1].mean()
     big_sell = df['vol'].iloc[-1] > avg * 2
@@ -179,7 +192,9 @@ def detect_dump(df):
     return big_sell and drop and df['close'].iloc[-1] < ma20.iloc[-1]
 
 
-# ===== 多周期共振 =====
+# ======================
+# 多周期共振
+# ======================
 def fetch_multi_tf():
     ex = init_exchange()
 
@@ -190,10 +205,10 @@ def fetch_multi_tf():
     df5 = build(ex.fetch_ohlcv('ETH/USDT:USDT','5m',limit=120))
     df15 = build(ex.fetch_ohlcv('ETH/USDT:USDT','15m',limit=120))
 
-    for d in (df1,df5,df15):
+    for d in (df1, df5, df15):
         d['ts_dt'] = pd.to_datetime(d['ts'], unit='ms')
 
-    return df1,df5,df15
+    return df1, df5, df15
 
 
 def tf_trend(df):
@@ -208,17 +223,19 @@ def tf_trend(df):
 
 
 def multi_tf_resonance():
-    df1,df5,df15 = fetch_multi_tf()
-    t1,t5,t15 = tf_trend(df1),tf_trend(df5),tf_trend(df15)
+    df1, df5, df15 = fetch_multi_tf()
+    t1, t5, t15 = tf_trend(df1), tf_trend(df5), tf_trend(df15)
 
-    if t1==t5==t15=="up":
+    if t1 == t5 == t15 == "up":
         return "bull"
-    if t1==t5==t15=="down":
+    if t1 == t5 == t15 == "down":
         return "bear"
     return "mixed"
 
 
-# ===== 回测 =====
+# ======================
+# 回测与AI
+# ======================
 def backtest_winrate(df):
     wins = trades = 0
     for i in range(60, len(df)-5):
@@ -231,19 +248,18 @@ def backtest_winrate(df):
     return round(wins/trades*100,2) if trades else 0
 
 
-# ===== AI自学习 =====
 def train_ai(df):
     X = []
     y = []
     for i in range(60,len(df)-5):
         vol_ratio = df['vol'].iloc[i] / df['vol'].iloc[i-50:i].mean()
         momentum = df['close'].diff().iloc[i-3:i].sum()
-        X.append([vol_ratio,momentum])
+        X.append([vol_ratio, momentum])
         y.append(1 if df['close'].iloc[i+5] > df['close'].iloc[i] else 0)
 
     model = RandomForestClassifier()
-    model.fit(X,y)
-    joblib.dump(model,MODEL_FILE)
+    model.fit(X, y)
+    joblib.dump(model, MODEL_FILE)
     return model
 
 
@@ -258,12 +274,14 @@ def ai_predict(df):
     model = load_model(df)
     vol_ratio = df['vol'].iloc[-1] / df['vol'].iloc[-50:-1].median()
     momentum = df['close'].diff().iloc[-3:].sum()
-    pred = model.predict([[vol_ratio,momentum]])[0]
-    prob = model.predict_proba([[vol_ratio,momentum]])[0][1]
-    return pred,prob
+    pred = model.predict([[vol_ratio, momentum]])[0]
+    prob = model.predict_proba([[vol_ratio, momentum]])[0][1]
+    return pred, prob
 
 
-# ===== AI引擎 =====
+# ======================
+# AI引擎
+# ======================
 def ai_engine(df, ticker):
     curr = df.iloc[-1]
     price = curr['close']
@@ -287,7 +305,6 @@ def ai_engine(df, ticker):
     whale = detect_whale_pump(df)
     dump = detect_dump(df)
     fake = detect_fake_breakout(df, res, sup)
-    acc = detect_accumulation(df)
     reversal = trend(df) if trend(df) in ("up","down") else None
 
     status = {"action":"AI 扫描中","motto":"静观其变","color":"#121212","voice":None}
@@ -314,20 +331,22 @@ def ai_engine(df, ticker):
     short_prob = round(100-long_prob,2)
     score = min(int((vol_ratio>1.5)*25 + (strength>3)*25 + (long_prob>60)*25 + (resonance=="bull")*25),100)
 
-    return status,vol_ratio,res,sup,strength,resonance,winrate,long_prob,short_prob,score,reversal
+    return status, vol_ratio, res, sup, strength, resonance, winrate, long_prob, short_prob, score, reversal
 
 
-# ===== UI =====
+# ======================
+# UI
+# ======================
 def render():
     df, ticker = fetch_data()
     if df is None:
         st.warning("数据异常")
         return
 
-    status,vr,res,sup,strength,resonance,winrate,long_prob,short_prob,score,reversal = ai_engine(df,ticker)
+    status, vr, res, sup, strength, resonance, winrate, long_prob, short_prob, score, reversal = ai_engine(df, ticker)
 
-    key = status["action"]
     now = time.time()
+    key = status["action"]
 
     if (
         st.session_state.signal_memory["last_key"] != key
@@ -347,10 +366,10 @@ def render():
 
     st.write("多周期共振:", resonance)
     st.write("趋势强度:", strength)
-    st.write("策略历史胜率:", winrate,"%")
-    st.write("多头概率:", long_prob,"%")
-    st.write("空头概率:", short_prob,"%")
-    st.write("AI信号评分:", score,"/100")
+    st.write("策略历史胜率:", winrate, "%")
+    st.write("多头概率:", long_prob, "%")
+    st.write("空头概率:", short_prob, "%")
+    st.write("AI信号评分:", score, "/100")
 
     if detect_accumulation(df):
         st.success("检测主力吸筹")
