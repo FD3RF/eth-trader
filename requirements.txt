@@ -1,4 +1,4 @@
 streamlit
 pandas
-ccxt
 plotly
+ccxt==4.4.40
