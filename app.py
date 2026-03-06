@@ -5,24 +5,34 @@ import plotly.graph_objects as go
 from datetime import datetime
 import time
 
-# 1. 基础配置
-st.set_page_config(page_title="ETH V2600 战神系统", layout="wide")
+# --- 1. 系统核心配置与状态锁 ---
+st.set_page_config(page_title="ETH AI 智能播报系统", layout="wide")
 
-# 2. 核心：语音播报与金色闪烁逻辑
-def trigger_action(text, is_alert=False):
-    # 语音脚本
-    js_voice = f"var msg = new SpeechSynthesisUtterance('{text}'); msg.lang = 'zh-CN'; window.speechSynthesis.speak(msg);"
-    
-    # 金色闪烁视觉效果脚本 (仅在放量突破/跌破时触发)
-    js_flash = ""
-    if is_alert:
-        js_flash = "document.body.style.backgroundColor = '#FFD700'; setTimeout(() => { document.body.style.backgroundColor = '#0e1117'; }, 500);"
-    
-    st.components.v1.html(f"<script>{js_voice} {js_flash}</script>", height=0)
+# 初始化信号记忆锁：记录 (K线时间戳, 信号类型)
+if 'signal_memory' not in st.session_state:
+    st.session_state.signal_memory = {"ts": None, "action": None}
 
-# 3. 初始化 OKX (使用你已配置好的 Key)
+def ai_voice_broadcast(text, k_ts):
+    """
+    精准播报控制：同一根K线下的同一动作只播报一次
+    """
+    if st.session_state.signal_memory["ts"] == k_ts and st.session_state.signal_memory["action"] == text:
+        return # 拦截重复播报
+    
+    js_code = f"""
+    <script>
+    var msg = new SpeechSynthesisUtterance("{text}");
+    msg.lang = 'zh-CN';
+    msg.rate = 1.15; // 优化语速，更具实战感
+    window.speechSynthesis.speak(msg);
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+    st.session_state.signal_memory = {"ts": k_ts, "action": text}
+
+# --- 2. 真实数据接入 (OKX API) ---
 @st.cache_resource
-def init_okx():
+def init_exchange():
     return ccxt.okx({
         'apiKey': 'a2a2a452-49e6-4e76-95f3-fb54eb982e7b',
         'secret': '330FABB2CAD3585677716686C2BF3872',
@@ -30,74 +40,112 @@ def init_okx():
         'enableRateLimit': True,
     })
 
-okx = init_okx()
-
-# 4. 获取数据逻辑
-def fetch_data():
+def fetch_market_data():
+    exchange = init_exchange()
     try:
-        # 获取 ETH 永续合约 5分钟 K线
-        bars = okx.fetch_ohlcv('ETH/USDT:USDT', timeframe='5m', limit=100)
+        # 获取100条数据，计算20均量和30支撑压力
+        bars = exchange.fetch_ohlcv('ETH/USDT:USDT', timeframe='5m', limit=100)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+        df['ts_dt'] = pd.to_datetime(df['ts'], unit='ms')
         return df
     except Exception as e:
-        st.error(f"数据获取异常: {e}")
+        st.error(f"网络异常，自动重连中... {e}")
         return pd.DataFrame()
 
-# 5. 核心口诀判定引擎
-def analyze_v2600(df):
+# --- 3. 核心引擎：精准口诀计算 ---
+def ai_logic_engine(df):
     curr = df.iloc[-1]
-    prev = df.iloc[-2]
+    price = curr['close']
     
-    # 计算 20 周期均量
+    # 算法排查：使用前20根已收盘K线的均量，避免当前跳动量能干扰
     avg_vol = df['vol'].iloc[-21:-1].mean()
     vol_ratio = curr['vol'] / avg_vol
     
-    # 锁定前 30 根 K 线的高低点
-    recent_low = df['low'].iloc[-30:].min()
-    recent_high = df['high'].iloc[-30:].max()
+    # 支撑压力：取前30根K线波段，加入0.02%的缓冲区
+    res_line = df['high'].iloc[-30:-1].max()
+    sup_line = df['low'].iloc[-30:-1].min()
     
-    signal = {"motto": "量能不明", "action": "观望", "color": "#2b2b2b", "voice": "", "alert": False}
-
-    # --- 做多口诀判定 ---
-    if vol_ratio < 0.6 and abs(curr['low'] - recent_low)/recent_low < 0.002:
-        signal.update({"motto": "缩量回踩，低点不破", "action": "准备动手", "color": "#1E90FF"})
-    elif vol_ratio > 1.8 and curr['close'] > recent_high:
-        signal.update({"motto": "放量起涨，突破前高", "action": "直接开多", "color": "#00C853", "voice": "放量起涨突破前高直接开多", "alert": True})
+    # 盈亏比预计算
+    long_r = (res_line - price) / (price - sup_line) if (price - sup_line) > 0.1 else 0
+    short_r = (price - sup_line) / (res_line - price) if (res_line - price) > 0.1 else 0
     
-    # --- 做空口诀判定 ---
-    elif vol_ratio < 0.6 and abs(curr['high'] - recent_high)/recent_high < 0.002:
-        signal.update({"motto": "缩量反弹，高点不破", "action": "准备动手", "color": "#FF9100"})
-    elif vol_ratio > 1.8 and curr['close'] < recent_low:
-        signal.update({"motto": "放量下跌，跌破前低", "action": "直接开空", "color": "#FF3D00", "voice": "放量下跌跌破前低直接开空", "alert": True})
+    status = {"action": "AI 扫描中", "motto": "缩量是提醒，放量是信号", "color": "#121212", "voice": "", "tri": None}
 
-    return signal, vol_ratio, recent_low, recent_high
-
-# --- 界面展示 ---
-st.title("🛡️ ETH V2600 战神·不朽大衍系统")
-
-df = fetch_data()
-if not df.empty:
-    sig, vr, sup, res = analyze_v2600(df)
+    # --- 精准口诀对齐判定 ---
     
-    # 执行语音与警报
-    if sig['voice']:
-        trigger_action(sig['voice'], sig['alert'])
+    # A. 做多系列
+    if vol_ratio < 0.5 and price <= sup_line * 1.005 and curr['close'] < curr['open']:
+        status.update({"action": "准备动手(多)", "motto": "缩量回踩，低点不破", "color": "#0D47A1", "voice": "缩量回踩，低点不破，准备动手"})
+    elif vol_ratio > 1.6 and price > res_line:
+        status.update({"action": "直接开多", "motto": "放量起涨，突破前高", "color": "#1B5E20", "voice": "放量起涨，突破前高，直接开多", "tri": "buy"})
+    elif vol_ratio > 2.2 and curr['low'] <= sup_line and price > curr['low'] * 1.001:
+        status.update({"action": "机会点(多)", "motto": "放量急跌，底部不破", "color": "#006064", "voice": "放量急跌，底部不破，这是机会", "tri": "buy"})
+    
+    # B. 做空系列
+    elif vol_ratio < 0.5 and price >= res_line * 0.995 and curr['close'] > curr['open']:
+        status.update({"action": "准备动手(空)", "motto": "缩量反弹，高点不破", "color": "#E65100", "voice": "缩量反弹，高点不破，准备动手"})
+    elif vol_ratio > 1.6 and price < sup_line:
+        status.update({"action": "直接开空", "motto": "放量下跌，跌破前低", "color": "#B71C1C", "voice": "放量下跌，跌破前低，直接开空", "tri": "sell"})
+    elif vol_ratio > 2.2 and curr['high'] >= res_line and price < curr['high'] * 0.999:
+        status.update({"action": "机会点(空)", "motto": "放量急涨，顶部不破", "color": "#4A148C", "voice": "放量急涨，顶部不破，这是机会", "tri": "sell"})
 
-    # 顶层看板
-    st.markdown(f"""
-        <div style="background-color:{sig['color']}; padding:35px; border-radius:20px; text-align:center; border: 3px solid gold;">
-            <h1 style="color:white; font-size:50px; margin:0;">{sig['action']}</h1>
-            <h2 style="color:gold;">“{sig['motto']}”</h2>
-            <p style="color:white; font-size:18px;">当前量比: {vr:.2f}x | 支撑: {sup} | 压力: {res}</p>
-        </div>
-    """, unsafe_allow_html=True)
+    return status, vol_ratio, res_line, sup_line, long_r, short_r
 
-    # 绘制 K 线图
-    fig = go.Figure(data=[go.Candlestick(x=df['ts'], open=df['open'], high=df['high'], low=df['low'], close=df['close'])])
-    fig.add_hline(y=sup, line_dash="dash", line_color="cyan", annotation_text="支撑线")
-    fig.add_hline(y=res, line_dash="dash", line_color="magenta", annotation_text="压力线")
-    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+# --- 4. UI 界面 ---
+st.markdown("<h1 style='text-align: center; color: #FFD700;'>🛡️ ETH AI 智能播报系统</h1>", unsafe_allow_html=True)
 
-st.caption(f"数据实时刷新中... 当前时间: {datetime.now().strftime('%H:%M:%S')}")
+main_view = st.empty()
+
+while True:
+    df = fetch_market_data()
+    if not df.empty:
+        status, vr, res, sup, lr, sr = ai_logic_engine(df)
+        k_ts = df['ts'].iloc[-1]
+        
+        with main_view.container():
+            # AI 视觉看板
+            st.markdown(f"""
+                <div style="background-color:{status['color']}; padding:25px; border-radius:15px; text-align:center; border: 4px solid #FFD700; box-shadow: 0px 0px 20px {status['color']};">
+                    <h1 style="color:white; font-size:55px; margin:0; letter-spacing:2px;">{status['action']}</h1>
+                    <h2 style="color:#FFD700; margin-top:10px;">“{status['motto']}”</h2>
+                    
+                    <div style="display: flex; justify-content: space-around; margin-top: 20px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 10px;">
+                        <div>
+                            <div style="font-size: 12px; color: #aaa;">做多盈亏比</div>
+                            <div style="font-size: 26px; font-weight: bold; color: {'#00FF00' if lr >= 1.5 else '#666'};">{lr:.2f}</div>
+                        </div>
+                        <div style="width: 1px; background: #444;"></div>
+                        <div>
+                            <div style="font-size: 12px; color: #aaa;">做空盈亏比</div>
+                            <div style="font-size: 26px; font-weight: bold; color: {'#FF3D00' if sr >= 1.5 else '#666'};">{sr:.2f}</div>
+                        </div>
+                    </div>
+                    <p style="color:#888; font-size:14px; margin-top:10px;">量比: {vr:.2f}x | 支撑: {sup} | 压力: {res}</p>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # 触发 AI 播报 (含状态锁)
+            if status['voice']:
+                ai_voice_broadcast(status['voice'], k_ts)
+
+            # 绘制专业级K线图
+            
+            fig = go.Figure(data=[go.Candlestick(
+                x=df['ts_dt'], open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+                increasing_line_color='#00ff88', decreasing_line_color='#ff3344', name="ETH/USDT"
+            )])
+            fig.add_hline(y=res, line_dash="dash", line_color="#FF00FF", opacity=0.4, annotation_text="AI压力位")
+            fig.add_hline(y=sup, line_dash="dash", line_color="#00FFFF", opacity=0.4, annotation_text="AI支撑位")
+            
+            if status['tri'] == "buy":
+                fig.add_trace(go.Scatter(x=[df['ts_dt'].iloc[-1]], y=[df['low'].iloc[-1]*0.998], mode="markers", marker=dict(symbol="triangle-up", size=20, color="#00FF00"), name="入场多"))
+            elif status['tri'] == "sell":
+                fig.add_trace(go.Scatter(x=[df['ts_dt'].iloc[-1]], y=[df['high'].iloc[-1]*1.002], mode="markers", marker=dict(symbol="triangle-down", size=20, color="#FF0000"), name="入场空"))
+
+            fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.caption(f"系统运行稳定 | 刷新时间: {datetime.now().strftime('%H:%M:%S')} | 5M周期监测中")
+
+    time.sleep(8) # 8秒刷新一次，平衡实时性与稳定性
+    st.rerun()
