@@ -7,7 +7,7 @@ import time
 
 st.set_page_config(page_title="ETH AI 终极播报", layout="wide")
 
-# ====== 状态锁（不删）======
+# ====== 状态锁 ======
 if "signal_memory" not in st.session_state:
     st.session_state.signal_memory = {"last_key": None}
 if "auto" not in st.session_state:
@@ -16,7 +16,7 @@ if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now()
 
 def ai_voice_broadcast(text):
-    """语音播报（保留）"""
+    """语音播报"""
     js = f"""
     <script>
     try {{
@@ -29,34 +29,30 @@ def ai_voice_broadcast(text):
     """
     st.components.v1.html(js, height=0)
 
-# ====== 数据源（重试机制+不删）======
+# ====== 数据源（重试+安全）======
 @st.cache_resource
 def init_exchange():
     return ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 def fetch_data():
     ex = init_exchange()
-
-    # 数据重试（追加）
-    for _ in range(3):
+    for _ in range(3):  # 数据重试
         try:
             bars = ex.fetch_ohlcv('ETH/USDT:USDT', timeframe='5m', limit=100)
             ticker = ex.fetch_ticker('ETH/USDT:USDT')
 
             df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
-            df['ts_dt'] = pd.to_datetime(df['ts'], unit='ms'])
+            df['ts_dt'] = pd.to_datetime(df['ts'], unit='ms')
             return df, ticker
         except Exception:
             time.sleep(1)
-
     return None, None
 
-# ====== 引擎（均量保护+口诀不删）======
+# ====== 引擎（口诀对齐+均量保护）======
 def ai_engine(df, ticker):
     curr = df.iloc[-1]
     price = curr['close']
 
-    # 均量保护（追加）
     avg_vol = df['vol'].iloc[-21:-1].mean()
     vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 1
 
@@ -112,11 +108,9 @@ def ai_engine(df, ticker):
 
     return status, vol_ratio, res_5m, sup_5m, lr, sr, h24, l24
 
-# ====== 渲染（UI安全+不删）======
+# ====== UI渲染（安全）======
 def render():
     df, ticker = fetch_data()
-
-    # UI安全（追加）
     if df is None or ticker is None:
         st.warning("数据暂不可用，正在重试…")
         return
@@ -154,22 +148,19 @@ def render():
 
     st.caption(f"量比: {vr:.2f}x | 多盈亏比: {lr:.2f} | 空盈亏比: {sr:.2f}")
 
-# ====== 控制面板 ======
+# ====== 控制 ======
 if st.button("开始实时扫描"):
     st.session_state.auto = True
 
 if st.button("停止扫描"):
     st.session_state.auto = False
 
-# ====== 自动刷新（稳定版）======
+# ====== 自动刷新 ======
 if st.session_state.auto:
     render()
-
-    # 防高频刷新
     now = datetime.now()
     if (now - st.session_state.last_refresh).total_seconds() < 5:
         time.sleep(5)
-
     st.session_state.last_refresh = datetime.now()
     st.rerun()
 else:
