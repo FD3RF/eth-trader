@@ -2,3 +2,4 @@ streamlit
 pandas
 plotly
 ccxt==4.4.40
+pip install
