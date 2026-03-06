@@ -4,46 +4,50 @@ import requests
 import plotly.graph_objects as go
 from datetime import datetime
 
-st.set_page_config(page_title="ETH 合约AI智能播报", layout="wide")
+st.set_page_config(page_title="ETH 合约AI播报(OKX数据)", layout="wide")
 
-st.title("📊 ETH 合约5分钟量价AI播报")
+st.title("📊 ETH 合约5分钟量价AI播报 - OKX数据源")
 
-# ======= 获取K线数据 =======
+# ======= 获取K线数据（OKX）=======
 def get_klines():
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": "ETHUSDT", "interval": "5m", "limit": 100}
+    url = "https://www.okx.com/api/v5/market/candles"
+    params = {
+        "instId": "ETH-USDT-SWAP",
+        "bar": "5m",
+        "limit": "100"
+    }
     try:
         resp = requests.get(url, timeout=5)
         data = resp.json()
     except Exception as e:
-        st.error(f"数据请求失败: {e}")
+        st.error(f"请求失败: {e}")
         return pd.DataFrame()
 
-    # 如果API返回错误
-    if not isinstance(data, list) or len(data) == 0:
-        st.error("API返回空数据，可能被限流或网络异常")
+    # OKX 数据结构: data["data"]
+    if "data" not in data or len(data["data"]) == 0:
+        st.warning("OKX返回空数据，可能网络限制")
         return pd.DataFrame()
 
-    df = pd.DataFrame(data, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_asset_volume", "trades",
-        "taker_buy_base", "taker_buy_quote", "ignore"
+    rows = data["data"]
+    df = pd.DataFrame(rows, columns=[
+        "open_time", "open", "high", "low", "close",
+        "volume", "volCcy", "volCcyQuote", "confirm"
     ])
 
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    # 时间戳转日期
+    df["open_time"] = pd.to_datetime(df["open_time"].astype(int), unit="ms")
     df["close"] = df["close"].astype(float)
     df["open"] = df["open"].astype(float)
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)
+    df["volume"] = df["volume"].astype(float)  # 合约成交量
 
     return df
 
 # ======= 信号逻辑 =======
 def signal_logic(df):
-    # 数据保护：空表直接返回
     if df.empty or len(df) < 2:
-        return False, False, "数据不足，等待加载", None, None
+        return False, False, "数据不足", None, None
 
     last = df.iloc[-1]
     prev_vol = df["volume"].iloc[-6:-1].mean() if len(df) > 6 else df["volume"].mean()
@@ -79,7 +83,7 @@ def signal_logic(df):
 df = get_klines()
 
 if df.empty:
-    st.warning("暂无数据，等待下一次刷新")
+    st.warning("暂无数据，可能网络受限")
     st.stop()
 
 buy, sell, motto, high, low = signal_logic(df)
@@ -121,6 +125,6 @@ elif sell:
 else:
     st.info("⏳ 观察区：等待放量信号")
 
-# ======= 数据表 =======
+# ======= 最新数据 =======
 st.subheader("📋 最新K线")
 st.dataframe(df.tail())
