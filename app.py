@@ -1,52 +1,44 @@
 import streamlit as st
 import pandas as pd
-import requests
 import plotly.graph_objects as go
 from datetime import datetime
+import numpy as np
 
-st.set_page_config(page_title="ETH 合约AI播报", layout="wide")
-st.title("📊 ETH 合约5分钟量价AI播报(OKX数据源)")
+st.set_page_config(page_title="ETH 合约AI播报(本地数据版)", layout="wide")
+st.title("📊 ETH 合约5分钟量价AI播报 - 本地示例数据")
 
-# ======= 获取K线 =======
-def get_klines():
-    url = "https://www.okx.com/api/v5/market/candles"
-    params = {"instId": "ETH-USDT-SWAP", "bar": "5m", "limit": "100"}
-    try:
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-    except Exception as e:
-        st.error(f"请求失败: {e}")
-        return pd.DataFrame()
+# ======= 生成/加载本地示例K线数据 =======
+def load_sample_data():
+    # 如果有 CSV，可在这里加载：
+    # df = pd.read_csv("your_file.csv")
+    # return df
 
-    if "data" not in data or len(data["data"]) == 0:
-        st.warning("OKX返回空数据")
-        return pd.DataFrame()
+    # 没有外部数据 → 生成模拟5分钟数据
+    n = 200
+    rng = pd.date_range("2024-01-01", periods=n, freq="5T")
+    price = np.cumsum(np.random.randn(n)) + 2000
+    high = price + np.random.rand(n) * 5
+    low = price - np.random.rand(n) * 5
+    open_ = price + np.random.randn(n)
+    close = price
+    volume = np.abs(np.random.randn(n) * 1000)
 
-    rows = data["data"]
-    df = pd.DataFrame(rows, columns=[
-        "open_time", "open", "high", "low", "close",
-        "volume", "volCcy", "volCcyQuote", "confirm"
-    ])
-
-    df["open_time"] = pd.to_datetime(df["open_time"].astype(int), unit="ms")
-    df["close"] = df["close"].astype(float)
-    df["open"] = df["open"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)
-
+    df = pd.DataFrame({
+        "open_time": rng,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume
+    })
     return df
 
-# ======= 信号逻辑（安全版）=======
+# ======= 信号逻辑 =======
 def signal_logic(df):
-    # 数据保护：行数不足直接返回
     if df is None or df.empty or len(df) < 2:
         return False, False, "数据不足", None, None
 
     last = df.iloc[-1]
-    if last is None:
-        return False, False, "数据异常", None, None
-
     prev_vol = df["volume"].iloc[-6:-1].mean() if len(df) > 6 else df["volume"].mean()
 
     is_low_vol = last["volume"] < (prev_vol * 0.6 if prev_vol > 0 else 1)
@@ -76,13 +68,8 @@ def signal_logic(df):
     return buy, sell, motto, recent_high, recent_low
 
 # ======= 主流程 =======
-df = get_klines()
+df = load_sample_data()
 
-if df is None or df.empty:
-    st.warning("暂无数据，等待下一次刷新")
-    st.stop()
-
-# 信号
 buy, sell, motto, high, low = signal_logic(df)
 
 # ======= K线图 =======
@@ -115,15 +102,15 @@ st.plotly_chart(fig, use_container_width=True)
 # ======= 播报 =======
 st.subheader("🤖 AI 播报")
 st.write(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.write(f"口诀：{motto}")
+st.write(f"智能口诀：{motto}")
 
 if buy:
-    st.success("📈 多单信号")
+    st.success("📈 多单信号（模拟）")
 elif sell:
-    st.error("📉 空单信号")
+    st.error("📉 空单信号（模拟）")
 else:
     st.info("⏳ 观察区")
 
 # ======= 数据表 =======
-st.subheader("📋 最新K线")
+st.subheader("📋 示例K线")
 st.dataframe(df.tail())
