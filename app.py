@@ -11,11 +11,12 @@ st.set_page_config(page_title="ETH AI 终极播报", layout="wide")
 if "signal_memory" not in st.session_state:
     st.session_state.signal_memory = {"last_key": None}
 if "auto" not in st.session_state:
-    st.session_state.auto = True   # ← 自动启动
+    st.session_state.auto = True
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now()
 
 def ai_voice_broadcast(text):
+    """语音播报"""
     js = f"""
     <script>
     try {{
@@ -28,7 +29,7 @@ def ai_voice_broadcast(text):
     """
     st.components.v1.html(js, height=0)
 
-# ====== 数据源 ======
+# ====== 数据源（重试+安全）======
 @st.cache_resource
 def init_exchange():
     return ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
@@ -47,7 +48,7 @@ def fetch_data():
             time.sleep(1)
     return None, None
 
-# ====== 引擎 ======
+# ====== 引擎（口诀对齐+均量保护）======
 def ai_engine(df, ticker):
     curr = df.iloc[-1]
     price = curr['close']
@@ -70,6 +71,7 @@ def ai_engine(df, ticker):
         "flash": None
     }
 
+    # 放量突破（口诀）
     if vol_ratio > 1.6 and price > res_5m:
         status.update({
             "action": "直接开多",
@@ -78,6 +80,7 @@ def ai_engine(df, ticker):
             "voice": "放量起涨，突破前高，直接开多",
             "flash": "gold"
         })
+    # 放量跌破
     elif vol_ratio > 1.6 and price < sup_5m:
         status.update({
             "action": "直接开空",
@@ -86,6 +89,7 @@ def ai_engine(df, ticker):
             "voice": "放量下跌，跌破前低，直接开空",
             "flash": "purple"
         })
+    # 缩量回踩
     elif vol_ratio < 0.5 and price <= sup_5m * 1.002 and price < curr['open']:
         status.update({
             "action": "准备动手(多)",
@@ -93,6 +97,7 @@ def ai_engine(df, ticker):
             "color": "#0D47A1",
             "voice": "缩量回踩，低点不破，准备动手"
         })
+    # 缩量反弹
     elif vol_ratio < 0.5 and price >= res_5m * 0.998 and price > curr['open']:
         status.update({
             "action": "准备动手(空)",
@@ -103,7 +108,7 @@ def ai_engine(df, ticker):
 
     return status, vol_ratio, res_5m, sup_5m, lr, sr, h24, l24
 
-# ====== 渲染 ======
+# ====== UI渲染（三角+支撑压力）======
 def render():
     df, ticker = fetch_data()
     if df is None or ticker is None:
@@ -112,6 +117,7 @@ def render():
 
     status, vr, res, sup, lr, sr, h24, l24 = ai_engine(df, ticker)
 
+    # 防重复播报
     key = f"{status['action']}_{df.iloc[-1]['ts']}"
     if st.session_state.signal_memory["last_key"] != key and status.get("voice"):
         ai_voice_broadcast(status["voice"])
@@ -130,6 +136,7 @@ def render():
     with col2:
         st.metric("24H 最低", f"{l24:.2f}")
 
+    # ====== K线图（三角+虚线）======
     fig = go.Figure(data=[go.Candlestick(
         x=df['ts_dt'],
         open=df['open'],
@@ -137,6 +144,49 @@ def render():
         low=df['low'],
         close=df['close']
     )])
+
+    # 压力位（紫色虚线）
+    fig.add_shape(
+        type="line",
+        x0=df['ts_dt'].min(),
+        x1=df['ts_dt'].max(),
+        y0=2088.78,
+        y1=2088.78,
+        line=dict(color="purple", width=2, dash="dash")
+    )
+
+    # 支撑位（蓝色虚线）
+    fig.add_shape(
+        type="line",
+        x0=df['ts_dt'].min(),
+        x1=df['ts_dt'].max(),
+        y0=2058.26,
+        y1=2058.26,
+        line=dict(color="blue", width=2, dash="dash")
+    )
+
+    # 三角：底背离（绿）
+    if status["action"] == "准备动手(多)":
+        low_idx = df['low'].idxmin()
+        fig.add_trace(go.Scatter(
+            x=[df.loc[low_idx, 'ts_dt']],
+            y=[df.loc[low_idx, 'low']],
+            mode="markers",
+            marker=dict(symbol="triangle-up", size=16, color="green"),
+            name="底背离"
+        ))
+
+    # 三角：顶背离（红）
+    if status["action"] == "直接开空" or status["action"] == "准备动手(空)":
+        high_idx = df['high'].idxmax()
+        fig.add_trace(go.Scatter(
+            x=[df.loc[high_idx, 'ts_dt']],
+            y=[df.loc[high_idx, 'high']],
+            mode="markers",
+            marker=dict(symbol="triangle-down", size=16, color="red"),
+            name="顶背离"
+        ))
+
     fig.update_layout(template="plotly_dark", height=450)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -145,7 +195,7 @@ def render():
 # ====== 自动扫描 ======
 render()
 
-# 自动刷新（每5秒）
+# 自动刷新（5秒）
 now = datetime.now()
 if (now - st.session_state.last_refresh).total_seconds() < 5:
     time.sleep(5)
