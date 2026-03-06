@@ -1,96 +1,150 @@
 import streamlit as st
 import pandas as pd
-import ccxt
+import requests
 import plotly.graph_objects as go
 from datetime import datetime
 
-# 页面基础配置
-st.set_page_config(page_title="ETH 5m精准口诀机器人", layout="wide")
+st.set_page_config(page_title="ETH 合约AI智能播报", layout="wide")
 
-# 1. 语音播报函数 (利用浏览器 Web Speech API)
-def trigger_voice(text):
-    js_script = f"""
-    <script>
-    var msg = new SpeechSynthesisUtterance('{text}');
-    msg.lang = 'zh-CN';
-    msg.rate = 1.1; 
-    window.speechSynthesis.speak(msg);
-    </script>
+st.title("📊 ETH 合约5分钟量价AI播报（含真实成交量）")
+
+# ======= 获取K线与合约成交量（Binance）=======
+def get_klines():
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        "symbol": "ETHUSDT",
+        "interval": "5m",
+        "limit": 100
+    }
+    resp = requests.get(url, params=params)
+    data = resp.json()
+
+    df = pd.DataFrame(data, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "trades",
+        "taker_buy_base", "taker_buy_quote", "ignore"
+    ])
+
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    df["close"] = df["close"].astype(float)
+    df["open"] = df["open"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["volume"] = df["volume"].astype(float)  # 合约真实成交量（基础成交量）
+
+    return df
+
+# ======= 止损止盈计算 =======
+def risk_calc(entry, direction, recent_high, recent_low):
     """
-    st.components.v1.html(js_script, height=0)
+    direction: 'long' or 'short'
+    止损：关键位外扩1-2个价位
+    止盈：1:1.5 盈亏比
+    """
+    if direction == "long":
+        stop = recent_low - (recent_low * 0.001)  # 低点下方0.1%
+        risk = entry - stop
+        target = entry + risk * 1.5
+    else:
+        stop = recent_high + (recent_high * 0.001)
+        risk = stop - entry
+        target = entry - risk * 1.5
 
-# 2. 获取币安实时数据
-exchange = ccxt.binance()
+    return round(stop, 4), round(target, 4)
 
-def fetch_eth_data():
-    try:
-        # 获取最近50根5分钟K线
-        ohlcv = exchange.fetch_ohlcv('ETH/USDT', timeframe='5m', limit=50)
-        df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        return df
-    except Exception as e:
-        st.error(f"获取数据失败: {e}")
-        return pd.DataFrame()
+# ======= 量价与口诀信号 =======
+def signal_logic(df):
+    last = df.iloc[-1]
+    prev_vol = df["volume"].iloc[-6:-1].mean()
 
-# 3. 核心决策逻辑引擎
-def analyze_market(df):
-    curr = df.iloc[-1]   # 当前未收盘K线
-    prev = df.iloc[-2]   # 上一根已收盘K线
-    
-    # 计算均量 (参考最近5根)
-    avg_vol = df['vol'].iloc[-6:-1].mean()
-    vol_ratio = curr['vol'] / avg_vol
-    
-    # 锁定波段高低点
-    recent_low = df['low'].iloc[-30:].min()
-    recent_high = df['high'].iloc[-30:].max()
-    
-    motto, action, color, sound = "量能不明", "保持观望", "#2b2b2b", ""
+    is_low_vol = last["volume"] < prev_vol * 0.6
+    is_high_vol = last["volume"] > prev_vol * 1.5
 
-    # --- 做多判定 ---
-    if curr['low'] >= recent_low and curr['close'] <= recent_low * 1.002 and vol_ratio < 0.7:
-        motto, action, color = "缩量回踩，低点不破", "准备动手", "#1E90FF"
-    elif vol_ratio > 1.5 and curr['close'] > prev['high'] and prev['close'] < prev['open']:
-        motto, action, color, sound = "放量起涨，突破阴线", "马上跟多", "#00C853", "马上跟多"
-    elif vol_ratio > 2.0 and curr['low'] < recent_low and curr['close'] > recent_low:
-        motto, action, color, sound = "放量暴跌，低点不破", "假跌真买", "#00E676", "这是机会"
+    recent_high = df["high"].iloc[-20:].max()
+    recent_low = df["low"].iloc[-20:].min()
+    close = last["close"]
+    low = last["low"]
+    high = last["high"]
 
-    # --- 做空判定 ---
-    elif curr['high'] <= recent_high and curr['close'] >= recent_high * 0.998 and vol_ratio < 0.7:
-        motto, action, color = "缩量反弹，高点不破", "准备动手", "#FF9100"
-    elif vol_ratio > 1.5 and curr['close'] < prev['low'] and prev['close'] > prev['open']:
-        motto, action, color, sound = "放量下跌，跌破阳线", "马上跟空", "#FF3D00", "马上跟空"
-    elif vol_ratio > 2.0 and curr['high'] > recent_high and curr['close'] < recent_high:
-        motto, action, color, sound = "放量急涨，顶部不破", "假涨真空", "#D50000", "这是机会"
+    buy = False
+    sell = False
+    motto = "等待信号"
 
-    return motto, action, color, sound, vol_ratio, recent_low, recent_high
+    # 做多口诀
+    if is_low_vol and low >= recent_low:
+        motto = "缩量回踩，低点不破 → 观察"
+    if is_high_vol and close > df["high"].iloc[-2]:
+        buy = True
+        motto = "放量起涨，突破前高 → 做多"
 
-# 4. 界面渲染
-st.title("⚡ ETH 5分钟量价口诀实时机器人")
-df = fetch_eth_data()
+    # 做空口诀
+    if is_low_vol and high <= recent_high:
+        motto = "缩量反弹，高点不破 → 观察"
+    if is_high_vol and close < df["low"].iloc[-2]:
+        sell = True
+        motto = "放量跌破前低 → 做空"
 
-if not df.empty:
-    motto, action, color, sound, vr, sup, res = analyze_market(df)
-    
-    # 触发语音
-    if sound:
-        trigger_voice(sound)
-    
-    # 看板显示
-    st.markdown(f"""
-        <div style="background-color:{color}; padding:25px; border-radius:12px; text-align:center;">
-            <h1 style="color:white; margin:0;">{action}</h1>
-            <h3 style="color:white; opacity:0.8;">“{motto}”</h3>
-            <p style="color:white;">量比: {vr:.2f}x | 支撑: {sup} | 压力: {res}</p>
-        </div>
-    """, unsafe_allow_html=True)
+    return buy, sell, motto, recent_high, recent_low
 
-    # 绘制K线图
-    fig = go.Figure(data=[go.Candlestick(x=df['ts'], open=df['open'], high=df['high'], low=df['low'], close=df['close'])])
-    fig.add_hline(y=sup, line_dash="dash", line_color="cyan")
-    fig.add_hline(y=res, line_dash="dash", line_color="magenta")
-    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+# ======= 数据与信号 =======
+df = get_klines()
+buy, sell, motto, high, low = signal_logic(df)
 
-st.caption(f"刷新频率：10秒 | 当前时间：{datetime.now().strftime('%H:%M:%S')}")
+entry_price = df.iloc[-1]["close"]
+direction = "long" if buy else "short" if sell else None
+
+stop = target = None
+if direction:
+    stop, target = risk_calc(entry_price, direction, high, low)
+
+# ======= K线图 =======
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df["open_time"],
+    open=df["open"],
+    high=df["high"],
+    low=df["low"],
+    close=df["close"],
+    name="ETH 5m"
+))
+fig.add_trace(go.Scatter(
+    x=[df["open_time"].iloc[0], df["open_time"].iloc[-1]],
+    y=[high, high],
+    mode="lines",
+    name="前高"
+))
+fig.add_trace(go.Scatter(
+    x=[df["open_time"].iloc[0], df["open_time"].iloc[-1]],
+    y=[low, low],
+    mode="lines",
+    name="前低"
+))
+
+st.plotly_chart(fig, use_container_width=True)
+
+# ======= 播报区 =======
+st.subheader("🤖 AI 智能播报")
+st.write(f"最新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.write(f"智能口诀：{motto}")
+
+if buy:
+    st.success("📈 多单信号：放量突破 → 做多观察")
+elif sell:
+    st.error("📉 空单信号：放量跌破 → 做空观察")
+else:
+    st.info("⏳ 观察区：等待放量信号")
+
+# ======= 止损止盈 =======
+st.subheader("💰 风险与目标计算")
+if direction:
+    st.write(f"方向：{'做多' if direction=='long' else '做空'}")
+    st.write(f"开仓价：{entry_price}")
+    st.write(f"止损位：{stop}")
+    st.write(f"止盈位：{target}")
+    st.write("盈亏比：1 : 1.5（固定）")
+else:
+    st.write("暂无开仓信号，风险计算关闭")
+
+# ======= 最新K线表 =======
+st.subheader("📋 最新5根K线（含成交量）")
+st.dataframe(df.tail())
