@@ -1,122 +1,63 @@
 import streamlit as st
-import requests
 import pandas as pd
-from config import API_URL, INSTRUMENT, BAR, LIMIT
+import joblib
 
-st.title("AI智能量价自动分析系统（真实行情版）")
+st.title("AI智能量价自动分析系统")
+
+# 加载模型
+try:
+    model = joblib.load("eth_ai_model.pkl")
+except Exception as e:
+    st.error(f"模型加载失败：{e}")
+    st.stop()
 
 st.write("""
-系统功能：
-- 实时获取5分钟K线
-- 只用K线 + 成交量分析
-- 自动多空建议
-- 语音播报文案
+输入5分钟K线：
+格式：开,高,低,收,量
+每行一根
 """)
 
-def fetch_klines():
-    params = {
-        "instId": INSTRUMENT,
-        "bar": BAR,
-        "limit": LIMIT
-    }
-    resp = requests.get(API_URL, params=params)
-    data = resp.json()
-
-    if data.get("code") != "0":
-        return None
-
-    rows = []
-    for item in data["data"]:
-        # OKX返回：ts, o, h, l, c, vol
-        rows.append({
-            "timestamp": item[0],
-            "open": float(item[1]),
-            "high": float(item[2]),
-            "low": float(item[3]),
-            "close": float(item[4]),
-            "vol": float(item[5])
-        })
-
-    df = pd.DataFrame(rows)
-    df = df.iloc[::-1].reset_index(drop=True)  # 时间正序
-    return df
+data = st.text_area(
+    "K线数据",
+    """100,105,98,102,5000
+102,108,101,107,8000
+107,110,105,109,12000"""
+)
 
 def analyze(df):
-    avg_vol = df["vol"].rolling(5).mean()
-    last = df.iloc[-1]
-    prev_high = df["high"].max()
-    prev_low = df["low"].min()
+    df["return"] = df["close"].pct_change()
+    df["vol_change"] = df["vol"].pct_change()
 
-    is_shrink = last["vol"] < (avg_vol.iloc[-1] * 0.6)
-    is_expand = last["vol"] > (avg_vol.iloc[-1] * 1.5)
+    features = df[["return", "vol_change"]].fillna(0).iloc[-1:].values
 
-    break_up = last["close"] > prev_high
-    break_down = last["close"] < prev_low
+    try:
+        pred = model.predict(features)[0]
+    except:
+        return "观望", "模型预测失败"
 
-    if is_expand and break_up:
-        direction = "做多"
-        reason = "放量突破前高，多头资金进场"
-        sl = prev_low
-        tp1 = last["close"] * 1.01
-        tp2 = last["close"] * 1.02
-        match = "放量起涨，突破前高，直接开多"
-    elif is_expand and break_down:
-        direction = "做空"
-        reason = "放量跌破前低，空头力量占优"
-        sl = prev_high
-        tp1 = last["close"] * 0.99
-        tp2 = last["close"] * 0.98
-        match = "放量杀跌，跌破前低，直接开空"
-    elif is_shrink:
-        direction = "观望"
-        reason = "缩量动能衰竭"
-        sl = tp1 = tp2 = None
-        match = "缩量提醒，只看不动"
+    if pred == 1:
+        return "做多", "模型预测多头概率高"
+    elif pred == -1:
+        return "做空", "模型预测空头概率高"
     else:
-        direction = "观望"
-        reason = "量能不明"
-        sl = tp1 = tp2 = None
-        match = "等待放量信号"
+        return "观望", "多空分歧"
 
-    return {
-        "direction": direction,
-        "reason": reason,
-        "match": match,
-        "last": last,
-        "prev_high": prev_high,
-        "prev_low": prev_low,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tts": (
-            f"当前{match}，建议{direction}，止损{sl:.2f}，目标{tp1:.2f}"
-            if direction != "观望"
-            else "缩量或量能不明，保持观望"
-        )
-    }
+if data:
+    rows = []
+    for line in data.strip().splitlines():
+        try:
+            o,h,l,c,v = map(float, line.split(","))
+            rows.append({"open":o,"high":h,"low":l,"close":c,"vol":v})
+        except:
+            st.warning(f"无法解析：{line}")
 
-df = fetch_klines()
+    if rows:
+        df = pd.DataFrame(rows)
+        direction, reason = analyze(df)
 
-if df is not None:
-    st.subheader("最近K线数据")
-    st.dataframe(df)
+        st.subheader("AI分析")
+        st.write(f"方向：{direction}")
+        st.write(f"理由：{reason}")
+        st.write(f"收盘：{df.iloc[-1]['close']:.2f}")
 
-    result = analyze(df)
-
-    st.subheader("AI自动分析")
-    st.write(f"方向建议：**{result['direction']}**")
-    st.write(f"匹配口诀：{result['match']}")
-    st.write(f"分析理由：{result['reason']}")
-    st.write(f"当前收盘：{result['last']['close']:.2f}")
-    st.write(f"前高：{result['prev_high']:.2f} / 前低：{result['prev_low']:.2f}")
-
-    if result["direction"] != "观望":
-        st.write(f"止损：{result['sl']:.2f}")
-        st.write(f"止盈：TP1 {result['tp1']:.2f} / TP2 {result['tp2']:.2f}")
-
-    st.subheader("语音播报")
-    st.write(result["tts"])
-
-    st.info("风险提示：5分钟波动大，严格止损")
-else:
-    st.error("行情获取失败，请检查网络或API")
+        st.info("风险提示：仅供参考，严格止损")
