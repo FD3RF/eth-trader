@@ -10,7 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="ETH AI 终极盯盘", layout="wide")
 
-# 自动刷新（5秒）
+# 自动刷新
 st_autorefresh(interval=5000, key="refresh")
 
 # ======================
@@ -280,7 +280,7 @@ def ai_predict(df):
 
 
 # ======================
-# AI引擎
+# AI引擎（核心）
 # ======================
 def ai_engine(df, ticker):
     curr = df.iloc[-1]
@@ -305,10 +305,12 @@ def ai_engine(df, ticker):
     whale = detect_whale_pump(df)
     dump = detect_dump(df)
     fake = detect_fake_breakout(df, res, sup)
+    acc = detect_accumulation(df)
     reversal = trend(df) if trend(df) in ("up","down") else None
 
     status = {"action":"AI 扫描中","motto":"静观其变","color":"#121212","voice":None}
 
+    # 特殊检测
     if whale:
         status.update({"action":"庄家拉升","motto":"资金异动","color":"#1B5E20","voice":"检测庄家拉升"})
     if dump:
@@ -318,6 +320,7 @@ def ai_engine(df, ticker):
     if fake == "fake_down":
         status.update({"action":"假跌破","motto":"跌破无量","color":"#880E4F","voice":"假跌破警告"})
 
+    # 口诀
     if vol_ratio > 1.6 and price > res:
         status.update({"action":"直接开多","motto":"放量突破","color":"#1B5E20","voice":"放量起涨"})
     elif vol_ratio > 1.6 and price < sup:
