@@ -410,7 +410,7 @@ def render():
         ))
 
     fig.update_layout(template="plotly_dark", height=500)
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 render()
