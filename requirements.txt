@@ -1,7 +1,7 @@
-streamlit
-streamlit-autorefresh
+streamlit==1.32.2
 pandas
-ccxt
+ccxt==4.4.40
 plotly
 joblib
 scikit-learn
+streamlit-autorefresh
