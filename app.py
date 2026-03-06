@@ -10,13 +10,9 @@ st.set_page_config(page_title="ETH AI 终极播报", layout="wide")
 # ====== 状态锁 ======
 if "signal_memory" not in st.session_state:
     st.session_state.signal_memory = {"last_key": None}
-if "auto" not in st.session_state:
-    st.session_state.auto = True
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = datetime.now()
 
+# ====== 语音 ======
 def ai_voice_broadcast(text):
-    """语音播报"""
     js = f"""
     <script>
     try {{
@@ -29,76 +25,148 @@ def ai_voice_broadcast(text):
     """
     st.components.v1.html(js, height=0)
 
-# ====== 数据源（重试+安全）======
+# ====== 交易所 ======
 @st.cache_resource
 def init_exchange():
-    return ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+    return ccxt.okx({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'swap'}
+    })
 
+# ====== 获取数据 ======
 def fetch_data():
+
     ex = init_exchange()
+
     for _ in range(3):
         try:
-            bars = ex.fetch_ohlcv('ETH/USDT:USDT', timeframe='5m', limit=100)
+
+            bars = ex.fetch_ohlcv(
+                'ETH/USDT:USDT',
+                timeframe='5m',
+                limit=120
+            )
+
             ticker = ex.fetch_ticker('ETH/USDT:USDT')
 
-            df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
+            df = pd.DataFrame(
+                bars,
+                columns=['ts','open','high','low','close','vol']
+            )
+
             df['ts_dt'] = pd.to_datetime(df['ts'], unit='ms')
+
             return df, ticker
+
         except Exception:
             time.sleep(1)
+
     return None, None
 
-# ====== 引擎（口诀对齐+均量保护）======
+# ====== 背离判定 ======
+def is_bottom_divergence(df):
+
+    if len(df) < 25:
+        return False
+
+    low1 = df['low'].iloc[-1]
+    low2 = df['low'].iloc[-2]
+
+    vol1 = df['vol'].iloc[-1]
+
+    avg_vol = df['vol'].iloc[-21:-1].mean()
+
+    if pd.isna(avg_vol) or avg_vol == 0:
+        return False
+
+    return (
+        low1 < low2 and
+        vol1 < avg_vol * 0.6 and
+        df['close'].iloc[-1] > df['close'].iloc[-2]
+    )
+
+def is_top_divergence(df):
+
+    if len(df) < 25:
+        return False
+
+    high1 = df['high'].iloc[-1]
+    high2 = df['high'].iloc[-2]
+
+    vol1 = df['vol'].iloc[-1]
+
+    avg_vol = df['vol'].iloc[-21:-1].mean()
+
+    if pd.isna(avg_vol) or avg_vol == 0:
+        return False
+
+    return (
+        high1 > high2 and
+        vol1 < avg_vol * 0.6 and
+        df['close'].iloc[-1] < df['close'].iloc[-2]
+    )
+
+# ====== AI策略引擎 ======
 def ai_engine(df, ticker):
+
     curr = df.iloc[-1]
+
     price = curr['close']
 
     avg_vol = df['vol'].iloc[-21:-1].mean()
-    vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 1
 
-    res_5m = df['high'].iloc[-31:-1].max()
-    sup_5m = df['low'].iloc[-31:-1].min()
-    h24, l24 = ticker['high'], ticker['low']
+    if pd.isna(avg_vol) or avg_vol == 0:
+        avg_vol = 1
 
-    lr = (res_5m - price) / (price - sup_5m) if (price - sup_5m) > 0.1 else 0
-    sr = (price - sup_5m) / (res_5m - price) if (res_5m - price) > 0.1 else 0
+    vol_ratio = curr['vol'] / avg_vol
+
+    res = df['high'].iloc[-31:-1].max()
+    sup = df['low'].iloc[-31:-1].min()
+
+    h24 = ticker['high']
+    l24 = ticker['low']
+
+    lr = (res - price) / (price - sup) if (price - sup) > 0.1 else 0
+    sr = (price - sup) / (res - price) if (res - price) > 0.1 else 0
 
     status = {
         "action": "AI 扫描中",
         "motto": "静观其变",
         "color": "#121212",
-        "voice": None,
-        "flash": None
+        "voice": None
     }
 
-    # 放量突破（口诀）
-    if vol_ratio > 1.6 and price > res_5m:
+    # ===== 口诀 =====
+
+    if vol_ratio > 1.6 and price > res:
+
         status.update({
             "action": "直接开多",
             "motto": "放量起涨，突破前高",
             "color": "#1B5E20",
-            "voice": "放量起涨，突破前高，直接开多",
-            "flash": "gold"
+            "voice": "放量起涨，突破前高，直接开多"
         })
-    # 放量跌破
-    elif vol_ratio > 1.6 and price < sup_5m:
+
+    elif vol_ratio > 1.6 and price < sup:
+
         status.update({
             "action": "直接开空",
             "motto": "放量下跌，跌破前低",
             "color": "#B71C1C",
-            "voice": "放量下跌，跌破前低，直接开空",
-            "flash": "purple"
+            "voice": "放量下跌，跌破前低，直接开空"
         })
-    # 缩量回踩
-    elif vol_ratio < 0.5 and price <= sup_5m * 1.002 and price < curr['open']:
+
+    elif vol_ratio < 0.5 and price <= sup * 1.002 and price < curr['open']:
+
         status.update({
             "action": "准备动手(多)",
             "motto": "缩量回踩，低点不破",
             "color": "#0D47A1",
             "voice": "缩量回踩，低点不破，准备动手"
         })
-    # 缩量反弹
-    elif vol_ratio < 0.5 and price >= res_5m * 0.998 and price > curr['open']:
+
+    elif vol_ratio < 0.5 and price >= res * 0.998 and price > curr['open']:
+
         status.update({
             "action": "准备动手(空)",
             "motto": "缩量反弹，高点不破",
@@ -106,37 +174,39 @@ def ai_engine(df, ticker):
             "voice": "缩量反弹，高点不破，准备动手"
         })
 
-    return status, vol_ratio, res_5m, sup_5m, lr, sr, h24, l24
+    return status, vol_ratio, res, sup, lr, sr, h24, l24
 
-# ====== UI渲染（三角+支撑压力）======
+# ====== UI渲染 ======
 def render():
+
     df, ticker = fetch_data()
-    if df is None or ticker is None:
-        st.warning("数据暂不可用，正在重试…")
+
+    if df is None:
+        st.warning("数据异常")
         return
 
     status, vr, res, sup, lr, sr, h24, l24 = ai_engine(df, ticker)
 
-    # 防重复播报
     key = f"{status['action']}_{df.iloc[-1]['ts']}"
-    if st.session_state.signal_memory["last_key"] != key and status.get("voice"):
+
+    if st.session_state.signal_memory["last_key"] != key and status["voice"]:
+
         ai_voice_broadcast(status["voice"])
+
         st.session_state.signal_memory["last_key"] = key
 
     st.markdown(f"""
     <div style="background:{status['color']};padding:25px;border-radius:15px;text-align:center;">
-        <h1 style="color:white;margin:0">{status['action']}</h1>
+        <h1 style="color:white">{status['action']}</h1>
         <h3 style="color:#FFD700">{status['motto']}</h3>
     </div>
     """, unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
-    with col1:
-        st.metric("24H 最高", f"{h24:.2f}")
-    with col2:
-        st.metric("24H 最低", f"{l24:.2f}")
 
-    # ====== K线图（三角+虚线）======
+    col1.metric("24H 最高", f"{h24:.2f}")
+    col2.metric("24H 最低", f"{l24:.2f}")
+
     fig = go.Figure(data=[go.Candlestick(
         x=df['ts_dt'],
         open=df['open'],
@@ -145,60 +215,59 @@ def render():
         close=df['close']
     )])
 
-    # 压力位（紫色虚线）
+    # 压力
     fig.add_shape(
         type="line",
         x0=df['ts_dt'].min(),
         x1=df['ts_dt'].max(),
-        y0=2088.78,
-        y1=2088.78,
-        line=dict(color="purple", width=2, dash="dash")
+        y0=res,
+        y1=res,
+        line=dict(color="purple", dash="dash")
     )
 
-    # 支撑位（蓝色虚线）
+    # 支撑
     fig.add_shape(
         type="line",
         x0=df['ts_dt'].min(),
         x1=df['ts_dt'].max(),
-        y0=2058.26,
-        y1=2058.26,
-        line=dict(color="blue", width=2, dash="dash")
+        y0=sup,
+        y1=sup,
+        line=dict(color="blue", dash="dash")
     )
 
-    # 三角：底背离（绿）
-    if status["action"] == "准备动手(多)":
-        low_idx = df['low'].idxmin()
+    # 背离
+    if is_bottom_divergence(df):
+
+        idx = df['low'].idxmin()
+
         fig.add_trace(go.Scatter(
-            x=[df.loc[low_idx, 'ts_dt']],
-            y=[df.loc[low_idx, 'low']],
+            x=[df.loc[idx,'ts_dt']],
+            y=[df.loc[idx,'low']],
             mode="markers",
-            marker=dict(symbol="triangle-up", size=16, color="green"),
+            marker=dict(symbol="triangle-up",size=16,color="green"),
             name="底背离"
         ))
 
-    # 三角：顶背离（红）
-    if status["action"] == "直接开空" or status["action"] == "准备动手(空)":
-        high_idx = df['high'].idxmax()
+    if is_top_divergence(df):
+
+        idx = df['high'].idxmax()
+
         fig.add_trace(go.Scatter(
-            x=[df.loc[high_idx, 'ts_dt']],
-            y=[df.loc[high_idx, 'high']],
+            x=[df.loc[idx,'ts_dt']],
+            y=[df.loc[idx,'high']],
             mode="markers",
-            marker=dict(symbol="triangle-down", size=16, color="red"),
+            marker=dict(symbol="triangle-down",size=16,color="red"),
             name="顶背离"
         ))
 
-    fig.update_layout(template="plotly_dark", height=450)
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(template="plotly_dark",height=450)
+
+    st.plotly_chart(fig,use_container_width=True)
 
     st.caption(f"量比: {vr:.2f}x | 多盈亏比: {lr:.2f} | 空盈亏比: {sr:.2f}")
 
-# ====== 自动扫描 ======
 render()
 
-# 自动刷新（5秒）
-now = datetime.now()
-if (now - st.session_state.last_refresh).total_seconds() < 5:
-    time.sleep(5)
-
-st.session_state.last_refresh = datetime.now()
+# 自动刷新
+time.sleep(5)
 st.rerun()
