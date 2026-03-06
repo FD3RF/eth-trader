@@ -2,4 +2,3 @@ streamlit
 pandas
 plotly
 numpy
-ccxt==4.1.80
