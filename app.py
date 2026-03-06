@@ -3,240 +3,138 @@ import pandas as pd
 import ccxt
 import plotly.graph_objects as go
 import time
-import joblib
-from sklearn.ensemble import RandomForestClassifier
+from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
+# --- 1. 系统核心配置与自动刷新 ---
 st.set_page_config(page_title="ETH AI 终极盯盘", layout="wide")
-
-# 自动刷新
+# 5秒自动刷新，确保信号即时性
 st_autorefresh(interval=5000, key="refresh")
 
-# 状态锁
+# 状态锁：优化播报逻辑
 if "signal_memory" not in st.session_state:
-    st.session_state.signal_memory = {"last_key": None}
-
-if "last_voice_time" not in st.session_state:
-    st.session_state.last_voice_time = 0
-
-MODEL_FILE = "ai_model.pkl"
-
-# 交易参数
-INSTRUMENT = "ETH/USDT:USDT"
-TIMEFRAME = "5m"
-LIMIT = 150
-
+    st.session_state.signal_memory = {"last_key": None, "last_time": 0}
 
 def ai_voice_broadcast(text):
+    """精准语音引擎：防止短时间内重复轰炸"""
     js = f"""
     <script>
     try {{
         var msg = new SpeechSynthesisUtterance("{text}");
-        msg.lang='zh-CN';
-        msg.rate=1.15;
+        msg.lang='zh-CN'; msg.rate=1.2;
         window.speechSynthesis.speak(msg);
     }} catch(e) {{}}
     </script>
     """
     st.components.v1.html(js, height=0)
 
-
+# --- 2. 数据获取与性能计算 ---
 @st.cache_resource
 def init_exchange():
     return ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
-
 def fetch_data():
     ex = init_exchange()
-    for _ in range(3):
-        try:
-            bars = ex.fetch_ohlcv(INSTRUMENT, timeframe=TIMEFRAME, limit=LIMIT)
-            if not bars or len(bars) < 60:
-                continue
-            df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
-            df['ts_dt'] = pd.to_datetime(df['ts'], unit='ms')
-            df = df.dropna()
-            return df
-        except Exception:
-            time.sleep(1)
-    return None
+    try:
+        # 增加 limit 以支持 MA50 及更高周期的计算
+        bars = ex.fetch_ohlcv("ETH/USDT:USDT", timeframe="5m", limit=150)
+        df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
+        df['ts_dt'] = pd.to_datetime(df['ts'], unit='ms')
+        return df.dropna()
+    except Exception as e:
+        return None
 
-
-def trend(df):
+# --- 3. 核心口诀与行为检测引擎 ---
+def get_indicators(df):
+    # 趋势判定：MA20 与 MA50 交叉
     ma20 = df['close'].rolling(20).mean()
     ma50 = df['close'].rolling(50).mean()
-    if ma20.iloc[-1] > ma50.iloc[-1]:
-        return "up"
-    if ma20.iloc[-1] < ma50.iloc[-1]:
-        return "down"
-    return "side"
-
-
-def trend_strength(df):
-    ma20 = df['close'].rolling(20).mean()
-    ma50 = df['close'].rolling(50).mean()
+    curr_trend = "up" if ma20.iloc[-1] > ma50.iloc[-1] else "down"
+    
+    # 动态压力支撑：使用 95% 分位数过滤极端插针，更精准
+    res = df['high'].iloc[-40:-1].quantile(0.95)
+    sup = df['low'].iloc[-40:-1].quantile(0.05)
+    
+    # 趋势强度 (计算斜率与乖离率)
     slope = ma20.diff().iloc[-5:].mean()
-    distance = abs(ma20.iloc[-1] - ma50.iloc[-1])
     volatility = df['close'].pct_change().rolling(20).std().iloc[-1]
-    if pd.isna(volatility) or volatility == 0:
-        volatility = 0.0001
-    return round((distance / volatility) * abs(slope), 2)
-
-
-def is_bottom_divergence(df):
-    if len(df) < 60 or trend(df) != "down":
-        return False
-    low1 = df['low'].iloc[-1]
-    low2 = df['low'].iloc[-2]
-    avg = df['vol'].iloc[-50:-1].median()
-    momentum = df['close'].diff().rolling(3).mean().iloc[-1]
-    return low1 < low2 and df['vol'].iloc[-1] < avg * 0.6 and df['close'].iloc[-1] > df['close'].iloc[-2] and momentum > 0
-
-
-def is_top_divergence(df):
-    if len(df) < 60 or trend(df) != "up":
-        return False
-    high1 = df['high'].iloc[-1]
-    high2 = df['high'].iloc[-2]
-    avg = df['vol'].iloc[-50:-1].median()
-    momentum = df['close'].diff().rolling(3).mean().iloc[-1]
-    return high1 > high2 and df['vol'].iloc[-1] < avg * 0.6 and df['close'].iloc[-1] < df['close'].iloc[-2] and momentum < 0
-
-
-def detect_fake_breakout(df, res, sup):
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    avg = df['vol'].iloc[-50:-1].median()
-    if curr['close'] > res and curr['vol'] < avg * 0.8 and prev['close'] < res:
-        return "假突破（无量上破）"
-    if curr['close'] < sup and curr['vol'] < avg * 0.8 and prev['close'] > sup:
-        return "假跌破（无量下破）"
-    return None
-
-
-def detect_accumulation(df):
-    if len(df) < 80:
-        return False
-    price_range = df['high'].iloc[-30:].max() - df['low'].iloc[-30:].min()
-    avg_vol = df['vol'].iloc[-50:-1].median()
-    recent_vol = df['vol'].iloc[-10:].mean()
-    return price_range / df['close'].iloc[-1] < 0.02 and recent_vol > avg_vol * 1.3
-
-
-def detect_whale_pump(df):
-    if len(df) < 60:
-        return False
-    return df['vol'].iloc[-3:].mean() > df['vol'].iloc[-50:-3].mean() * 2 and df['close'].iloc[-1] > df['close'].iloc[-5]
-
-
-def detect_dump(df):
-    avg = df['vol'].iloc[-50:-1].mean()
-    return df['vol'].iloc[-1] > avg * 2 and df['close'].iloc[-1] < df['close'].iloc[-2] * 0.99
-
+    strength = round((abs(slope) / (volatility if volatility > 0 else 0.001)), 2)
+    
+    return curr_trend, res, sup, strength
 
 def ai_engine(df):
     curr = df.iloc[-1]
-    price = curr['close']
+    prev = df.iloc[-2]
     avg_vol = df['vol'].iloc[-50:-1].median()
-    if pd.isna(avg_vol) or avg_vol == 0:
-        avg_vol = 1
-    vol_ratio = curr['vol'] / avg_vol
+    vol_ratio = curr['vol'] / (avg_vol if avg_vol > 0 else 1)
+    
+    trend_dir, res, sup, strength = get_indicators(df)
+    
+    status = {"action": "AI 扫描中", "motto": "等待量价共振", "color": "#121212", "voice": ""}
 
-    res = df['high'].iloc[-40:-1].quantile(0.95)
-    sup = df['low'].iloc[-40:-1].quantile(0.05)
+    # A. 极端异动判定 (高优先级)
+    # 庄家拉升：量能翻倍且价格连续上涨
+    is_whale = df['vol'].iloc[-3:].mean() > avg_vol * 2.5 and curr['close'] > df['close'].iloc[-3]
+    # 暴力砸盘：巨量且跌幅超过 1%
+    is_dump = curr['vol'] > avg_vol * 3 and curr['close'] < prev['close'] * 0.99
 
-    strength = trend_strength(df)
-    fake = detect_fake_breakout(df, res, sup)
-    resonance = trend(df)
+    # B. 核心交易口诀
+    # 1. 突破判定 (放量)
+    if vol_ratio > 1.6 and curr['close'] > res:
+        status.update({"action": "直接开多", "motto": "放量突破压力位", "color": "#1B5E20", "voice": "放量突破，直接开多"})
+    elif vol_ratio > 1.6 and curr['close'] < sup:
+        status.update({"action": "直接开空", "motto": "放量跌破支撑位", "color": "#B71C1C", "voice": "放量跌破，直接开空"})
+    
+    # 2. 假突破判定 (无量)
+    elif curr['close'] > res and vol_ratio < 0.8:
+        status.update({"action": "假突破", "motto": "警惕诱多回落", "color": "#4A148C", "voice": "检测到假突破"})
+    
+    # 3. 缩量机会
+    elif vol_ratio < 0.5 and curr['close'] <= sup * 1.001:
+        status.update({"action": "准备多", "motto": "缩量测试支撑", "color": "#0D47A1", "voice": "缩量回踩完毕"})
+    
+    # 特殊提醒叠加
+    if is_whale: status.update({"action": "庄家抢筹", "color": "#2E7D32", "voice": "检测到主力吸筹"})
+    if is_dump: status.update({"action": "砸盘逃命", "color": "#D32F2F", "voice": "巨量砸盘，快跑"})
 
-    status = {"action": "静观其变", "motto": "等待信号", "color": "#121212", "voice": "AI扫描中"}
+    return status, trend_dir, strength, res, sup
 
-    if detect_whale_pump(df):
-        status.update({"action": "庄家拉升", "motto": "资金异动", "color": "#1B5E20", "voice": "检测庄家拉升"})
-    if detect_dump(df):
-        status.update({"action": "砸盘预警", "motto": "注意风险", "color": "#B71C1C", "voice": "检测砸盘预警"})
-    if fake:
-        status.update({"action": fake, "motto": "无量信号", "color": "#4A148C", "voice": fake})
-    if vol_ratio > 1.6 and price > res:
-        status.update({"action": "直接开多", "motto": "放量突破", "color": "#1B5E20", "voice": "放量起涨做多"})
-    elif vol_ratio > 1.6 and price < sup:
-        status.update({"action": "直接开空", "motto": "放量跌破", "color": "#B71C1C", "voice": "放量跌破做空"})
-    elif vol_ratio < 0.6 and price <= sup*1.002:
-        status.update({"action": "准备多", "motto": "缩量回踩", "color": "#0D47A1", "voice": "缩量回踩观察"})
-    elif vol_ratio < 0.6 and price >= res*0.998:
-        status.update({"action": "准备空", "motto": "缩量反弹", "color": "#E65100", "voice": "缩量反弹观察"})
-
-    return status, resonance, strength
-
-
+# --- 4. 渲染引擎 ---
 def render():
     df = fetch_data()
     if df is None:
-        st.warning("数据异常：无法获取K线")
+        st.error("数据链路中断，正在重新拨号...")
         return
 
-    status, resonance, strength = ai_engine(df)
-
+    status, trend_dir, strength, res, sup = ai_engine(df)
+    
+    # 语音播报：加入 15 秒冷却防止刷屏
     now = time.time()
-    key = status["action"]
+    if (st.session_state.signal_memory["last_key"] != status["action"] or 
+        now - st.session_state.signal_memory["last_time"] > 15):
+        if status["voice"]:
+            ai_voice_broadcast(status["voice"])
+            st.session_state.signal_memory["last_key"] = status["action"]
+            st.session_state.signal_memory["last_time"] = now
 
-    if (
-        st.session_state.signal_memory["last_key"] != key
-        and status["voice"]
-        and now - st.session_state.last_voice_time > 20
-    ):
-        ai_voice_broadcast(status["voice"])
-        st.session_state.signal_memory["last_key"] = key
-        st.session_state.last_voice_time = now
-
+    # 顶端大屏
     st.markdown(f"""
-    <div style="background:{status['color']};padding:25px;border-radius:15px;text-align:center;">
-        <h1 style="color:white">{status['action']}</h1>
-        <h3 style="color:#FFD700">{status['motto']}</h3>
-    </div>
+        <div style="background:{status['color']}; padding:30px; border-radius:15px; text-align:center; border: 3px solid #FFD700;">
+            <h1 style="color:white; font-size:60px; margin:0;">{status['action']}</h1>
+            <h3 style="color:#FFD700; margin-top:10px;">趋势: {trend_dir.upper()} | 强度: {strength}</h3>
+        </div>
     """, unsafe_allow_html=True)
 
-    st.write("多周期共振:", resonance)
-    st.write("趋势强度:", strength)
-
-    if detect_accumulation(df):
-        st.success("检测主力吸筹")
-    if detect_whale_pump(df):
-        st.success("庄家拉升")
-    if detect_dump(df):
-        st.error("砸盘预警")
-
+    # K线可视化
+    
     fig = go.Figure(data=[go.Candlestick(
-        x=df['ts_dt'],
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close']
+        x=df['ts_dt'], open=df['open'], high=df['high'], low=df['low'], close=df['close']
     )])
+    fig.add_hline(y=res, line_dash="dash", line_color="#FF00FF", annotation_text="95% 压力")
+    fig.add_hline(y=sup, line_dash="dash", line_color="#00FFFF", annotation_text="5% 支撑")
+    fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
+    st.plotly_chart(fig, use_container_width=True)
 
-    fig.add_hline(y=df['high'].iloc[-40:-1].quantile(0.95), line_dash="dash")
-    fig.add_hline(y=df['low'].iloc[-40:-1].quantile(0.05), line_dash="dash")
-
-    if is_bottom_divergence(df):
-        fig.add_trace(go.Scatter(
-            x=[df.iloc[-1]['ts_dt']],
-            y=[df.iloc[-1]['low']],
-            mode="markers",
-            marker=dict(symbol="triangle-up", size=16),
-            name="底背离"
-        ))
-
-    if is_top_divergence(df):
-        fig.add_trace(go.Scatter(
-            x=[df.iloc[-1]['ts_dt']],
-            y=[df.iloc[-1]['high']],
-            mode="markers",
-            marker=dict(symbol="triangle-down", size=16),
-            name="顶背离"
-        ))
-
-    fig.update_layout(template="plotly_dark", height=500)
-    st.plotly_chart(fig, width="stretch")
-
+    st.caption(f"🛡️ 终极盯盘系统运行中 | 刷新: {datetime.now().strftime('%H:%M:%S')}")
 
 render()
