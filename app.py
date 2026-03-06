@@ -6,18 +6,23 @@ from datetime import datetime
 
 st.set_page_config(page_title="ETH 合约AI智能播报", layout="wide")
 
-st.title("📊 ETH 合约5分钟量价AI播报（含真实成交量）")
+st.title("📊 ETH 合约5分钟量价AI播报")
 
-# ======= 获取K线与合约成交量（Binance）=======
+# ======= 获取K线数据 =======
 def get_klines():
     url = "https://api.binance.com/api/v3/klines"
-    params = {
-        "symbol": "ETHUSDT",
-        "interval": "5m",
-        "limit": 100
-    }
-    resp = requests.get(url, params=params)
-    data = resp.json()
+    params = {"symbol": "ETHUSDT", "interval": "5m", "limit": 100}
+    try:
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+    except Exception as e:
+        st.error(f"数据请求失败: {e}")
+        return pd.DataFrame()
+
+    # 如果API返回错误
+    if not isinstance(data, list) or len(data) == 0:
+        st.error("API返回空数据，可能被限流或网络异常")
+        return pd.DataFrame()
 
     df = pd.DataFrame(data, columns=[
         "open_time", "open", "high", "low", "close", "volume",
@@ -30,38 +35,24 @@ def get_klines():
     df["open"] = df["open"].astype(float)
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)  # 合约真实成交量（基础成交量）
+    df["volume"] = df["volume"].astype(float)
 
     return df
 
-# ======= 止损止盈计算 =======
-def risk_calc(entry, direction, recent_high, recent_low):
-    """
-    direction: 'long' or 'short'
-    止损：关键位外扩1-2个价位
-    止盈：1:1.5 盈亏比
-    """
-    if direction == "long":
-        stop = recent_low - (recent_low * 0.001)  # 低点下方0.1%
-        risk = entry - stop
-        target = entry + risk * 1.5
-    else:
-        stop = recent_high + (recent_high * 0.001)
-        risk = stop - entry
-        target = entry - risk * 1.5
-
-    return round(stop, 4), round(target, 4)
-
-# ======= 量价与口诀信号 =======
+# ======= 信号逻辑 =======
 def signal_logic(df):
+    # 数据保护：空表直接返回
+    if df.empty or len(df) < 2:
+        return False, False, "数据不足，等待加载", None, None
+
     last = df.iloc[-1]
-    prev_vol = df["volume"].iloc[-6:-1].mean()
+    prev_vol = df["volume"].iloc[-6:-1].mean() if len(df) > 6 else df["volume"].mean()
 
-    is_low_vol = last["volume"] < prev_vol * 0.6
-    is_high_vol = last["volume"] > prev_vol * 1.5
+    is_low_vol = last["volume"] < (prev_vol * 0.6 if prev_vol > 0 else 1)
+    is_high_vol = last["volume"] > (prev_vol * 1.5 if prev_vol > 0 else 1)
 
-    recent_high = df["high"].iloc[-20:].max()
-    recent_low = df["low"].iloc[-20:].min()
+    recent_high = df["high"].tail(20).max()
+    recent_low = df["low"].tail(20).min()
     close = last["close"]
     low = last["low"]
     high = last["high"]
@@ -70,14 +61,12 @@ def signal_logic(df):
     sell = False
     motto = "等待信号"
 
-    # 做多口诀
+    # 多空口诀
     if is_low_vol and low >= recent_low:
         motto = "缩量回踩，低点不破 → 观察"
     if is_high_vol and close > df["high"].iloc[-2]:
         buy = True
         motto = "放量起涨，突破前高 → 做多"
-
-    # 做空口诀
     if is_low_vol and high <= recent_high:
         motto = "缩量反弹，高点不破 → 观察"
     if is_high_vol and close < df["low"].iloc[-2]:
@@ -86,16 +75,14 @@ def signal_logic(df):
 
     return buy, sell, motto, recent_high, recent_low
 
-# ======= 数据与信号 =======
+# ======= 主流程 =======
 df = get_klines()
+
+if df.empty:
+    st.warning("暂无数据，等待下一次刷新")
+    st.stop()
+
 buy, sell, motto, high, low = signal_logic(df)
-
-entry_price = df.iloc[-1]["close"]
-direction = "long" if buy else "short" if sell else None
-
-stop = target = None
-if direction:
-    stop, target = risk_calc(entry_price, direction, high, low)
 
 # ======= K线图 =======
 fig = go.Figure()
@@ -122,8 +109,8 @@ fig.add_trace(go.Scatter(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ======= 播报区 =======
-st.subheader("🤖 AI 智能播报")
+# ======= 播报 =======
+st.subheader("🤖 AI 播报")
 st.write(f"最新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 st.write(f"智能口诀：{motto}")
 
@@ -134,17 +121,6 @@ elif sell:
 else:
     st.info("⏳ 观察区：等待放量信号")
 
-# ======= 止损止盈 =======
-st.subheader("💰 风险与目标计算")
-if direction:
-    st.write(f"方向：{'做多' if direction=='long' else '做空'}")
-    st.write(f"开仓价：{entry_price}")
-    st.write(f"止损位：{stop}")
-    st.write(f"止盈位：{target}")
-    st.write("盈亏比：1 : 1.5（固定）")
-else:
-    st.write("暂无开仓信号，风险计算关闭")
-
-# ======= 最新K线表 =======
-st.subheader("📋 最新5根K线（含成交量）")
+# ======= 数据表 =======
+st.subheader("📋 最新K线")
 st.dataframe(df.tail())
