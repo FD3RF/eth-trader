@@ -2,6 +2,6 @@ streamlit
 pandas
 plotly
 ccxt==4.4.40
-joblib
 scikit-learn
+joblib
 streamlit-autorefresh
