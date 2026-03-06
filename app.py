@@ -4,18 +4,13 @@ import requests
 import plotly.graph_objects as go
 from datetime import datetime
 
-st.set_page_config(page_title="ETH 合约AI播报(OKX数据)", layout="wide")
+st.set_page_config(page_title="ETH 合约AI播报", layout="wide")
+st.title("📊 ETH 合约5分钟量价AI播报(OKX数据源)")
 
-st.title("📊 ETH 合约5分钟量价AI播报 - OKX数据源")
-
-# ======= 获取K线数据（OKX）=======
+# ======= 获取K线 =======
 def get_klines():
     url = "https://www.okx.com/api/v5/market/candles"
-    params = {
-        "instId": "ETH-USDT-SWAP",
-        "bar": "5m",
-        "limit": "100"
-    }
+    params = {"instId": "ETH-USDT-SWAP", "bar": "5m", "limit": "100"}
     try:
         resp = requests.get(url, timeout=5)
         data = resp.json()
@@ -23,9 +18,8 @@ def get_klines():
         st.error(f"请求失败: {e}")
         return pd.DataFrame()
 
-    # OKX 数据结构: data["data"]
     if "data" not in data or len(data["data"]) == 0:
-        st.warning("OKX返回空数据，可能网络限制")
+        st.warning("OKX返回空数据")
         return pd.DataFrame()
 
     rows = data["data"]
@@ -34,22 +28,25 @@ def get_klines():
         "volume", "volCcy", "volCcyQuote", "confirm"
     ])
 
-    # 时间戳转日期
     df["open_time"] = pd.to_datetime(df["open_time"].astype(int), unit="ms")
     df["close"] = df["close"].astype(float)
     df["open"] = df["open"].astype(float)
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)  # 合约成交量
+    df["volume"] = df["volume"].astype(float)
 
     return df
 
-# ======= 信号逻辑 =======
+# ======= 信号逻辑（安全版）=======
 def signal_logic(df):
-    if df.empty or len(df) < 2:
+    # 数据保护：行数不足直接返回
+    if df is None or df.empty or len(df) < 2:
         return False, False, "数据不足", None, None
 
     last = df.iloc[-1]
+    if last is None:
+        return False, False, "数据异常", None, None
+
     prev_vol = df["volume"].iloc[-6:-1].mean() if len(df) > 6 else df["volume"].mean()
 
     is_low_vol = last["volume"] < (prev_vol * 0.6 if prev_vol > 0 else 1)
@@ -65,7 +62,6 @@ def signal_logic(df):
     sell = False
     motto = "等待信号"
 
-    # 多空口诀
     if is_low_vol and low >= recent_low:
         motto = "缩量回踩，低点不破 → 观察"
     if is_high_vol and close > df["high"].iloc[-2]:
@@ -82,10 +78,11 @@ def signal_logic(df):
 # ======= 主流程 =======
 df = get_klines()
 
-if df.empty:
-    st.warning("暂无数据，可能网络受限")
+if df is None or df.empty:
+    st.warning("暂无数据，等待下一次刷新")
     st.stop()
 
+# 信号
 buy, sell, motto, high, low = signal_logic(df)
 
 # ======= K线图 =======
@@ -98,6 +95,8 @@ fig.add_trace(go.Candlestick(
     close=df["close"],
     name="ETH 5m"
 ))
+
+# 关键位
 fig.add_trace(go.Scatter(
     x=[df["open_time"].iloc[0], df["open_time"].iloc[-1]],
     y=[high, high],
@@ -115,16 +114,16 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ======= 播报 =======
 st.subheader("🤖 AI 播报")
-st.write(f"最新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.write(f"智能口诀：{motto}")
+st.write(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.write(f"口诀：{motto}")
 
 if buy:
-    st.success("📈 多单信号：放量突破 → 做多观察")
+    st.success("📈 多单信号")
 elif sell:
-    st.error("📉 空单信号：放量跌破 → 做空观察")
+    st.error("📉 空单信号")
 else:
-    st.info("⏳ 观察区：等待放量信号")
+    st.info("⏳ 观察区")
 
-# ======= 最新数据 =======
+# ======= 数据表 =======
 st.subheader("📋 最新K线")
 st.dataframe(df.tail())
