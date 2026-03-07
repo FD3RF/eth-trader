@@ -1,7 +1,7 @@
-streamlit==1.32.2
-pandas
-ccxt==4.4.40
-plotly
-joblib
-scikit-learn
-streamlit-autorefresh
+streamlit>=1.28.0
+pandas>=2.0.0
+ccxt>=4.0.0
+plotly>=5.15.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+streamlit-autorefresh>=0.1.7
